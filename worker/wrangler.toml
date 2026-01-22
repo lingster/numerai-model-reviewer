@@ -1,0 +1,30 @@
+name = "numerai-api-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-12-05"
+account_id = "bc2043c616d427139c181d21fc6274c7"
+
+# Custom domain configuration for API backend
+routes = [
+  { pattern = "numerdiff-api.imperialai.ai/*", zone_name = "imperialai.ai" }
+]
+
+# Environment variables (non-sensitive)
+[vars]
+ALLOWED_ORIGINS = "http://localhost:5173,https://numerdiff.imperialai.ai"
+RATE_LIMIT_REQUESTS = "100"
+RATE_LIMIT_WINDOW_SECONDS = "60"
+NUMERAI_API_URL = "https://api-tournament.numer.ai/graphql"
+
+# KV Namespace for rate limiting
+# Uncomment after creating: wrangler kv:namespace create "RATE_LIMIT"
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT"
+# id = "<your-kv-namespace-id>"
+
+# Secrets (set via wrangler secret put):
+# - NUMERAI_PUBLIC_KEY
+# - NUMERAI_SECRET_KEY
+#
+# Run these commands to set secrets:
+#   wrangler secret put NUMERAI_PUBLIC_KEY
+#   wrangler secret put NUMERAI_SECRET_KEY
