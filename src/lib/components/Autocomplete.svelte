@@ -186,7 +186,7 @@
 	{#if isOpen && filteredOptions.length > 0 && !disabled}
 		<ul
 			id={listboxId}
-			class="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-md retro-bg-secondary py-1 shadow-lg border-2 border-[var(--retro-crimson)]"
+			class="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-md retro-bg-secondary py-1 shadow-lg border-2 border-[var(--retro-primary)]"
 			role="listbox"
 		>
 			{#each filteredOptions as option, index}

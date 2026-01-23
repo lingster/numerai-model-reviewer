@@ -3,6 +3,7 @@
 	import Autocomplete from '$lib/components/Autocomplete.svelte';
 	import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
 	import { NumeraiAPI } from '$lib/numerai-api.js';
+	import { config } from '$lib/config.js';
 	import type { NumeraiUser, NumeraiModel, ModelPerformance, SavedChart } from '$lib/types.js';
 	import {
 		saveChart,
@@ -11,8 +12,13 @@
 		addRecentUserModel,
 		getRecentCharts,
 		addRecentChart,
+		getSelectedTournament,
+		setSelectedTournament,
+		TOURNAMENTS,
+		TOURNAMENT_INFO,
 		type RecentUserModel,
-		type RecentChart
+		type RecentChart,
+		type TournamentId
 	} from '$lib/utils/storage.js';
 	import { updateUrlWithChart, generateShareableUrl, clearUrlParams } from '$lib/utils/url.js';
 	import { replaceState } from '$app/navigation';
@@ -48,6 +54,12 @@
 	let chartName = $state('');
 	let shareableUrl = $state('');
 
+	// Tournament selection
+	let selectedTournament = $state<TournamentId>(TOURNAMENTS.CLASSIC);
+
+	// Computed theme class based on selected tournament
+	const themeClass = $derived(TOURNAMENT_INFO[selectedTournament].theme);
+
 	// Recent items
 	let recentUserModels = $state<RecentUserModel[]>([]);
 	let recentCharts = $state<RecentChart[]>([]);
@@ -63,8 +75,21 @@
 		startDate = thirtyDaysAgo.toISOString().split('T')[0];
 		endDate = now.toISOString().split('T')[0];
 
-		// Load saved charts and recent items
-		savedCharts = getSavedCharts();
+		// Load tournament from URL or localStorage
+		const url = new URL(window.location.href);
+		const tournamentParam = url.searchParams.get('tournament');
+		if (tournamentParam) {
+			const parsedTournament = parseInt(tournamentParam, 10) as TournamentId;
+			if (parsedTournament === TOURNAMENTS.CLASSIC || parsedTournament === TOURNAMENTS.SIGNALS || parsedTournament === TOURNAMENTS.CRYPTO) {
+				selectedTournament = parsedTournament;
+				setSelectedTournament(parsedTournament);
+			}
+		} else {
+			selectedTournament = getSelectedTournament();
+		}
+
+		// Load saved charts for the selected tournament and recent items
+		savedCharts = getSavedCharts(selectedTournament);
 		recentUserModels = getRecentUserModels();
 		recentCharts = getRecentCharts();
 
@@ -145,17 +170,19 @@
 		// Keep selectedModels to allow cross-user model comparisons
 		modelLoadError = null;
 
-		// Load user's models
+		// Load user's models with tournament filter
 		modelSearchLoading = true;
 		try {
-			const models = await numeraiApi.getUserModels(user.username);
+			// Pass tournament parameter - required for Crypto (12) to return models
+			const models = await numeraiApi.getUserModels(user.username, selectedTournament);
 
+			// Models are already filtered by tournament when passed to the API
 			availableModels = models
 				.slice()
 				.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
 			if (models.length === 0) {
-				modelLoadError = `No models found for user "${user.username}"`;
+				modelLoadError = `No ${TOURNAMENT_INFO[selectedTournament].name} models found for user "${user.username}"`;
 			}
 		} catch (error) {
 			console.error('Error loading user models:', error);
@@ -219,7 +246,8 @@
 					models: modelNames,
 					startDate,
 					endDate,
-					name: chartName
+					name: chartName,
+					tournament: selectedTournament
 				});
 
 				// Track recent chart
@@ -262,8 +290,8 @@
 			createdAt: new Date().toISOString()
 		};
 
-		saveChart(chart);
-		savedCharts = getSavedCharts();
+		saveChart(chart, selectedTournament);
+		savedCharts = getSavedCharts(selectedTournament);
 	}
 
 	function loadSavedChart(chart: SavedChart) {
@@ -300,6 +328,30 @@
 		userSearchQuery = '';
 	}
 
+	function switchTournament(tournament: TournamentId) {
+		if (tournament === selectedTournament) return;
+
+		selectedTournament = tournament;
+		setSelectedTournament(tournament);
+
+		// Clear current selections when switching tournaments
+		selectedModels = [];
+		modelPerformance = [];
+		selectedUser = null;
+		userSearchQuery = '';
+		userSearchResults = [];
+		availableModels = [];
+		modelSearchQuery = '';
+		modelSearchResults = [];
+		shareableUrl = '';
+
+		// Load saved charts for new tournament
+		savedCharts = getSavedCharts(tournament);
+
+		// Update URL with new tournament
+		updateUrlParams();
+	}
+
 	function clearUserSelection() {
 		selectedUser = null;
 		userSearchQuery = '';
@@ -327,13 +379,14 @@
 
 
 		try {
-			const models = await numeraiApi.getModelsByNames(modelNames);
+			// Pass tournament parameter - required for Crypto (12) models
+			const models = await numeraiApi.getModelsByNames(modelNames, selectedTournament);
 
 			if (models.length > 0) {
-				// Add these models to selected models, avoiding duplicates
-				const newModels = models.filter(model =>
-					!selectedModels.find(existing => existing.id === model.id)
-				);
+				// Filter by selected tournament and add to selected models, avoiding duplicates
+				const newModels = models
+					.filter(model => model.tournament === selectedTournament)
+					.filter(model => !selectedModels.find(existing => existing.id === model.id));
 
 				if (newModels.length > 0) {
 					selectedModels = [...selectedModels, ...newModels];
@@ -365,9 +418,10 @@
 		let remoteMatches: NumeraiModel[] = [];
 		let recentMatches: NumeraiModel[] = [];
 		try {
-			remoteMatches = await numeraiApi.getModelsByNames([query]);
+			// Pass tournament parameter - required for Crypto (12) models
+			remoteMatches = await numeraiApi.getModelsByNames([query], selectedTournament);
 			if (recentMatchNames.length > 0) {
-				recentMatches = await numeraiApi.getModelsByNames(recentMatchNames);
+				recentMatches = await numeraiApi.getModelsByNames(recentMatchNames, selectedTournament);
 			}
 		} catch (error) {
 			console.error('Error searching models by name:', error);
@@ -377,7 +431,9 @@
 			(model, index, arr) => arr.findIndex((entry) => entry.id === model.id) === index
 		);
 
+		// Filter by selected tournament and exclude already selected models
 		modelSearchResults = combined
+			.filter((model) => model.tournament === selectedTournament)
 			.filter((model) => !selectedModels.find((selected) => selected.id === model.id))
 			.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 		modelSearchLoading = false;
@@ -411,10 +467,11 @@
 
 	// Helper function for model search placeholder
 	function getModelSearchPlaceholder(): string {
+		const tournamentName = TOURNAMENT_INFO[selectedTournament].name;
 		if (modelSearchLoading) return "Searching...";
-		if (selectedUser && availableModels.length === 0) return "No models available for this user";
-		if (selectedUser) return "Search user's models...";
-		return "Search any model by name (2+ chars)...";
+		if (selectedUser && availableModels.length === 0) return `No ${tournamentName} models for this user`;
+		if (selectedUser) return `Search user's ${tournamentName} models...`;
+		return `Search ${tournamentName} models by name (2+ chars)...`;
 	}
 
 	// Helper function to parse date input for filtering
@@ -463,6 +520,9 @@
 		if (!browser) return;
 
 		const url = new URL(window.location.href);
+
+		// Update tournament parameter
+		url.searchParams.set('tournament', selectedTournament.toString());
 
 		// Update user parameter
 		if (selectedUser && selectedUser.username) {
@@ -605,15 +665,46 @@
 </script>
 
 <svelte:head>
-	<title>NMR - Numerai Model Reviewer</title>
+	<title>NMR - {TOURNAMENT_INFO[selectedTournament].name} | Numerai Model Reviewer</title>
 </svelte:head>
 
 <svelte:window onclick={handleClickOutside} />
 
-<div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+<div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 {themeClass}">
 	<div class="mb-8">
 		<h1 class="text-3xl font-bold retro-text-accent uppercase tracking-wider">NMR - NUMERAI MODEL REVIEWER</h1>
-		<p class="mt-2 retro-text-secondary">Compare model performance across different time periods</p>
+		<p class="mt-2 retro-text-secondary">Compare {TOURNAMENT_INFO[selectedTournament].name} tournament model performance</p>
+	</div>
+
+	<!-- Tournament Tabs -->
+	<div class="tournament-tabs">
+		{#if config.features.enableClassic}
+			<button
+				class="tournament-tab tab-classic"
+				class:active={selectedTournament === TOURNAMENTS.CLASSIC}
+				onclick={() => switchTournament(TOURNAMENTS.CLASSIC)}
+			>
+				Classic
+			</button>
+		{/if}
+		{#if config.features.enableSignals}
+			<button
+				class="tournament-tab tab-signals"
+				class:active={selectedTournament === TOURNAMENTS.SIGNALS}
+				onclick={() => switchTournament(TOURNAMENTS.SIGNALS)}
+			>
+				Signals
+			</button>
+		{/if}
+		{#if config.features.enableCrypto}
+			<button
+				class="tournament-tab tab-crypto"
+				class:active={selectedTournament === TOURNAMENTS.CRYPTO}
+				onclick={() => switchTournament(TOURNAMENTS.CRYPTO)}
+			>
+				Crypto
+			</button>
+		{/if}
 	</div>
 
 	<!-- Model Selection -->
@@ -636,7 +727,7 @@
 					</button>
 
 					{#if showRecentDropdown}
-						<div class="absolute right-0 mt-2 w-72 rounded-lg retro-bg-secondary shadow-lg border-2 border-[var(--retro-crimson)] z-50">
+						<div class="absolute right-0 mt-2 w-72 rounded-lg retro-bg-secondary shadow-lg border-2 border-[var(--retro-primary)] z-50">
 							<div class="p-2">
 								{#if recentUserModels.length > 0}
 									<div class="mb-2">
@@ -779,9 +870,9 @@
 
 				<p class="mt-1 text-xs retro-text-secondary">
 					{#if selectedUser}
-						Searching {selectedUser.username}'s models. Clear user to search all models.
+						Searching {selectedUser.username}'s {TOURNAMENT_INFO[selectedTournament].name} models. Clear user to search all.
 					{:else}
-						Type 2+ characters to search all models by name.
+						Type 2+ characters to search {TOURNAMENT_INFO[selectedTournament].name} models by name.
 					{/if}
 				</p>
 			</div>
@@ -793,7 +884,7 @@
 				<h3 id="heading-selected-models" class="text-sm font-medium retro-text-primary">Selected Models</h3>
 				<div id="selected-models-list" class="mt-2 flex flex-wrap gap-2">
 					{#each selectedModels as model}
-						<span class="inline-flex items-center rounded-full bg-[var(--retro-crimson)]/30 border border-[var(--retro-crimson)] px-3 py-1 text-sm retro-text-primary">
+						<span class="inline-flex items-center rounded-full bg-[var(--retro-primary)]/30 border border-[var(--retro-primary)] px-3 py-1 text-sm retro-text-primary">
 							{model.name} ({model.username})
 							<button
 								onclick={() => removeModel(model.id)}
@@ -850,19 +941,19 @@
 			<span class="text-sm font-medium retro-text-primary">Quick Range:</span>
 			<button
 				onclick={setLast30Days}
-				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-crimson)] transition-colors"
+				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
 			>
 				30 Days
 			</button>
 			<button
 				onclick={setLast3Months}
-				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-crimson)] transition-colors"
+				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
 			>
 				3 Months
 			</button>
 			<button
 				onclick={setLastYear}
-				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-crimson)] transition-colors"
+				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
 			>
 				1 Year
 			</button>
@@ -979,7 +1070,7 @@
 								<div class="flex-1 retro-bg-secondary rounded-full h-6 relative">
 									{#if mmc !== null && mmc !== undefined}
 										<div
-											class="h-6 rounded-full flex items-center justify-end pr-2 text-xs text-white font-medium {mmc > 0 ? 'bg-[var(--retro-crimson)]' : 'bg-[var(--retro-accent)]'}"
+											class="h-6 rounded-full flex items-center justify-end pr-2 text-xs text-white font-medium {mmc > 0 ? 'bg-[var(--retro-primary)]' : 'bg-[var(--retro-accent)]'}"
 											style="width: {Math.max(barWidth, 10)}%"
 										>
 											{mmc.toFixed(4)}

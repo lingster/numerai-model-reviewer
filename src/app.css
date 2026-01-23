@@ -4,9 +4,26 @@
 
 /* Retro 80's Color Scheme */
 :root {
+  /* Classic Tournament - Crimson/Red */
   --retro-crimson: #DC143C;
   --retro-crimson-dark: #A0122A;
   --retro-crimson-light: #FF4567;
+
+  /* Signals Tournament - Blue */
+  --retro-blue: #1E90FF;
+  --retro-blue-dark: #1565C0;
+  --retro-blue-light: #42A5F5;
+
+  /* Crypto Tournament - Green */
+  --retro-green: #00C853;
+  --retro-green-dark: #009624;
+  --retro-green-light: #5EFC82;
+
+  /* Active theme colors (default: classic/crimson) */
+  --retro-primary: var(--retro-crimson);
+  --retro-primary-dark: var(--retro-crimson-dark);
+  --retro-primary-light: var(--retro-crimson-light);
+
   --retro-dark-grey: #2A2A2A;
   --retro-grey: #3A3A3A;
   --retro-light-grey: #4A4A4A;
@@ -19,6 +36,27 @@
   --retro-error: #FF3030;
 }
 
+/* Tournament Theme: Classic (default) */
+.theme-classic {
+  --retro-primary: var(--retro-crimson);
+  --retro-primary-dark: var(--retro-crimson-dark);
+  --retro-primary-light: var(--retro-crimson-light);
+}
+
+/* Tournament Theme: Signals */
+.theme-signals {
+  --retro-primary: var(--retro-blue);
+  --retro-primary-dark: var(--retro-blue-dark);
+  --retro-primary-light: var(--retro-blue-light);
+}
+
+/* Tournament Theme: Crypto */
+.theme-crypto {
+  --retro-primary: var(--retro-green);
+  --retro-primary-dark: var(--retro-green-dark);
+  --retro-primary-light: var(--retro-green-light);
+}
+
 /* Global 16-bit styling */
 body {
   background-color: var(--retro-bg-dark);
@@ -29,17 +67,17 @@ body {
 /* Custom utility classes for retro theme */
 .retro-bg-primary { background-color: var(--retro-dark-grey); }
 .retro-bg-secondary { background-color: var(--retro-grey); }
-.retro-bg-accent { background-color: var(--retro-crimson); }
+.retro-bg-accent { background-color: var(--retro-primary); }
 .retro-bg-dark { background-color: var(--retro-bg-dark); }
 
 .retro-text-primary { color: var(--retro-text); }
 .retro-text-secondary { color: var(--retro-text-dim); }
-.retro-text-accent { color: var(--retro-crimson); }
+.retro-text-accent { color: var(--retro-primary); }
 .retro-text-success { color: var(--retro-success); }
 .retro-text-warning { color: var(--retro-warning); }
 .retro-text-error { color: var(--retro-error); }
 
-.retro-border { border-color: var(--retro-crimson); }
+.retro-border { border-color: var(--retro-primary); }
 .retro-border-secondary { border-color: var(--retro-grey); }
 
 /* 16-bit style effects */
@@ -50,12 +88,12 @@ body {
 }
 
 .retro-shadow {
-  box-shadow: 4px 4px 0px var(--retro-crimson-dark);
+  box-shadow: 4px 4px 0px var(--retro-primary-dark);
 }
 
 .retro-button {
-  background: linear-gradient(135deg, var(--retro-crimson) 0%, var(--retro-crimson-dark) 100%);
-  border: 2px solid var(--retro-crimson-light);
+  background: linear-gradient(135deg, var(--retro-primary) 0%, var(--retro-primary-dark) 100%);
+  border: 2px solid var(--retro-primary-light);
   color: white;
   font-weight: bold;
   text-transform: uppercase;
@@ -64,15 +102,15 @@ body {
 }
 
 .retro-button:hover {
-  background: linear-gradient(135deg, var(--retro-crimson-light) 0%, var(--retro-crimson) 100%);
+  background: linear-gradient(135deg, var(--retro-primary-light) 0%, var(--retro-primary) 100%);
   transform: translate(-2px, -2px);
-  box-shadow: 6px 6px 0px var(--retro-crimson-dark);
+  box-shadow: 6px 6px 0px var(--retro-primary-dark);
 }
 
 .retro-card {
   background-color: var(--retro-dark-grey);
-  border: 2px solid var(--retro-crimson);
-  box-shadow: 4px 4px 0px var(--retro-crimson-dark);
+  border: 2px solid var(--retro-primary);
+  box-shadow: 4px 4px 0px var(--retro-primary-dark);
 }
 
 .retro-input {
@@ -82,6 +120,57 @@ body {
 }
 
 .retro-input:focus {
+  border-color: var(--retro-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--retro-primary) 30%, transparent);
+}
+
+/* Tournament Tabs */
+.tournament-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--retro-light-grey);
+  margin-bottom: 1.5rem;
+}
+
+.tournament-tab {
+  padding: 0.75rem 1.5rem;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border: 2px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--retro-text-dim);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  top: 2px;
+}
+
+.tournament-tab:hover {
+  color: var(--retro-text);
+  background: var(--retro-grey);
+}
+
+.tournament-tab.active {
+  color: white;
+  border-color: var(--retro-primary);
+  background: linear-gradient(135deg, var(--retro-primary) 0%, var(--retro-primary-dark) 100%);
+  border-bottom: 2px solid var(--retro-bg-dark);
+  margin-bottom: -2px;
+}
+
+.tournament-tab.tab-classic.active {
   border-color: var(--retro-crimson);
-  box-shadow: 0 0 0 3px rgba(220, 20, 60, 0.3);
+  background: linear-gradient(135deg, var(--retro-crimson) 0%, var(--retro-crimson-dark) 100%);
+}
+
+.tournament-tab.tab-signals.active {
+  border-color: var(--retro-blue);
+  background: linear-gradient(135deg, var(--retro-blue) 0%, var(--retro-blue-dark) 100%);
+}
+
+.tournament-tab.tab-crypto.active {
+  border-color: var(--retro-green);
+  background: linear-gradient(135deg, var(--retro-green) 0%, var(--retro-green-dark) 100%);
 }

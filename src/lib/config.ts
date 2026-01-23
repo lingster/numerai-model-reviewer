@@ -40,7 +40,23 @@ const getSearchConfig = () => {
 	};
 };
 
+/**
+ * Feature flags for enabling/disabling functionality
+ * Set via environment variables or defaults
+ */
+const getFeatureFlags = () => {
+	return {
+		// Enable/disable tournament tabs
+		// Classic and Crypto are enabled by default
+		// Signals is disabled by default (set VITE_ENABLE_SIGNALS=true to enable)
+		enableClassic: import.meta.env.VITE_ENABLE_CLASSIC !== 'false',
+		enableSignals: import.meta.env.VITE_ENABLE_SIGNALS === 'true',
+		enableCrypto: import.meta.env.VITE_ENABLE_CRYPTO !== 'false'
+	};
+};
+
 export const config = {
 	apiUrl: getApiUrl(),
-	search: getSearchConfig()
+	search: getSearchConfig(),
+	features: getFeatureFlags()
 };

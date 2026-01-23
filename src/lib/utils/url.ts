@@ -9,6 +9,7 @@ export interface ChartParams {
 	startDate?: string;
 	endDate?: string;
 	name?: string;
+	tournament?: number;
 }
 
 /**
@@ -61,6 +62,11 @@ export function generateShareableUrl(params: ChartParams): string {
 	}
 
 	const url = new URL(window.location.origin + window.location.pathname);
+
+	// Add tournament parameter
+	if (params.tournament) {
+		url.searchParams.set('tournament', params.tournament.toString());
+	}
 
 	// Add models parameter
 	if (params.models.length > 0) {

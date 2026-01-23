@@ -199,9 +199,13 @@ export class NumeraiAPI {
 
 	/**
 	 * Get all models for a specific user with SWR caching
+	 * @param username The username to get models for
+	 * @param tournament Optional tournament ID (8=Classic, 11=Signals, 12=Crypto)
 	 */
-	async getUserModels(username: string): Promise<NumeraiModel[]> {
-		const cacheKey = cacheKeys.userModels(username);
+	async getUserModels(username: string, tournament?: number): Promise<NumeraiModel[]> {
+		const cacheKey = tournament
+			? `${cacheKeys.userModels(username)}:t${tournament}`
+			: cacheKeys.userModels(username);
 
 		// Try SWR cache first
 		const cached = swrCache.get<NumeraiModel[]>(cacheKey);
@@ -211,27 +215,46 @@ export class NumeraiAPI {
 
 		// Fetch with SWR deduplication
 		return swrCache.fetch(cacheKey, async () => {
-			return this.fetchUserModels(username);
+			return this.fetchUserModels(username, tournament);
 		});
 	}
 
 	/**
 	 * Internal method to fetch user models (called by SWR)
+	 * @param username The username to get models for
+	 * @param tournament Optional tournament ID - required for Crypto (12) to return models
 	 */
-	private async fetchUserModels(username: string): Promise<NumeraiModel[]> {
-		const accountQuery = `
-			query getUserModels($username: String!) {
-				accountProfile(username: $username) {
-					id
-					username
-					models {
+	private async fetchUserModels(username: string, tournament?: number): Promise<NumeraiModel[]> {
+		// Use tournament-specific query if tournament is provided (required for Crypto)
+		const accountQuery = tournament
+			? `
+				query getUserModels($username: String!, $tournament: Int!) {
+					accountProfile(username: $username, tournament: $tournament) {
 						id
-						displayName
-						tournament
+						username
+						models {
+							id
+							displayName
+							tournament
+						}
 					}
 				}
-			}
-		`;
+			`
+			: `
+				query getUserModels($username: String!) {
+					accountProfile(username: $username) {
+						id
+						username
+						models {
+							id
+							displayName
+							tournament
+						}
+					}
+				}
+			`;
+
+		const variables = tournament ? { username, tournament } : { username };
 
 		try {
 			const result = await this.query<{
@@ -240,7 +263,7 @@ export class NumeraiAPI {
 					username: string;
 					models: Array<{ id: string; displayName: string; tournament: number }> | null;
 				} | null;
-			}>(accountQuery, { username });
+			}>(accountQuery, variables);
 
 			if (result.accountProfile) {
 				const models = result.accountProfile.models || [];
@@ -255,43 +278,46 @@ export class NumeraiAPI {
 			console.error('Error with accountProfile query:', error);
 		}
 
-		// Try looking up as a model name
-		const modelQuery = `
-			query getModelByName($modelName: String!) {
-				v3UserProfile(modelName: $modelName) {
-					id
-					username
-					accountName
+		// Fallback: Try looking up as a model name (only for non-Crypto tournaments)
+		// v3UserProfile doesn't work for Crypto models
+		if (tournament !== 12) {
+			const modelQuery = `
+				query getModelByName($modelName: String!) {
+					v3UserProfile(modelName: $modelName) {
+						id
+						username
+						accountName
+					}
 				}
-			}
-		`;
+			`;
 
-		try {
-			const modelResult = await this.query<{
-				v3UserProfile: {
-					id: string;
-					username: string;
-					accountName: string;
-				} | null;
-			}>(modelQuery, { modelName: username });
+			try {
+				const modelResult = await this.query<{
+					v3UserProfile: {
+						id: string;
+						username: string;
+						accountName: string;
+					} | null;
+				}>(modelQuery, { modelName: username });
 
-			if (modelResult.v3UserProfile && modelResult.v3UserProfile.accountName) {
-				const accountOwner = modelResult.v3UserProfile.accountName;
-				console.log(`Input "${username}" is a model name, fetching models for account: ${accountOwner}`);
+				if (modelResult.v3UserProfile && modelResult.v3UserProfile.accountName) {
+					const accountOwner = modelResult.v3UserProfile.accountName;
+					console.log(`Input "${username}" is a model name, fetching models for account: ${accountOwner}`);
 
-				if (accountOwner.toLowerCase() !== username.toLowerCase()) {
-					return this.getUserModels(accountOwner);
+					if (accountOwner.toLowerCase() !== username.toLowerCase()) {
+						return this.getUserModels(accountOwner, tournament);
+					}
+
+					return [{
+						id: modelResult.v3UserProfile.id,
+						name: modelResult.v3UserProfile.username,
+						username: modelResult.v3UserProfile.accountName,
+						tournament: 8
+					}];
 				}
-
-				return [{
-					id: modelResult.v3UserProfile.id,
-					name: modelResult.v3UserProfile.username,
-					username: modelResult.v3UserProfile.accountName,
-					tournament: 8
-				}];
+			} catch (error) {
+				console.error('Error looking up as model name:', error);
 			}
-		} catch (error) {
-			console.error('Error looking up as model name:', error);
 		}
 
 		return [];
@@ -345,7 +371,7 @@ export class NumeraiAPI {
 		// Fetch all performances in parallel with SWR caching
 		const promises = models.map(async (model) => {
 			try {
-				return await this.getModelPerformance(model.name, model.username);
+				return await this.getModelPerformance(model.name, model.username, model.id, model.tournament);
 			} catch (error) {
 				console.error(`Error getting performance for model ${model.name}:`, error);
 				return null;
@@ -358,12 +384,20 @@ export class NumeraiAPI {
 
 	/**
 	 * Get performance data for a single model with SWR caching
+	 * @param modelName The model name
+	 * @param username The username who owns the model
+	 * @param modelId The model UUID (required for Crypto)
+	 * @param tournament The tournament ID (12 = Crypto requires different API)
 	 */
 	private async getModelPerformance(
 		modelName: string,
-		username: string
+		username: string,
+		modelId?: string,
+		tournament?: number
 	): Promise<ModelPerformance | null> {
-		const cacheKey = cacheKeys.modelPerformance(modelName);
+		const cacheKey = tournament
+			? `${cacheKeys.modelPerformance(modelName)}:t${tournament}`
+			: cacheKeys.modelPerformance(modelName);
 
 		// Try SWR cache first
 		const cached = swrCache.get<ModelPerformance>(cacheKey);
@@ -373,6 +407,10 @@ export class NumeraiAPI {
 
 		// Fetch with SWR deduplication
 		return swrCache.fetch(cacheKey, async () => {
+			// Use Crypto-specific API for tournament 12
+			if (tournament === 12 && modelId) {
+				return this.fetchCryptoModelPerformance(modelName, username, modelId, tournament);
+			}
 			return this.fetchModelPerformance(modelName, username);
 		});
 	}
@@ -517,12 +555,108 @@ export class NumeraiAPI {
 	}
 
 	/**
-	 * Get models by their names with SWR caching
+	 * Fetch performance data for Crypto tournament models
+	 * Uses v2RoundModelPerformances API which is required for Crypto
 	 */
-	async getModelsByNames(modelNames: string[]): Promise<NumeraiModel[]> {
+	private async fetchCryptoModelPerformance(
+		modelName: string,
+		username: string,
+		modelId: string,
+		tournament: number
+	): Promise<ModelPerformance | null> {
+		const toNumber = (value: number | string | null | undefined): number | null => {
+			if (value === null || value === undefined) return null;
+			if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+			if (typeof value === 'string') {
+				const parsed = Number(value);
+				return Number.isFinite(parsed) ? parsed : null;
+			}
+			return null;
+		};
+
+		const query = `
+			query getCryptoModelPerformance($modelId: String!, $tournament: Int!, $lastNRounds: Int!) {
+				v2RoundModelPerformances(modelId: $modelId, tournament: $tournament, lastNRounds: $lastNRounds) {
+					roundNumber
+					roundOpenTime
+					roundResolveTime
+					roundResolved
+					submissionScores {
+						displayName
+						value
+					}
+				}
+			}
+		`;
+
+		try {
+			const result = await this.query<{
+				v2RoundModelPerformances: Array<{
+					roundNumber: number;
+					roundOpenTime: string | null;
+					roundResolveTime: string | null;
+					roundResolved: boolean | null;
+					submissionScores: Array<{
+						displayName: string;
+						value: number | null;
+					}>;
+				}>;
+			}>(query, { modelId, tournament, lastNRounds: 100 });
+
+			if (!result.v2RoundModelPerformances || result.v2RoundModelPerformances.length === 0) {
+				return null;
+			}
+
+			// Map Crypto performance data to standard RoundPerformance format
+			const rounds: RoundPerformance[] = result.v2RoundModelPerformances.map((round) => {
+				const scores = round.submissionScores || [];
+				const getScore = (name: string): number | null => {
+					const score = scores.find((s) => s.displayName === name);
+					return score ? toNumber(score.value) : null;
+				};
+
+				return {
+					roundNumber: round.roundNumber,
+					roundOpenTime: round.roundOpenTime ?? undefined,
+					roundResolveTime: round.roundResolveTime ?? undefined,
+					roundResolved: round.roundResolved ?? false,
+					correlation: getScore('corr'),
+					corr60: null,
+					mmc: getScore('mmc'),
+					fnc: getScore('fnc'),
+					tc: getScore('tc'),
+					corrMultiplier: null,
+					mmcMultiplier: null,
+					selectedStakeValue: null,
+					payout: null
+				};
+			});
+
+			return {
+				modelId,
+				modelName,
+				username,
+				stakeValue: null,
+				stakeInfo: null,
+				rounds
+			};
+		} catch (error) {
+			console.error(`Error getting Crypto performance for ${modelName}:`, error);
+			return null;
+		}
+	}
+
+	/**
+	 * Get models by their names with SWR caching
+	 * @param modelNames Array of model names to look up
+	 * @param tournament Optional tournament ID - required for Crypto (12) models
+	 */
+	async getModelsByNames(modelNames: string[], tournament?: number): Promise<NumeraiModel[]> {
 		// Fetch all models in parallel with SWR caching
 		const promises = modelNames.map(async (modelName) => {
-			const cacheKey = `model-by-name:${modelName.toLowerCase()}`;
+			const cacheKey = tournament
+				? `model-by-name:${modelName.toLowerCase()}:t${tournament}`
+				: `model-by-name:${modelName.toLowerCase()}`;
 
 			// Try cache first
 			const cached = swrCache.get<NumeraiModel>(cacheKey);
@@ -531,6 +665,13 @@ export class NumeraiAPI {
 			}
 
 			return swrCache.fetch(cacheKey, async () => {
+				// For Crypto tournament, we need to search via accountProfile
+				// since v3UserProfile doesn't work for Crypto models
+				if (tournament === 12) {
+					return this.findCryptoModelByName(modelName, tournament);
+				}
+
+				// For Classic/Signals, use v3UserProfile
 				const query = `
 					query getModelByName($modelName: String!) {
 						v3UserProfile(modelName: $modelName) {
@@ -569,6 +710,56 @@ export class NumeraiAPI {
 
 		const results = await Promise.all(promises);
 		return results.filter((r): r is NumeraiModel => r !== null);
+	}
+
+	/**
+	 * Find a Crypto model by searching the leaderboard for users with that model name
+	 * This is needed because v3UserProfile doesn't work for Crypto models
+	 */
+	private async findCryptoModelByName(modelName: string, tournament: number): Promise<NumeraiModel | null> {
+		// First, try to find the model by searching for users in the leaderboard
+		// and checking if they have a model with this name
+		const batchSize = 500;
+		const maxSearchUsers = 2000;
+		let offset = 0;
+
+		while (offset < maxSearchUsers) {
+			try {
+				const leaderboardResult = await this.query<{
+					accountLeaderboard: Array<{ id: string; username: string }>;
+				}>(
+					`query accountLeaderboardSearch($limit: Int!, $offset: Int!, $tournament: Int!) {
+						accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
+							id
+							username
+						}
+					}`,
+					{ limit: batchSize, offset, tournament }
+				);
+
+				const batch = leaderboardResult.accountLeaderboard;
+				if (batch.length === 0) break;
+
+				// Check each user for the model
+				for (const user of batch) {
+					const userModels = await this.fetchUserModels(user.username, tournament);
+					const model = userModels.find(
+						(m) => m.name.toLowerCase() === modelName.toLowerCase()
+					);
+					if (model) {
+						return model;
+					}
+				}
+
+				offset += batchSize;
+				if (batch.length < batchSize) break;
+			} catch (error) {
+				console.error('Error searching for Crypto model:', error);
+				break;
+			}
+		}
+
+		return null;
 	}
 
 	/**
