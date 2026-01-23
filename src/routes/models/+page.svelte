@@ -417,16 +417,41 @@
 		return "Search any model by name (2+ chars)...";
 	}
 
-	// Helper function to find the first round with actual performance data
-	function getLatestRoundWithData(model: ModelPerformance) {
-		return model.rounds.find(round => round.correlation !== null || round.mmc !== null) ?? model.rounds[0];
+	// Helper function to parse date input for filtering
+	function parseDateForFilter(value: string, mode: 'start' | 'end'): Date | null {
+		if (!value) return null;
+		const iso = mode === 'end'
+			? `${value}T23:59:59.999Z`
+			: `${value}T00:00:00.000Z`;
+		const parsed = new Date(iso);
+		return Number.isNaN(parsed.getTime()) ? null : parsed;
 	}
 
-	// Sort model performance by correlation (best performing first)
+	// Helper function to find the first round with actual performance data within the date range
+	function getLatestRoundWithData(model: ModelPerformance, filterStartDate?: string, filterEndDate?: string) {
+		const parsedStart = filterStartDate ? parseDateForFilter(filterStartDate, 'start') : null;
+		const parsedEnd = filterEndDate ? parseDateForFilter(filterEndDate, 'end') : null;
+
+		return model.rounds.find(round => {
+			// Check if round has actual data
+			const hasData = round.correlation !== null || round.mmc !== null;
+			if (!hasData) return false;
+
+			// Apply date filter if provided
+			if (round.roundOpenTime) {
+				const roundDate = new Date(round.roundOpenTime);
+				if (parsedStart && roundDate < parsedStart) return false;
+				if (parsedEnd && roundDate > parsedEnd) return false;
+			}
+			return true;
+		}) ?? model.rounds[0];
+	}
+
+	// Sort model performance by correlation (best performing first) within date range
 	const sortedModelPerformance = $derived(
 		[...modelPerformance].sort((a, b) => {
-			const aRound = getLatestRoundWithData(a);
-			const bRound = getLatestRoundWithData(b);
+			const aRound = getLatestRoundWithData(a, startDate, endDate);
+			const bRound = getLatestRoundWithData(b, startDate, endDate);
 			const aCorr = aRound?.correlation ?? -Infinity;
 			const bCorr = bRound?.correlation ?? -Infinity;
 			return bCorr - aCorr; // Descending order (highest first)
@@ -907,10 +932,10 @@
 					<h4 class="text-sm font-medium retro-text-primary mb-2">Corr20 Comparison</h4>
 					<div class="space-y-2">
 						{#each sortedModelPerformance as model, index}
-							{@const latestRound = getLatestRoundWithData(model)}
+							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
 							{@const correlation = latestRound?.correlation}
-							{@const maxCorr = Math.max(...sortedModelPerformance.map(m => getLatestRoundWithData(m)?.correlation || 0))}
-							{@const minCorr = Math.min(...sortedModelPerformance.map(m => getLatestRoundWithData(m)?.correlation || 0))}
+							{@const maxCorr = Math.max(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.correlation || 0))}
+							{@const minCorr = Math.min(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.correlation || 0))}
 							{@const range = maxCorr - minCorr || 1}
 							{@const barWidth = correlation !== null && correlation !== undefined ? Math.abs((correlation - minCorr) / range) * 100 : 0}
 							<div class="flex items-center gap-3">
@@ -941,10 +966,10 @@
 					<h4 class="text-sm font-medium retro-text-primary mb-2">MMC Comparison</h4>
 					<div class="space-y-2">
 						{#each sortedModelPerformance as model, index}
-							{@const latestRound = getLatestRoundWithData(model)}
+							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
 							{@const mmc = latestRound?.mmc}
-							{@const maxMmc = Math.max(...sortedModelPerformance.map(m => getLatestRoundWithData(m)?.mmc || 0))}
-							{@const minMmc = Math.min(...sortedModelPerformance.map(m => getLatestRoundWithData(m)?.mmc || 0))}
+							{@const maxMmc = Math.max(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.mmc || 0))}
+							{@const minMmc = Math.min(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.mmc || 0))}
 							{@const range = maxMmc - minMmc || 1}
 							{@const barWidth = mmc !== null && mmc !== undefined ? Math.abs((mmc - minMmc) / range) * 100 : 0}
 							<div class="flex items-center gap-3">
@@ -1014,7 +1039,7 @@
 					</thead>
 					<tbody class="divide-y divide-[var(--retro-light-grey)] retro-bg-primary">
 						{#each sortedModelPerformance as model}
-							{@const latestRound = getLatestRoundWithData(model)}
+							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
 							<tr>
 								<td class="whitespace-nowrap px-6 py-4 text-sm font-medium retro-text-primary">{model.modelName}</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">{model.username}</td>

@@ -46,13 +46,17 @@ interface NumeraiResponse {
   }>;
 }
 
-const ALLOWED_ORIGINS = new Set([
-  'https://numerdiff.ling-li.com',
-  'https://numerdiff.imperialai.ai'
-]);
+/**
+ * Parse allowed origins from environment variable
+ */
+function getAllowedOrigins(env: Env): Set<string> {
+  const origins = env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean) || [];
+  return new Set(origins);
+}
 
-function isAllowedOrigin(origin: string | null): boolean {
-  return Boolean(origin && ALLOWED_ORIGINS.has(origin));
+function isAllowedOrigin(origin: string | null, env: Env): boolean {
+  const allowedOrigins = getAllowedOrigins(env);
+  return Boolean(origin && allowedOrigins.has(origin));
 }
 
 // In-memory fallback rate limiting (per worker isolate)
@@ -105,34 +109,43 @@ export default {
 
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
-      if (!isAllowedOrigin(origin)) {
-        return new Response(JSON.stringify({ error: 'Forbidden origin' }), {
+      const allowedOrigins = getAllowedOrigins(env);
+      if (!isAllowedOrigin(origin, env)) {
+        return new Response(JSON.stringify({
+          error: 'Forbidden origin',
+          debug: {
+            receivedOrigin: origin,
+            allowedOrigins: Array.from(allowedOrigins),
+            envValue: env.ALLOWED_ORIGINS
+          }
+        }), {
           status: 403,
           headers: { 'Content-Type': 'application/json' }
         });
       }
-      return handleCors(origin, new Response(null, { status: 204 }));
+      return handleCors(origin, env, new Response(null, { status: 204 }));
     }
 
     try {
       // Route requests
       if (path === '/health' && request.method === 'GET') {
-        return handleCors(origin, handleHealth());
+        return handleCors(origin, env, handleHealth());
       }
 
       if (path === '/graphql' && request.method === 'POST') {
-        if (!isAllowedOrigin(origin)) {
+        if (!isAllowedOrigin(origin, env)) {
           return new Response(JSON.stringify({ error: 'Forbidden origin' }), {
             status: 403,
             headers: { 'Content-Type': 'application/json' }
           });
         }
-        return handleCors(origin, await handleGraphQL(request, env, ctx));
+        return handleCors(origin, env, await handleGraphQL(request, env, ctx));
       }
 
       // 404 for unknown routes
       return handleCors(
         origin,
+        env,
         new Response(JSON.stringify({ error: 'Not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json' }
@@ -142,6 +155,7 @@ export default {
       console.error('Unhandled error:', error);
       return handleCors(
         origin,
+        env,
         new Response(
           JSON.stringify({
             error: 'Internal server error',
@@ -160,8 +174,9 @@ export default {
 /**
  * Handle CORS headers
  */
-function handleCors(origin: string | null, response: Response): Response {
-  const corsOrigin = isAllowedOrigin(origin) ? origin! : ALLOWED_ORIGINS.values().next().value;
+function handleCors(origin: string | null, env: Env, response: Response): Response {
+  const allowedOrigins = getAllowedOrigins(env);
+  const corsOrigin = (origin && allowedOrigins.has(origin)) ? origin : allowedOrigins.values().next().value;
 
   // Clone response with CORS headers
   const headers = new Headers(response.headers);

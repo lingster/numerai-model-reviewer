@@ -919,16 +919,16 @@
 						{/each}
 					</g>
 
-					<!-- Zero line -->
-					{#if leftAxisDomain[0] < 0 && leftAxisDomain[1] > 0}
+					<!-- Zero line - always visible when 0 is in range -->
+					{#if leftAxisDomain[0] <= 0 && leftAxisDomain[1] >= 0}
 						<line
 							x1={marginLeft}
 							x2={chartWidth - marginRight}
 							y1={yScaleLeft(0)}
 							y2={yScaleLeft(0)}
-							stroke="var(--retro-text-secondary)"
-							stroke-opacity="0.5"
-							stroke-width="1"
+							stroke="#888888"
+							stroke-opacity="0.8"
+							stroke-width="1.5"
 						/>
 					{/if}
 
