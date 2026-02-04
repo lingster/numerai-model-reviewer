@@ -114,3 +114,53 @@ export interface AutocompleteOption<T = unknown> {
 	label: string;
 	value: T;
 }
+
+/**
+ * Model score data for a specific round (used for ranking calculations)
+ */
+export interface RoundModelScore {
+	modelId: string;
+	modelName: string;
+	username: string;
+	roundNumber: number;
+	corr: number | null;
+	mmc: number | null;
+	tc: number | null;
+	stakeValue: number | null;
+	customScore: number | null;
+	rank: number | null;
+}
+
+/**
+ * Round leaderboard data containing all staked models for a round
+ */
+export interface RoundLeaderboard {
+	roundNumber: number;
+	tournament: number;
+	models: RoundModelScore[];
+	fetchedAt: number;
+}
+
+/**
+ * Ranking history for a model across multiple rounds
+ */
+export interface ModelRankingHistory {
+	modelId: string;
+	modelName: string;
+	username: string;
+	rankings: Array<{
+		roundNumber: number;
+		rank: number | null;
+		customScore: number | null;
+		totalModels: number;
+	}>;
+}
+
+/**
+ * Custom score formula configuration
+ */
+export interface ScoreFormula {
+	mmcWeight: number;
+	corrWeight: number;
+	tcWeight: number;
+}
