@@ -33,7 +33,11 @@ jobs:
 
       # Apply schema before deploy so queries against the new tables work as soon
       # as the worker goes live. CREATE TABLE IF NOT EXISTS is idempotent.
+      # continue-on-error: the deploy itself doesn't require D1 access; if the
+      # token lacks D1:edit, apply the schema once manually with
+      #   cd worker && npx wrangler d1 execute numerai-cache --remote --file=src/schema.sql
       - name: Apply D1 schema
+        continue-on-error: true
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
