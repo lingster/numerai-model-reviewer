@@ -585,7 +585,12 @@ async function fetchBatchedPerformance(
     }
 
     const completed = Math.min(i + batchSize, modelNames.length);
-    console.log(`  Fetched performance for ${completed}/${modelNames.length} models...`);
+    // batchSize is tiny (≈3, Numerai rate limit) so this loop runs thousands of
+    // times — throttle progress to keep CI logs readable.
+    const batchNum = Math.floor(i / batchSize) + 1;
+    if (batchNum % 50 === 0 || completed >= modelNames.length) {
+      console.log(`  Fetched performance for ${completed}/${modelNames.length} models...`);
+    }
 
     if (i + batchSize < modelNames.length) {
       await sleep(rateLimitMs);
@@ -716,13 +721,17 @@ async function storeInD1(
     fs.writeFileSync(tmpFile, batch.join('\n'));
 
     try {
-      const result = execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
+      // Output is captured (not echoed): wrangler prints a multi-line summary
+      // per call, which floods the log across 100+ batches. Only surface it on
+      // failure (in the catch below) and emit a throttled progress line.
+      execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
         cwd: process.cwd(),
         stdio: ['inherit', 'pipe', 'pipe'],
         encoding: 'utf-8'
       });
-      if (result) console.log(result.toString().trim());
-      console.log(`  Batch ${b + 1}/${totalBatches} complete (${batch.length} statements)`);
+      if ((b + 1) % 20 === 0 || b + 1 === totalBatches) {
+        console.log(`  Stored ${b + 1}/${totalBatches} batches...`);
+      }
     } catch (error: any) {
       fs.unlinkSync(tmpFile);
       const stderr = error.stderr ? error.stderr.toString() : '';
