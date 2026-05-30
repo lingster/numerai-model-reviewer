@@ -9,10 +9,10 @@
   --retro-crimson-dark: #A0122A;
   --retro-crimson-light: #FF4567;
 
-  /* Signals Tournament - Blue */
-  --retro-blue: #1E90FF;
-  --retro-blue-dark: #1565C0;
-  --retro-blue-light: #42A5F5;
+  /* Signals Tournament - Blue (matches the signals.numer.ai logo, #00C0D0) */
+  --retro-blue: #00C0D0;
+  --retro-blue-dark: #008A99;
+  --retro-blue-light: #4DD6E3;
 
   /* Crypto Tournament - Green */
   --retro-green: #00C853;

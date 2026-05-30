@@ -404,7 +404,9 @@ describe('NumeraiAPI - Crypto Tournament - Model Performance', () => {
 					}
 				}
 			}`,
-			{ modelId: FNCC_T1_MODEL_ID, tournament: CRYPTO_TOURNAMENT_ID, lastNRounds: 50 }
+			// Use a large window so the historical round 1163 stays in range as
+			// new rounds resolve (its values are immutable once resolved).
+			{ modelId: FNCC_T1_MODEL_ID, tournament: CRYPTO_TOURNAMENT_ID, lastNRounds: 500 }
 		);
 
 		// Find round 1163
@@ -422,10 +424,10 @@ describe('NumeraiAPI - Crypto Tournament - Model Performance', () => {
 
 		// Verify approximate values for round 1163
 		// corr: -0.166, mmc: -0.113 (based on actual API data)
-		if (corrScore?.value !== null) {
+		if (corrScore?.value != null) {
 			expect(corrScore.value).toBeCloseTo(-0.166, 1);
 		}
-		if (mmcScore?.value !== null) {
+		if (mmcScore?.value != null) {
 			expect(mmcScore.value).toBeCloseTo(-0.113, 1);
 		}
 	}, 30000);

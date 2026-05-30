@@ -47,10 +47,10 @@ const getSearchConfig = () => {
 const getFeatureFlags = () => {
 	return {
 		// Enable/disable tournament tabs
-		// Classic and Crypto are enabled by default
-		// Signals is disabled by default (set VITE_ENABLE_SIGNALS=true to enable)
+		// All tournaments are enabled by default; set the matching env var to
+		// 'false' (e.g. VITE_ENABLE_SIGNALS=false) to hide a tab.
 		enableClassic: import.meta.env.VITE_ENABLE_CLASSIC !== 'false',
-		enableSignals: import.meta.env.VITE_ENABLE_SIGNALS === 'true',
+		enableSignals: import.meta.env.VITE_ENABLE_SIGNALS !== 'false',
 		enableCrypto: import.meta.env.VITE_ENABLE_CRYPTO !== 'false'
 	};
 };
