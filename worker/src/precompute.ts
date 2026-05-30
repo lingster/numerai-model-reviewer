@@ -710,7 +710,11 @@ async function storeInD1(
     }
   }
 
-  const BATCH_SIZE = 500;
+  // Each wrangler invocation carries ~2s of fixed overhead, which dominates the
+  // store phase (a 386k-row store was ~770 calls ≈ 26 min, almost all overhead).
+  // Larger batches cut the call count proportionally; 2000 inline-value INSERTs
+  // is a ~400KB SQL file, well within D1's execute limits.
+  const BATCH_SIZE = 2000;
   const totalBatches = Math.ceil(statements.length / BATCH_SIZE);
   console.log(`  Executing ${statements.length} SQL statements in ${totalBatches} batches of ${BATCH_SIZE}...`);
 

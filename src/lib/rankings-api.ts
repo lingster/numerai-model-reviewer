@@ -48,6 +48,20 @@ export interface ModelRef {
 	username?: string;
 }
 
+/**
+ * True when a history has at least one round with a non-null rank.
+ *
+ * The Worker returns a full rounds array (one entry per requested round) even
+ * when the model can't be ranked — every entry's `rank` is null. That happens
+ * when the model isn't in the precomputed staked field (e.g. unstaked models,
+ * or models absent from the leaderboard snapshot). Such all-null histories
+ * would render an empty chart with no explanation, so callers drop them and
+ * surface a "no data" message instead.
+ */
+export function hasRankableData(history: ModelRankingHistory): boolean {
+	return history.rankings.some((r) => r.rank !== null);
+}
+
 interface ModelRankRoundResponse {
 	roundNumber: number;
 	rank: number | null;
@@ -186,8 +200,10 @@ export async function calculateModelRankings(
 		if (onProgress) onProgress('Fetching model rankings', results.length, total);
 	}
 
-	// Filter out models with no ranking data so the chart doesn't render empty series.
-	return results.filter((h) => h.rankings.length > 0);
+	// Filter out models with no rankable data (empty histories, or histories
+	// where every round is rank=null). Dropping all-null histories lets the page
+	// show its "no data" message instead of an empty chart. See hasRankableData.
+	return results.filter(hasRankableData);
 }
 
 /**

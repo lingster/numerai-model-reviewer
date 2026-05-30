@@ -12,8 +12,8 @@
  *   Round 1171: rank=7, corr=0.0402, mmc=0.0356, totalModels=4093
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { calculateCustomScore, DEFAULT_SCORE_FORMULA } from './rankings-api.js';
-import type { ScoreFormula } from './types.js';
+import { calculateCustomScore, DEFAULT_SCORE_FORMULA, hasRankableData } from './rankings-api.js';
+import type { ModelRankingHistory, ScoreFormula } from './types.js';
 
 // Worker API URL for integration tests. Overridable so CI can point at a
 // locally-seeded worker (see .github/workflows/ci.yml); defaults to the local
@@ -131,6 +131,38 @@ describe('calculateCustomScore - unit tests', () => {
 		const score = calculateCustomScore(-0.05, -0.03, null, DEFAULT_SCORE_FORMULA);
 		// 0.75 * (-0.05) + 2.25 * (-0.03) = -0.0375 + -0.0675 = -0.105
 		expect(score).toBeCloseTo(-0.105, 4);
+	});
+});
+
+describe('hasRankableData - unit tests', () => {
+	const makeHistory = (
+		ranks: Array<number | null>
+	): ModelRankingHistory => ({
+		modelId: 'id',
+		modelName: 'm',
+		username: 'u',
+		rankings: ranks.map((rank, i) => ({
+			roundNumber: 1000 + i,
+			rank,
+			customScore: rank === null ? null : 0.01,
+			totalModels: rank === null ? 0 : 50
+		}))
+	});
+
+	it('is false for an empty rankings array', () => {
+		expect(hasRankableData(makeHistory([]))).toBe(false);
+	});
+
+	it('is false when every round is rank=null (e.g. unstaked / absent model)', () => {
+		expect(hasRankableData(makeHistory([null, null, null]))).toBe(false);
+	});
+
+	it('is true when at least one round has a non-null rank', () => {
+		expect(hasRankableData(makeHistory([null, 7, null]))).toBe(true);
+	});
+
+	it('treats rank=0 as rankable (non-null)', () => {
+		expect(hasRankableData(makeHistory([0]))).toBe(true);
 	});
 });
 

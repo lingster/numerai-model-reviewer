@@ -34,7 +34,11 @@ concurrency:
 jobs:
   precompute:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A full top-n=5000 Classic backfill (~2.3k accounts, >1.5M perf rows) plus
+    # Signals can run well over 90 min. The store is DELETE-then-INSERT and not
+    # transactional across batches, so a mid-store timeout corrupts the table —
+    # give the job enough headroom to always finish what it started.
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
