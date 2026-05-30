@@ -196,7 +196,7 @@
 		try {
 			// Calculate rankings for selected models
 			rankingHistories = await calculateModelRankings(
-				selectedModels.map(m => m.name),
+				selectedModels.map(m => ({ modelName: m.name, modelId: m.id, username: m.username })),
 				startRound,
 				endRound,
 				scoreFormula,

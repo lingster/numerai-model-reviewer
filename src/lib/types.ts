@@ -132,16 +132,6 @@ export interface RoundModelScore {
 }
 
 /**
- * Round leaderboard data containing all staked models for a round
- */
-export interface RoundLeaderboard {
-	roundNumber: number;
-	tournament: number;
-	models: RoundModelScore[];
-	fetchedAt: number;
-}
-
-/**
  * Ranking history for a model across multiple rounds
  */
 export interface ModelRankingHistory {

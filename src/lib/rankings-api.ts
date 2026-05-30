@@ -2,7 +2,7 @@
  * Rankings API - Functions for fetching round leaderboard data
  * Used to calculate model rankings based on custom score formulas
  */
-import type { RoundLeaderboard, RoundModelScore, ScoreFormula, ModelRankingHistory } from '$lib/types.js';
+import type { RoundModelScore, ScoreFormula, ModelRankingHistory } from '$lib/types.js';
 import { config } from '$lib/config.js';
 import { swrCache } from '$lib/utils/swr-cache.svelte.js';
 
@@ -18,6 +18,14 @@ export const DEFAULT_SCORE_FORMULA: ScoreFormula = {
 	tcWeight: 0
 };
 
+// Crypto tournament does not expose v3UserProfile; it requires the v2 round API.
+const CRYPTO_TOURNAMENT = 12;
+
+// Default comparison-pool size. Kept modest so a cold-cache calculation stays
+// within a reasonable wall-clock time given the rate limit below; the SWR cache
+// makes repeat loads fast.
+const DEFAULT_COMPARISON_POOL_SIZE = 200;
+
 // Rate limiting configuration
 const RATE_LIMIT = {
 	requestsPerMinute: 30,
@@ -29,6 +37,17 @@ const RATE_LIMIT = {
  */
 function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Delay (ms) required after firing `requestsInBatch` parallel requests so that
+ * the effective request cadence does not exceed `RATE_LIMIT.requestsPerMinute`.
+ * A batch of N concurrent requests must be followed by N requests' worth of the
+ * per-minute budget, otherwise parallel batches silently blow past the limit.
+ */
+function batchDelayMs(requestsInBatch: number): number {
+	const budgetMs = (requestsInBatch / RATE_LIMIT.requestsPerMinute) * 60_000;
+	return Math.max(RATE_LIMIT.minDelayMs, Math.ceil(budgetMs));
 }
 
 /**
@@ -64,6 +83,16 @@ async function query<T>(graphqlQuery: string, variables?: Record<string, unknown
 }
 
 /**
+ * Coerce a GraphQL numeric/decimal value (which may arrive as a string, e.g.
+ * `selectedStakeValue: "0.000..."`) into a finite number, or null.
+ */
+function toNumber(value: number | string | null | undefined): number | null {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === 'number' ? value : Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
  * Get the current round number
  */
 export async function getCurrentRound(tournament: number = 8): Promise<number> {
@@ -94,195 +123,170 @@ export async function getCurrentRound(tournament: number = 8): Promise<number> {
 }
 
 /**
- * Fetch staked models for a specific round from the leaderboard
- * Uses paginated leaderboard API to get all staked models
+ * A model reference used to fetch round performance. `modelId` is required for
+ * Crypto (tournament 12) because that tournament has no `v3UserProfile`.
  */
-export async function fetchRoundLeaderboard(
-	roundNumber: number,
-	tournament: number = 8,
-	onProgress?: (loaded: number, total: number) => void
-): Promise<RoundLeaderboard> {
-	const cacheKey = `round-leaderboard:r${roundNumber}:t${tournament}`;
-
-	// Check cache first
-	const cached = swrCache.get<RoundLeaderboard>(cacheKey);
-	if (cached.data && !cached.isStale) {
-		return cached.data;
-	}
-
-	return swrCache.fetch(cacheKey, async () => {
-		const models: RoundModelScore[] = [];
-		const batchSize = 500;
-		let offset = 0;
-		let totalFetched = 0;
-		const maxModels = 10000; // Safety limit
-
-		while (offset < maxModels) {
-			try {
-				// For Classic/Signals tournaments, use v3 API with round-specific performance
-				const result = await query<{
-					accountLeaderboard: Array<{
-						id: string;
-						username: string;
-						models: Array<{
-							id: string;
-							displayName: string;
-							tournament: number;
-						}> | null;
-					}>;
-				}>(`
-					query getLeaderboardModels($limit: Int!, $offset: Int!, $tournament: Int!) {
-						accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
-							id
-							username
-							models {
-								id
-								displayName
-								tournament
-							}
-						}
-					}
-				`, { limit: batchSize, offset, tournament });
-
-				const batch = result.accountLeaderboard;
-				if (!batch || batch.length === 0) break;
-
-				// Collect all models from this batch
-				for (const account of batch) {
-					if (account.models) {
-						for (const model of account.models) {
-							if (model.tournament === tournament) {
-								models.push({
-									modelId: model.id,
-									modelName: model.displayName,
-									username: account.username,
-									roundNumber,
-									corr: null,
-									mmc: null,
-									tc: null,
-									stakeValue: null,
-									customScore: null,
-									rank: null
-								});
-							}
-						}
-					}
-				}
-
-				totalFetched += batch.length;
-				if (onProgress) {
-					onProgress(totalFetched, maxModels);
-				}
-
-				offset += batchSize;
-
-				// Rate limiting
-				await sleep(RATE_LIMIT.minDelayMs);
-
-				if (batch.length < batchSize) break;
-			} catch (error) {
-				console.error(`Error fetching leaderboard at offset ${offset}:`, error);
-				break;
-			}
-		}
-
-		return {
-			roundNumber,
-			tournament,
-			models,
-			fetchedAt: Date.now()
-		};
-	});
+export interface ModelRef {
+	modelName: string;
+	modelId?: string;
+	username?: string;
 }
 
 /**
- * Fetch performance data for multiple models for a specific round
- * This is the main function used to get ranking data
+ * Fetch resolved round performance for a single Classic/Signals model via
+ * `v3UserProfile` (keyed by model name).
+ */
+async function fetchProfileRoundPerformance(modelName: string): Promise<RoundModelScore[]> {
+	const result = await query<{
+		v3UserProfile: {
+			id: string;
+			username: string;
+			accountName: string;
+			roundModelPerformances: Array<{
+				roundNumber: number;
+				corr: number | string | null;
+				corr20V2: number | string | null;
+				mmc: number | string | null;
+				tc: number | string | null;
+				selectedStakeValue: number | string | null;
+				roundResolved: boolean | null;
+			}>;
+		} | null;
+	}>(`
+		query getModelRoundPerformance($modelName: String!) {
+			v3UserProfile(modelName: $modelName) {
+				id
+				username
+				accountName
+				roundModelPerformances {
+					roundNumber
+					corr
+					corr20V2
+					mmc
+					tc
+					selectedStakeValue
+					roundResolved
+				}
+			}
+		}
+	`, { modelName });
+
+	if (!result.v3UserProfile) {
+		return [];
+	}
+
+	return result.v3UserProfile.roundModelPerformances
+		.filter(r => r.roundResolved)
+		.map(r => ({
+			modelId: result.v3UserProfile!.id,
+			modelName: result.v3UserProfile!.username,
+			username: result.v3UserProfile!.accountName,
+			roundNumber: r.roundNumber,
+			corr: toNumber(r.corr20V2) ?? toNumber(r.corr),
+			mmc: toNumber(r.mmc),
+			tc: toNumber(r.tc),
+			stakeValue: toNumber(r.selectedStakeValue),
+			customScore: null,
+			rank: null
+		}));
+}
+
+/**
+ * Fetch resolved round performance for a single Crypto model via the v2 round
+ * API. Crypto has no `v3UserProfile`, so this path is required for tournament 12
+ * and needs the model UUID. Scores are reported per submission metric.
+ */
+async function fetchCryptoRoundPerformance(ref: ModelRef): Promise<RoundModelScore[]> {
+	if (!ref.modelId) {
+		return [];
+	}
+
+	const result = await query<{
+		v2RoundModelPerformances: Array<{
+			roundNumber: number;
+			roundResolved: boolean | null;
+			submissionScores: Array<{ displayName: string; value: number | string | null }> | null;
+		}>;
+	}>(`
+		query getCryptoModelRoundPerformance($modelId: String!, $tournament: Int!, $lastNRounds: Int!) {
+			v2RoundModelPerformances(modelId: $modelId, tournament: $tournament, lastNRounds: $lastNRounds) {
+				roundNumber
+				roundResolved
+				submissionScores {
+					displayName
+					value
+				}
+			}
+		}
+	`, { modelId: ref.modelId, tournament: CRYPTO_TOURNAMENT, lastNRounds: 100 });
+
+	if (!result.v2RoundModelPerformances) {
+		return [];
+	}
+
+	return result.v2RoundModelPerformances
+		.filter(r => r.roundResolved)
+		.map(r => {
+			const scores = r.submissionScores ?? [];
+			const getScore = (name: string): number | null => {
+				const match = scores.find(s => s.displayName === name);
+				return match ? toNumber(match.value) : null;
+			};
+			return {
+				modelId: ref.modelId!,
+				modelName: ref.modelName,
+				username: ref.username ?? '',
+				roundNumber: r.roundNumber,
+				corr: getScore('corr'),
+				mmc: getScore('mmc'),
+				tc: getScore('tc'),
+				stakeValue: null,
+				customScore: null,
+				rank: null
+			};
+		});
+}
+
+/**
+ * Fetch performance data for multiple models for a specific round.
+ * This is the main function used to get ranking data. Classic/Signals models go
+ * through `v3UserProfile`; Crypto (tournament 12) models route through the
+ * Crypto-specific v2 round API since `v3UserProfile` returns null for them.
  */
 export async function fetchModelsRoundPerformance(
-	modelNames: string[],
+	models: ModelRef[],
 	tournament: number = 8,
 	onProgress?: (loaded: number, total: number) => void
 ): Promise<Map<string, RoundModelScore[]>> {
 	const results = new Map<string, RoundModelScore[]>();
-	const total = modelNames.length;
+	const total = models.length;
 	let loaded = 0;
+	const isCrypto = tournament === CRYPTO_TOURNAMENT;
 
 	// Process models in batches to respect rate limits
 	const batchSize = 5;
 
-	for (let i = 0; i < modelNames.length; i += batchSize) {
-		const batch = modelNames.slice(i, i + batchSize);
+	for (let i = 0; i < models.length; i += batchSize) {
+		const batch = models.slice(i, i + batchSize);
 
 		// Fetch batch in parallel
-		const batchPromises = batch.map(async (modelName) => {
-			const cacheKey = `model-rounds:${modelName.toLowerCase()}:t${tournament}`;
+		const batchPromises = batch.map(async (ref) => {
+			const cacheKey = `model-rounds:${ref.modelName.toLowerCase()}:t${tournament}`;
 
 			const cached = swrCache.get<RoundModelScore[]>(cacheKey);
 			if (cached.data && !cached.isStale) {
-				return { modelName, data: cached.data };
+				return { modelName: ref.modelName, data: cached.data };
 			}
 
 			try {
-				const data = await swrCache.fetch(cacheKey, async () => {
-					const result = await query<{
-						v3UserProfile: {
-							id: string;
-							username: string;
-							accountName: string;
-							roundModelPerformances: Array<{
-								roundNumber: number;
-								corr: number | null;
-								corr20V2: number | null;
-								mmc: number | null;
-								tc: number | null;
-								selectedStakeValue: number | null;
-								roundResolved: boolean | null;
-							}>;
-						} | null;
-					}>(`
-						query getModelRoundPerformance($modelName: String!) {
-							v3UserProfile(modelName: $modelName) {
-								id
-								username
-								accountName
-								roundModelPerformances {
-									roundNumber
-									corr
-									corr20V2
-									mmc
-									tc
-									selectedStakeValue
-									roundResolved
-								}
-							}
-						}
-					`, { modelName });
+				const data = await swrCache.fetch(cacheKey, () =>
+					isCrypto ? fetchCryptoRoundPerformance(ref) : fetchProfileRoundPerformance(ref.modelName)
+				);
 
-					if (!result.v3UserProfile) {
-						return [];
-					}
-
-					return result.v3UserProfile.roundModelPerformances
-						.filter(r => r.roundResolved)
-						.map(r => ({
-							modelId: result.v3UserProfile!.id,
-							modelName: result.v3UserProfile!.username,
-							username: result.v3UserProfile!.accountName,
-							roundNumber: r.roundNumber,
-							corr: r.corr20V2 ?? r.corr,
-							mmc: r.mmc,
-							tc: r.tc,
-							stakeValue: r.selectedStakeValue,
-							customScore: null,
-							rank: null
-						}));
-				});
-
-				return { modelName, data };
+				return { modelName: ref.modelName, data };
 			} catch (error) {
-				console.error(`Error fetching performance for ${modelName}:`, error);
-				return { modelName, data: [] };
+				console.error(`Error fetching performance for ${ref.modelName}:`, error);
+				return { modelName: ref.modelName, data: [] };
 			}
 		});
 
@@ -296,9 +300,10 @@ export async function fetchModelsRoundPerformance(
 			}
 		}
 
-		// Rate limiting between batches
-		if (i + batchSize < modelNames.length) {
-			await sleep(RATE_LIMIT.minDelayMs);
+		// Rate limiting between batches — spaced so the effective cadence of the
+		// parallel batch respects RATE_LIMIT.requestsPerMinute.
+		if (i + batchSize < models.length) {
+			await sleep(batchDelayMs(batch.length));
 		}
 	}
 
@@ -328,69 +333,103 @@ export function calculateCustomScore(
 		   (formula.tcWeight * tcValue);
 }
 
-/**
- * Fetch top staked models from leaderboard
- * Returns models with the highest stake values
- */
-export async function fetchTopStakedModels(
-	tournament: number = 8,
-	limit: number = 500,
-	onProgress?: (loaded: number, total: number) => void
-): Promise<Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>> {
-	const cacheKey = `top-staked:t${tournament}:l${limit}`;
+/** A model entry from the leaderboard, used to build the comparison pool. */
+export interface ComparisonPoolModel {
+	modelId: string;
+	modelName: string;
+	username: string;
+}
 
-	const cached = swrCache.get<Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>>(cacheKey);
+/**
+ * Fetch one page of the Classic/Signals comparison pool. Each `accountLeaderboard`
+ * entry is itself a model row (id = model id, displayName = model name) and is
+ * already filtered by the tournament arg.
+ */
+async function fetchAccountLeaderboardBatch(
+	tournament: number,
+	limit: number,
+	offset: number
+): Promise<ComparisonPoolModel[]> {
+	const result = await query<{
+		accountLeaderboard: Array<{ id: string; username: string; displayName: string | null }>;
+	}>(`
+		query getComparisonPool($limit: Int!, $offset: Int!, $tournament: Int!) {
+			accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
+				id
+				username
+				displayName
+			}
+		}
+	`, { limit, offset, tournament });
+
+	return (result.accountLeaderboard ?? [])
+		.filter(e => e.displayName)
+		.map(e => ({ modelId: e.id, modelName: e.displayName!, username: e.username }));
+}
+
+/**
+ * Fetch one page of the Crypto comparison pool. The Crypto `accountLeaderboard`
+ * is account-level (its `id` is an account id, unusable with v2RoundModelPerformances),
+ * so the model-level `cryptosignalsLeaderboard` is used instead — there `id` is the
+ * model UUID and `username` is the model name.
+ */
+async function fetchCryptoLeaderboardBatch(
+	limit: number,
+	offset: number
+): Promise<ComparisonPoolModel[]> {
+	const result = await query<{
+		cryptosignalsLeaderboard: Array<{ id: string; username: string }>;
+	}>(`
+		query getCryptoComparisonPool($limit: Int!, $offset: Int!) {
+			cryptosignalsLeaderboard(limit: $limit, offset: $offset) {
+				id
+				username
+			}
+		}
+	`, { limit, offset });
+
+	return (result.cryptosignalsLeaderboard ?? [])
+		.filter(e => e.id && e.username)
+		.map(e => ({ modelId: e.id, modelName: e.username, username: e.username }));
+}
+
+/**
+ * Fetch the comparison pool of models from the leaderboard.
+ *
+ * Returns the first `limit` models in the leaderboard's API-defined order (the
+ * leaderboard endpoint does not sort by stake, so this is not a "top staked"
+ * list). Stake values are not fetched here — ranking is computed later from
+ * per-model round performance.
+ */
+export async function fetchComparisonPoolModels(
+	tournament: number = 8,
+	limit: number = DEFAULT_COMPARISON_POOL_SIZE,
+	onProgress?: (loaded: number, total: number) => void
+): Promise<ComparisonPoolModel[]> {
+	const cacheKey = `comparison-pool:t${tournament}:l${limit}`;
+
+	const cached = swrCache.get<ComparisonPoolModel[]>(cacheKey);
 	if (cached.data && !cached.isStale) {
 		return cached.data;
 	}
 
+	const isCrypto = tournament === CRYPTO_TOURNAMENT;
+
 	return swrCache.fetch(cacheKey, async () => {
-		const models: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }> = [];
+		const models: ComparisonPoolModel[] = [];
 		const batchSize = 100;
 		let offset = 0;
 
 		while (models.length < limit && offset < 5000) {
 			try {
-				const result = await query<{
-					accountLeaderboard: Array<{
-						id: string;
-						username: string;
-						models: Array<{
-							id: string;
-							displayName: string;
-							tournament: number;
-						}> | null;
-					}>;
-				}>(`
-					query getTopStakedModels($limit: Int!, $offset: Int!, $tournament: Int!) {
-						accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
-							id
-							username
-							models {
-								id
-								displayName
-								tournament
-							}
-						}
-					}
-				`, { limit: batchSize, offset, tournament });
+				const batch = isCrypto
+					? await fetchCryptoLeaderboardBatch(batchSize, offset)
+					: await fetchAccountLeaderboardBatch(tournament, batchSize, offset);
 
-				const batch = result.accountLeaderboard;
-				if (!batch || batch.length === 0) break;
+				if (batch.length === 0) break;
 
-				for (const account of batch) {
-					if (account.models) {
-						for (const model of account.models) {
-							if (model.tournament === tournament && models.length < limit) {
-								models.push({
-									modelId: model.id,
-									modelName: model.displayName,
-									username: account.username,
-									stakeValue: 0 // Will be populated when fetching performance
-								});
-							}
-						}
-					}
+				for (const entry of batch) {
+					if (models.length < limit) models.push(entry);
 				}
 
 				if (onProgress) {
@@ -402,7 +441,7 @@ export async function fetchTopStakedModels(
 
 				if (batch.length < batchSize) break;
 			} catch (error) {
-				console.error(`Error fetching top staked models at offset ${offset}:`, error);
+				console.error(`Error fetching comparison pool at offset ${offset}:`, error);
 				break;
 			}
 		}
@@ -416,35 +455,41 @@ export async function fetchTopStakedModels(
  * This fetches performance data and calculates rankings based on the custom score
  */
 export async function calculateModelRankings(
-	selectedModelNames: string[],
+	selectedModels: ModelRef[],
 	startRound: number,
 	endRound: number,
 	formula: ScoreFormula,
 	tournament: number = 8,
 	onProgress?: (stage: string, loaded: number, total: number) => void
 ): Promise<ModelRankingHistory[]> {
-	if (selectedModelNames.length === 0) {
+	if (selectedModels.length === 0) {
 		return [];
 	}
 
-	// Step 1: Fetch top staked models for comparison pool
-	if (onProgress) onProgress('Fetching top staked models', 0, 1);
+	const isCrypto = tournament === CRYPTO_TOURNAMENT;
 
-	const topModels = await fetchTopStakedModels(tournament, 500, (loaded, total) => {
-		if (onProgress) onProgress('Fetching top staked models', loaded, total);
+	// Step 1: Fetch comparison pool from the leaderboard
+	if (onProgress) onProgress('Fetching comparison pool', 0, 1);
+
+	const poolModels = await fetchComparisonPoolModels(tournament, DEFAULT_COMPARISON_POOL_SIZE, (loaded, total) => {
+		if (onProgress) onProgress('Fetching comparison pool', loaded, total);
 	});
 
-	// Ensure selected models are included
-	const allModelNames = new Set(topModels.map(m => m.modelName.toLowerCase()));
-	for (const name of selectedModelNames) {
-		allModelNames.add(name.toLowerCase());
+	// Combine the comparison pool with the selected models, deduped by name.
+	// Selected models take precedence so their ids/usernames are preserved.
+	const refsByName = new Map<string, ModelRef>();
+	for (const m of poolModels) {
+		refsByName.set(m.modelName.toLowerCase(), m);
+	}
+	for (const m of selectedModels) {
+		refsByName.set(m.modelName.toLowerCase(), m);
 	}
 
 	// Step 2: Fetch performance data for all models
-	if (onProgress) onProgress('Fetching model performance', 0, allModelNames.size);
+	if (onProgress) onProgress('Fetching model performance', 0, refsByName.size);
 
 	const performanceData = await fetchModelsRoundPerformance(
-		Array.from(allModelNames),
+		Array.from(refsByName.values()),
 		tournament,
 		(loaded, total) => {
 			if (onProgress) onProgress('Fetching model performance', loaded, total);
@@ -454,11 +499,11 @@ export async function calculateModelRankings(
 	// Step 3: Calculate rankings for each round
 	if (onProgress) onProgress('Calculating rankings', 0, endRound - startRound + 1);
 
-	const selectedModelsLower = selectedModelNames.map(n => n.toLowerCase());
+	const selectedModelsLower = selectedModels.map(m => m.modelName.toLowerCase());
 	const rankingHistories: Map<string, ModelRankingHistory> = new Map();
 
 	// Initialize ranking histories for selected models
-	for (const modelName of selectedModelNames) {
+	for (const { modelName } of selectedModels) {
 		const modelData = performanceData.get(modelName.toLowerCase());
 		if (modelData && modelData.length > 0) {
 			rankingHistories.set(modelName.toLowerCase(), {
@@ -477,7 +522,9 @@ export async function calculateModelRankings(
 
 		for (const [modelNameLower, rounds] of performanceData) {
 			const roundData = rounds.find(r => r.roundNumber === round);
-			if (roundData && roundData.stakeValue !== null && roundData.stakeValue > 0) {
+			// Crypto has no stake data, so rank every participating model;
+			// Classic/Signals only rank staked models.
+			if (roundData && (isCrypto || (roundData.stakeValue !== null && roundData.stakeValue > 0))) {
 				const score = calculateCustomScore(
 					roundData.corr,
 					roundData.mmc,
@@ -542,21 +589,22 @@ export async function getTopModelsForRound(
 	tournament: number = 8,
 	limit: number = 10
 ): Promise<RoundModelScore[]> {
-	// Fetch top staked models
-	const topModels = await fetchTopStakedModels(tournament, 500);
+	const isCrypto = tournament === CRYPTO_TOURNAMENT;
+
+	// Fetch the comparison pool from the leaderboard (ComparisonPoolModel
+	// satisfies ModelRef, so it can be passed straight through).
+	const poolModels = await fetchComparisonPoolModels(tournament, DEFAULT_COMPARISON_POOL_SIZE);
 
 	// Fetch performance data
-	const performanceData = await fetchModelsRoundPerformance(
-		topModels.map(m => m.modelName),
-		tournament
-	);
+	const performanceData = await fetchModelsRoundPerformance(poolModels, tournament);
 
 	// Calculate scores and sort
 	const scores: RoundModelScore[] = [];
 
-	for (const [modelNameLower, rounds] of performanceData) {
+	for (const [, rounds] of performanceData) {
 		const roundData = rounds.find(r => r.roundNumber === roundNumber);
-		if (roundData && roundData.stakeValue !== null && roundData.stakeValue > 0) {
+		// Crypto has no stake data, so include every participating model.
+		if (roundData && (isCrypto || (roundData.stakeValue !== null && roundData.stakeValue > 0))) {
 			const score = calculateCustomScore(
 				roundData.corr,
 				roundData.mmc,

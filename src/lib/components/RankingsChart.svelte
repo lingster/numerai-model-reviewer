@@ -59,7 +59,7 @@
 	);
 
 	// Calculate data range
-	const roundRange = $derived(() => {
+	const roundRange = $derived.by(() => {
 		if (visibleHistories.length === 0) return [startRound, endRound];
 		const allRounds = visibleHistories.flatMap(h => h.rankings.map(r => r.roundNumber));
 		return [
@@ -68,7 +68,7 @@
 		];
 	});
 
-	const maxRank = $derived(() => {
+	const maxRank = $derived.by(() => {
 		if (visibleHistories.length === 0) return 100;
 		const allRanks = visibleHistories
 			.flatMap(h => h.rankings.map(r => r.rank))
@@ -79,13 +79,13 @@
 	// Scales
 	const xScale = $derived(
 		d3Scale.scaleLinear()
-			.domain(roundRange())
+			.domain(roundRange)
 			.range([0, width])
 	);
 
 	const yScale = $derived(
 		d3Scale.scaleLinear()
-			.domain([1, maxRank()]) // Rank 1 at top
+			.domain([1, maxRank]) // Rank 1 at top
 			.range([0, height])
 	);
 
@@ -99,8 +99,8 @@
 	);
 
 	// Generate tick values for axes
-	const xTicks = $derived(() => {
-		const [min, max] = roundRange();
+	const xTicks = $derived.by(() => {
+		const [min, max] = roundRange;
 		const range = max - min;
 		const step = Math.max(1, Math.ceil(range / 10));
 		const ticks: number[] = [];
@@ -110,8 +110,8 @@
 		return ticks;
 	});
 
-	const yTicks = $derived(() => {
-		const max = maxRank();
+	const yTicks = $derived.by(() => {
+		const max = maxRank;
 		const step = Math.max(1, Math.ceil(max / 10));
 		const ticks: number[] = [];
 		for (let i = 1; i <= max; i += step) {
@@ -162,6 +162,25 @@
 			visible: true,
 			x: event.clientX - rect.left + margin.left,
 			y: event.clientY - rect.top + margin.top,
+			modelName: history.modelName,
+			round: dataPoint.roundNumber,
+			rank: dataPoint.rank,
+			score: dataPoint.customScore
+		};
+	}
+
+	// Keyboard focus has no pointer coordinates, so position the tooltip from the
+	// focused circle's own geometry (cx/cy are in the inner <g> space offset by margin).
+	function showTooltipFromFocus(
+		event: FocusEvent,
+		history: ModelRankingHistory,
+		dataPoint: { roundNumber: number; rank: number | null; customScore: number | null }
+	) {
+		const circle = event.currentTarget as SVGCircleElement;
+		tooltip = {
+			visible: true,
+			x: parseFloat(circle.getAttribute('cx') ?? '0') + margin.left,
+			y: parseFloat(circle.getAttribute('cy') ?? '0') + margin.top,
 			modelName: history.modelName,
 			round: dataPoint.roundNumber,
 			rank: dataPoint.rank,
@@ -231,7 +250,7 @@
 					<!-- Grid lines -->
 					<g class="grid-lines">
 						<!-- Horizontal grid lines -->
-						{#each yTicks() as tick}
+						{#each yTicks as tick}
 							<line
 								x1="0"
 								y1={yScale(tick)}
@@ -243,7 +262,7 @@
 							/>
 						{/each}
 						<!-- Vertical grid lines -->
-						{#each xTicks() as tick}
+						{#each xTicks as tick}
 							<line
 								x1={xScale(tick)}
 								y1="0"
@@ -259,7 +278,7 @@
 					<!-- X Axis -->
 					<g class="x-axis" transform="translate(0, {height})">
 						<line x1="0" y1="0" x2={width} y2="0" stroke="var(--retro-text-dim)" />
-						{#each xTicks() as tick}
+						{#each xTicks as tick}
 							<g transform="translate({xScale(tick)}, 0)">
 								<line y1="0" y2="6" stroke="var(--retro-text-dim)" />
 								<text
@@ -287,7 +306,7 @@
 					<!-- Y Axis -->
 					<g class="y-axis">
 						<line x1="0" y1="0" x2="0" y2={height} stroke="var(--retro-text-dim)" />
-						{#each yTicks() as tick}
+						{#each yTicks as tick}
 							<g transform="translate(0, {yScale(tick)})">
 								<line x1="-6" x2="0" stroke="var(--retro-text-dim)" />
 								<text
@@ -342,7 +361,7 @@
 								tabindex="0"
 								onmouseenter={(e) => showTooltip(e, history, dataPoint)}
 								onmouseleave={hideTooltip}
-								onfocus={(e) => showTooltip(e as unknown as MouseEvent, history, dataPoint)}
+								onfocus={(e) => showTooltipFromFocus(e, history, dataPoint)}
 								onblur={hideTooltip}
 							/>
 						{/each}
@@ -373,7 +392,7 @@
 		<!-- Chart info -->
 		<div class="mt-4 text-xs retro-text-secondary">
 			<p>Showing ranks for {visibleHistories.length} of {rankingHistories.length} models</p>
-			<p>Round range: {roundRange()[0]} - {roundRange()[1]}</p>
+			<p>Round range: {roundRange[0]} - {roundRange[1]}</p>
 		</div>
 	{/if}
 </div>
