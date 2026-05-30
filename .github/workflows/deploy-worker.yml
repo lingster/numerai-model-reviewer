@@ -1,0 +1,53 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+
+      - name: Smoke test deployed worker
+        run: |
+          set -e
+          for i in 1 2 3 4 5; do
+            status=$(curl -sS -o /tmp/health.json -w "%{http_code}" https://numerdiff-api.imperialai.ai/health || true)
+            if [ "$status" = "200" ]; then
+              echo "Health check OK:"; cat /tmp/health.json; echo
+              exit 0
+            fi
+            echo "Attempt $i: status=$status, retrying..."
+            sleep 3
+          done
+          echo "Health check failed after deploy"; exit 1
