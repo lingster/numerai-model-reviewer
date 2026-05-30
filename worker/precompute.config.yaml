@@ -1,0 +1,29 @@
+# Precompute configuration for Numerai rankings data
+# This file controls what data the precompute script fetches and stores in D1
+
+# Tournament ID (8 = Classic, 11 = Crypto)
+tournament: 8
+
+# Number of top staked models to fetch from the leaderboard
+# Set high enough to capture ALL staked models for accurate historical rankings
+topN: 10000
+
+# Batch size for aliased GraphQL queries
+# Max is 3 — higher values exceed the Numerai API rate limit
+batchSize: 3
+
+# Delay between API requests in milliseconds
+rateLimitMs: 1000
+
+# Specific user accounts to always include (their models will be fetched
+# even if they're not in the top N staked models)
+# Add usernames here to ensure their models are always precomputed
+users:
+  # - myusername
+  # - anotherusername
+
+# Specific model names to always include
+# These models will be fetched regardless of stake ranking
+models:
+  # - my_model_name
+  # - another_model

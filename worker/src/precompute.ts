@@ -1,0 +1,714 @@
+/**
+ * Precompute Rankings Script
+ *
+ * Standalone script that fetches top staked models and their performance data
+ * from the Numerai API and stores it in D1.
+ *
+ * Usage:
+ *   npm run precompute:dev                    -- uses defaults from precompute.config.yaml
+ *   npm run precompute:dev -- --top-n 100     -- override top N models
+ *   npm run precompute:dev -- --users alice,bob  -- include specific users
+ *   npm run precompute:dev -- --models m1,m2  -- include specific models
+ *   npm run precompute:prod                   -- populates remote D1
+ *   npm run precompute:prod -- --no-cache     -- bypass CSV cache, force fresh API fetch
+ */
+
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join } from 'path';
+import { parse as parseYaml } from 'yaml';
+
+const NUMERAI_API_URL = 'https://api-tournament.numer.ai/graphql';
+
+const CACHE_DIR = join(process.cwd(), '.cache');
+const CACHE_TOP_MODELS = join(CACHE_DIR, 'top_models.csv');
+const CACHE_PERFORMANCES = join(CACHE_DIR, 'performances.csv');
+const CACHE_META = join(CACHE_DIR, 'meta.json');
+
+// --- Config types ---
+
+interface PrecomputeConfig {
+  tournament: number;
+  topN: number;
+  batchSize: number;
+  rateLimitMs: number;
+  users: string[];
+  models: string[];
+}
+
+const DEFAULT_CONFIG: PrecomputeConfig = {
+  tournament: 8,
+  topN: 10000,
+  // Max batchSize is 3 — higher values exceed the Numerai API rate limit
+  batchSize: 3,
+  rateLimitMs: 1000,
+  users: [],
+  models: []
+};
+
+// --- Config loading ---
+
+function loadYamlConfig(): Partial<PrecomputeConfig> {
+  const configPaths = [
+    join(process.cwd(), 'precompute.config.yaml'),
+    join(process.cwd(), 'precompute.config.yml')
+  ];
+
+  for (const configPath of configPaths) {
+    try {
+      const content = readFileSync(configPath, 'utf-8');
+      const parsed = parseYaml(content);
+      console.log(`Loaded config from ${configPath}`);
+      return {
+        tournament: parsed.tournament,
+        topN: parsed.topN,
+        batchSize: parsed.batchSize,
+        rateLimitMs: parsed.rateLimitMs,
+        users: Array.isArray(parsed.users) ? parsed.users.filter(Boolean) : [],
+        models: Array.isArray(parsed.models) ? parsed.models.filter(Boolean) : []
+      };
+    } catch {
+      // File not found or parse error, try next
+    }
+  }
+
+  console.log('No config file found, using defaults');
+  return {};
+}
+
+function parseCliArgs(): { isLocal: boolean; noCache: boolean; overrides: Partial<PrecomputeConfig> } {
+  const args = process.argv.slice(2);
+  const isLocal = args.includes('--local');
+  const noCache = args.includes('--no-cache');
+  const overrides: Partial<PrecomputeConfig> = {};
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const next = args[i + 1];
+
+    switch (arg) {
+      case '--top-n':
+        if (next) { overrides.topN = parseInt(next, 10); i++; }
+        break;
+      case '--tournament':
+        if (next) { overrides.tournament = parseInt(next, 10); i++; }
+        break;
+      case '--users':
+        if (next) { overrides.users = next.split(',').map((s: string) => s.trim()).filter(Boolean); i++; }
+        break;
+      case '--models':
+        if (next) { overrides.models = next.split(',').map((s: string) => s.trim()).filter(Boolean); i++; }
+        break;
+      case '--batch-size':
+        if (next) { overrides.batchSize = parseInt(next, 10); i++; }
+        break;
+      case '--rate-limit':
+        if (next) { overrides.rateLimitMs = parseInt(next, 10); i++; }
+        break;
+    }
+  }
+
+  return { isLocal, noCache, overrides };
+}
+
+function buildConfig(): { config: PrecomputeConfig; isLocal: boolean; noCache: boolean } {
+  const yamlConfig = loadYamlConfig();
+  const { isLocal, noCache, overrides } = parseCliArgs();
+
+  // Merge: defaults < yaml < cli args
+  const config: PrecomputeConfig = {
+    ...DEFAULT_CONFIG,
+    ...yamlConfig,
+    ...overrides,
+    // Merge arrays: yaml users + cli users (deduplicated)
+    users: [...new Set([
+      ...(yamlConfig.users ?? []),
+      ...(overrides.users ?? [])
+    ])],
+    models: [...new Set([
+      ...(yamlConfig.models ?? []),
+      ...(overrides.models ?? [])
+    ])]
+  };
+
+  return { config, isLocal, noCache };
+}
+
+// --- API helpers ---
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+interface GraphQLResponse<T> {
+  data?: T;
+  errors?: Array<{ message: string }>;
+}
+
+async function graphqlQuery<T>(queryStr: string, variables?: Record<string, unknown>): Promise<T> {
+  const maxRetries = 5;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const response = await fetch(NUMERAI_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: queryStr, variables })
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      const isRateLimit = response.status === 429 || text.includes('rate limit');
+      if (isRateLimit && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s, 16s, 32s
+        console.log(`  Rate limited, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
+      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+
+    const result: GraphQLResponse<T> = await response.json() as GraphQLResponse<T>;
+    if (result.errors?.length) {
+      const isRateLimit = result.errors.some(e => e.message.toLowerCase().includes('rate limit'));
+      if (isRateLimit && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt + 1) * 1000;
+        console.log(`  Rate limited, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
+      throw new Error(result.errors.map(e => e.message).join(', '));
+    }
+    if (!result.data) {
+      throw new Error('No data returned from API');
+    }
+    return result.data;
+  }
+  throw new Error('Max retries exceeded');
+}
+
+async function getCurrentRound(tournament: number): Promise<number> {
+  const result = await graphqlQuery<{ rounds: Array<{ number: number }> }>(
+    `query($tournament: Int!) { rounds(tournament: $tournament, limit: 1) { number } }`,
+    { tournament }
+  );
+  return result.rounds[0].number;
+}
+
+// --- Data fetching ---
+
+async function fetchTopStakedModels(
+  tournament: number,
+  limit: number,
+  rateLimitMs: number
+): Promise<Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>> {
+  const models: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }> = [];
+  const batchSize = 500;
+  let offset = 0;
+
+  while (models.length < limit && offset < limit + batchSize) {
+    const result = await graphqlQuery<{
+      accountLeaderboard: Array<{
+        id: string;
+        username: string;
+        displayName: string;
+        nmrStaked: string | null;
+      }>;
+    }>(
+      `query($limit: Int!, $offset: Int!, $tournament: Int!) {
+        accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
+          id username displayName nmrStaked
+        }
+      }`,
+      { limit: batchSize, offset, tournament }
+    );
+
+    const batch = result.accountLeaderboard;
+    if (!batch || batch.length === 0) break;
+
+    for (const entry of batch) {
+      if (models.length < limit) {
+        models.push({
+          modelId: entry.id,
+          modelName: entry.displayName || entry.username,
+          username: entry.username,
+          stakeValue: entry.nmrStaked ? parseFloat(entry.nmrStaked) : 0
+        });
+      }
+    }
+
+    console.log(`  Fetched ${models.length}/${limit} top staked models...`);
+    offset += batchSize;
+    await sleep(rateLimitMs);
+    if (batch.length < batchSize) break;
+  }
+
+  return models.slice(0, limit);
+}
+
+/**
+ * Fetch models for specific user accounts
+ * Returns the model names belonging to those accounts
+ */
+async function fetchUserModels(
+  usernames: string[],
+  tournament: number,
+  rateLimitMs: number
+): Promise<Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>> {
+  const models: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }> = [];
+
+  for (const username of usernames) {
+    try {
+      const result = await graphqlQuery<{
+        v3UserProfile: {
+          id: string;
+          username: string;
+          accountName: string;
+          stakeValue: number | null;
+        } | null;
+      }>(
+        `query($modelName: String!) {
+          v3UserProfile(modelName: $modelName) {
+            id username accountName
+            stakeValue
+          }
+        }`,
+        { modelName: username }
+      );
+
+      if (result.v3UserProfile) {
+        models.push({
+          modelId: result.v3UserProfile.id,
+          modelName: result.v3UserProfile.username,
+          username: result.v3UserProfile.accountName,
+          stakeValue: result.v3UserProfile.stakeValue ?? 0
+        });
+      }
+      await sleep(rateLimitMs);
+    } catch (error) {
+      console.error(`  Warning: Could not fetch user "${username}":`, error instanceof Error ? error.message : error);
+    }
+  }
+
+  return models;
+}
+
+type PerformanceRound = {
+  roundNumber: number;
+  corr: number | null;
+  mmc: number | null;
+  tc: number | null;
+  stakeValue: number | null;
+};
+
+type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
+
+// --- CSV cache ---
+
+interface CacheMeta {
+  tournament: number;
+  topN: number;
+  users: string[];
+  models: string[];
+  timestamp: string;
+}
+
+function csvEscape(value: string): string {
+  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+    return '"' + value.replace(/"/g, '""') + '"';
+  }
+  return value;
+}
+
+function csvParseLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        fields.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+function cacheConfigFingerprint(config: PrecomputeConfig): CacheMeta {
+  return {
+    tournament: config.tournament,
+    topN: config.topN,
+    users: [...config.users].sort(),
+    models: [...config.models].sort(),
+    timestamp: new Date().toISOString()
+  };
+}
+
+function cacheIsValid(config: PrecomputeConfig): boolean {
+  try {
+    if (!existsSync(CACHE_META) || !existsSync(CACHE_TOP_MODELS) || !existsSync(CACHE_PERFORMANCES)) {
+      return false;
+    }
+    const meta: CacheMeta = JSON.parse(readFileSync(CACHE_META, 'utf-8'));
+    return (
+      meta.tournament === config.tournament &&
+      meta.topN === config.topN &&
+      JSON.stringify([...meta.users].sort()) === JSON.stringify([...config.users].sort()) &&
+      JSON.stringify([...meta.models].sort()) === JSON.stringify([...config.models].sort())
+    );
+  } catch {
+    return false;
+  }
+}
+
+function saveCache(
+  allModels: TopModel[],
+  performanceData: Map<string, PerformanceRound[]>,
+  config: PrecomputeConfig
+): void {
+  mkdirSync(CACHE_DIR, { recursive: true });
+
+  // Write top_models.csv
+  const modelLines = ['modelId,modelName,username,stakeValue'];
+  for (const m of allModels) {
+    modelLines.push(
+      `${csvEscape(m.modelId)},${csvEscape(m.modelName)},${csvEscape(m.username)},${m.stakeValue}`
+    );
+  }
+  writeFileSync(CACHE_TOP_MODELS, modelLines.join('\n'), 'utf-8');
+
+  // Write performances.csv
+  const perfLines = ['modelName,roundNumber,corr,mmc,tc,stakeValue'];
+  for (const [modelName, rounds] of performanceData) {
+    for (const r of rounds) {
+      perfLines.push(
+        `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.stakeValue ?? ''}`
+      );
+    }
+  }
+  writeFileSync(CACHE_PERFORMANCES, perfLines.join('\n'), 'utf-8');
+
+  // Write meta.json
+  writeFileSync(CACHE_META, JSON.stringify(cacheConfigFingerprint(config), null, 2), 'utf-8');
+}
+
+function loadCache(): { allModels: TopModel[]; performanceData: Map<string, PerformanceRound[]> } {
+  // Parse top_models.csv
+  const modelContent = readFileSync(CACHE_TOP_MODELS, 'utf-8');
+  const modelLines = modelContent.split('\n').filter(l => l.length > 0);
+  const allModels: TopModel[] = [];
+  for (let i = 1; i < modelLines.length; i++) {
+    const fields = csvParseLine(modelLines[i]);
+    allModels.push({
+      modelId: fields[0],
+      modelName: fields[1],
+      username: fields[2],
+      stakeValue: parseFloat(fields[3]) || 0
+    });
+  }
+
+  // Parse performances.csv
+  const perfContent = readFileSync(CACHE_PERFORMANCES, 'utf-8');
+  const perfLines = perfContent.split('\n').filter(l => l.length > 0);
+  const performanceData = new Map<string, PerformanceRound[]>();
+  for (let i = 1; i < perfLines.length; i++) {
+    const fields = csvParseLine(perfLines[i]);
+    const modelName = fields[0];
+    const round: PerformanceRound = {
+      roundNumber: parseInt(fields[1], 10),
+      corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
+      mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
+      tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
+      stakeValue: fields[5] !== '' ? parseFloat(fields[5]) : null
+    };
+    if (!performanceData.has(modelName)) {
+      performanceData.set(modelName, []);
+    }
+    performanceData.get(modelName)!.push(round);
+  }
+
+  return { allModels, performanceData };
+}
+
+async function fetchBatchedPerformance(
+  modelNames: string[],
+  batchSize: number,
+  rateLimitMs: number
+): Promise<Map<string, PerformanceRound[]>> {
+  const results = new Map<string, PerformanceRound[]>();
+
+  for (let i = 0; i < modelNames.length; i += batchSize) {
+    const batch = modelNames.slice(i, i + batchSize);
+
+    const aliases = batch.map((name, idx) => {
+      return `m${idx}: v3UserProfile(modelName: ${JSON.stringify(name)}) {
+        id username accountName
+        roundModelPerformances {
+          roundNumber corr corr20V2 mmc tc selectedStakeValue roundResolved
+        }
+      }`;
+    });
+
+    const queryStr = `query { ${aliases.join('\n')} }`;
+
+    try {
+      const data = await graphqlQuery<Record<string, {
+        id: string;
+        username: string;
+        accountName: string;
+        roundModelPerformances: Array<{
+          roundNumber: number;
+          corr: number | null;
+          corr20V2: number | null;
+          mmc: number | null;
+          tc: number | null;
+          selectedStakeValue: number | null;
+          roundResolved: boolean | null;
+        }>;
+      } | null>>(queryStr);
+
+      for (let idx = 0; idx < batch.length; idx++) {
+        const alias = `m${idx}`;
+        const profile = data[alias];
+        const modelName = batch[idx];
+
+        if (!profile) {
+          results.set(modelName.toLowerCase(), []);
+          continue;
+        }
+
+        const rounds = profile.roundModelPerformances
+          .filter(r => r.roundResolved)
+          .map(r => ({
+            roundNumber: r.roundNumber,
+            corr: r.corr20V2 ?? r.corr,
+            mmc: r.mmc,
+            tc: r.tc,
+            stakeValue: r.selectedStakeValue
+          }));
+
+        results.set(modelName.toLowerCase(), rounds);
+      }
+    } catch (error) {
+      console.error(`  Error fetching batch at index ${i}:`, error);
+      for (const name of batch) {
+        if (!results.has(name.toLowerCase())) {
+          results.set(name.toLowerCase(), []);
+        }
+      }
+    }
+
+    const completed = Math.min(i + batchSize, modelNames.length);
+    console.log(`  Fetched performance for ${completed}/${modelNames.length} models...`);
+
+    if (i + batchSize < modelNames.length) {
+      await sleep(rateLimitMs);
+    }
+  }
+
+  return results;
+}
+
+// --- D1 storage ---
+
+async function storeInD1(
+  topModels: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>,
+  performanceData: Map<string, PerformanceRound[]>,
+  tournament: number,
+  isLocal: boolean
+): Promise<void> {
+  const { execSync } = await import('child_process');
+  const fs = await import('fs');
+  const pathModule = await import('path');
+  const os = await import('os');
+
+  const flag = isLocal ? '--local' : '--remote';
+  const now = Math.floor(Date.now() / 1000);
+
+  const statements: string[] = [];
+
+  statements.push(`DELETE FROM top_staked_models WHERE tournament = ${tournament};`);
+  statements.push(`DELETE FROM model_performances WHERE tournament = ${tournament};`);
+
+  for (const model of topModels) {
+    const modelId = model.modelId.replace(/'/g, "''");
+    const modelName = model.modelName.replace(/'/g, "''");
+    const username = model.username.replace(/'/g, "''");
+    statements.push(
+      `INSERT OR REPLACE INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at) VALUES ('${modelId}', '${modelName}', '${username}', ${model.stakeValue}, ${tournament}, ${now});`
+    );
+  }
+
+  for (const [modelName, rounds] of performanceData) {
+    for (const round of rounds) {
+      const safeName = modelName.replace(/'/g, "''");
+      const corr = round.corr !== null ? round.corr : 'NULL';
+      const mmc = round.mmc !== null ? round.mmc : 'NULL';
+      const tc = round.tc !== null ? round.tc : 'NULL';
+      const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
+      statements.push(
+        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${stake}, ${tournament}, ${now});`
+      );
+    }
+  }
+
+  const BATCH_SIZE = 500;
+  const totalBatches = Math.ceil(statements.length / BATCH_SIZE);
+  console.log(`  Executing ${statements.length} SQL statements in ${totalBatches} batches of ${BATCH_SIZE}...`);
+
+  const tmpFile = pathModule.join(os.tmpdir(), `numerai-precompute-${Date.now()}.sql`);
+
+  for (let b = 0; b < totalBatches; b++) {
+    const batch = statements.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+    fs.writeFileSync(tmpFile, batch.join('\n'));
+
+    try {
+      const result = execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
+        cwd: process.cwd(),
+        stdio: ['inherit', 'pipe', 'pipe'],
+        encoding: 'utf-8'
+      });
+      if (result) console.log(result.toString().trim());
+      console.log(`  Batch ${b + 1}/${totalBatches} complete (${batch.length} statements)`);
+    } catch (error: any) {
+      fs.unlinkSync(tmpFile);
+      const stderr = error.stderr ? error.stderr.toString() : '';
+      const stdout = error.stdout ? error.stdout.toString() : '';
+      console.error(`  Batch ${b + 1}/${totalBatches} failed:`);
+      if (stderr) console.error(`  stderr: ${stderr}`);
+      if (stdout) console.error(`  stdout: ${stdout}`);
+      throw new Error(`D1 batch ${b + 1} failed: ${stderr || stdout || error.message}`);
+    }
+  }
+
+  fs.unlinkSync(tmpFile);
+}
+
+// --- Main ---
+
+async function main() {
+  const { config, isLocal, noCache } = buildConfig();
+
+  console.log('\n=== Numerai Rankings Precompute ===');
+  console.log(`Tournament:  ${config.tournament}`);
+  console.log(`Top N:       ${config.topN}`);
+  console.log(`Batch size:  ${config.batchSize}`);
+  console.log(`Rate limit:  ${config.rateLimitMs}ms`);
+  console.log(`Users:       ${config.users.length > 0 ? config.users.join(', ') : '(none)'}`);
+  console.log(`Models:      ${config.models.length > 0 ? config.models.join(', ') : '(none)'}`);
+  console.log(`Cache:       ${noCache ? 'disabled (--no-cache)' : 'enabled'}`);
+  console.log(`Target:      ${isLocal ? 'local' : 'remote'} D1\n`);
+
+  let allModels: TopModel[];
+  let performanceData: Map<string, PerformanceRound[]>;
+
+  const useCache = !noCache && cacheIsValid(config);
+
+  if (useCache) {
+    const meta: CacheMeta = JSON.parse(readFileSync(CACHE_META, 'utf-8'));
+    console.log(`Using cached data from ${meta.timestamp}`);
+    const cached = loadCache();
+    allModels = cached.allModels;
+    performanceData = cached.performanceData;
+    console.log(`  Loaded ${allModels.length} models, ${[...performanceData.values()].reduce((s, r) => s + r.length, 0)} performance records from cache\n`);
+  } else {
+    if (!noCache) {
+      console.log('No valid cache found, fetching from API...\n');
+    }
+
+    // Step 1: Get current round
+    console.log('Step 1: Fetching current round...');
+    const currentRound = await getCurrentRound(config.tournament);
+    console.log(`  Current round: ${currentRound}\n`);
+
+    // Step 2: Fetch top staked models
+    console.log(`Step 2: Fetching top ${config.topN} staked models...`);
+    const topModels = await fetchTopStakedModels(config.tournament, config.topN, config.rateLimitMs);
+    console.log(`  Found ${topModels.length} models\n`);
+
+    // Step 3: Fetch specific user models if configured
+    allModels = [...topModels];
+    const existingNames = new Set(topModels.map(m => m.modelName.toLowerCase()));
+
+    if (config.users.length > 0) {
+      console.log(`Step 3a: Fetching models for ${config.users.length} specific users...`);
+      const userModels = await fetchUserModels(config.users, config.tournament, config.rateLimitMs);
+      for (const model of userModels) {
+        if (!existingNames.has(model.modelName.toLowerCase())) {
+          allModels.push(model);
+          existingNames.add(model.modelName.toLowerCase());
+          console.log(`  Added user model: ${model.modelName} (${model.username})`);
+        }
+      }
+      console.log('');
+    }
+
+    // Add specific model names if configured
+    if (config.models.length > 0) {
+      console.log(`Step 3b: Adding ${config.models.length} specific models...`);
+      for (const modelName of config.models) {
+        if (!existingNames.has(modelName.toLowerCase())) {
+          allModels.push({
+            modelId: '',
+            modelName,
+            username: '',
+            stakeValue: 0
+          });
+          existingNames.add(modelName.toLowerCase());
+          console.log(`  Queued model: ${modelName}`);
+        }
+      }
+      console.log('');
+    }
+
+    // Step 4: Fetch performance data using batched alias queries
+    console.log(`Step 4: Fetching performance data for ${allModels.length} models (batched)...`);
+    const modelNames = allModels.map(m => m.modelName);
+    performanceData = await fetchBatchedPerformance(modelNames, config.batchSize, config.rateLimitMs);
+
+    let totalRounds = 0;
+    for (const rounds of performanceData.values()) {
+      totalRounds += rounds.length;
+    }
+    console.log(`  Fetched ${totalRounds} total round records\n`);
+
+    // Save to CSV cache
+    console.log('Saving data to cache...');
+    saveCache(allModels, performanceData, config);
+    console.log(`  Cache written to ${CACHE_DIR}\n`);
+  }
+
+  let totalRounds = 0;
+  for (const rounds of performanceData.values()) {
+    totalRounds += rounds.length;
+  }
+
+  // Step 5: Store in D1
+  console.log('Step 5: Storing in D1...');
+  await storeInD1(allModels, performanceData, config.tournament, isLocal);
+  console.log('  Done!\n');
+
+  console.log('=== Precomputation complete! ===');
+  console.log(`  Models:              ${allModels.length}`);
+  console.log(`  Performance records: ${totalRounds}`);
+  console.log(`  Tournament:          ${config.tournament}`);
+}
+
+main().catch(err => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});
