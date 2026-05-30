@@ -202,26 +202,42 @@ async function fetchTopStakedModels(
   const models: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }> = [];
   const batchSize = 500;
   let offset = 0;
+  const isSignals = tournament === SIGNALS_TOURNAMENT;
 
   while (models.length < limit && offset < limit + batchSize) {
-    const result = await graphqlQuery<{
-      accountLeaderboard: Array<{
-        id: string;
-        username: string;
-        displayName: string;
-        nmrStaked: string | null;
-      }>;
-    }>(
-      `query($limit: Int!, $offset: Int!, $tournament: Int!) {
-        accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
-          id username displayName nmrStaked
-        }
-      }`,
-      { limit: batchSize, offset, tournament }
-    );
+    // Signals: signalsLeaderboard is model-level (id = model UUID, username = model name).
+    // Classic: accountLeaderboard is account-level but its displayName is the primary
+    // model name (one row per account), which is what v3UserProfile expects.
+    const queryStr = isSignals
+      ? `query($limit: Int!, $offset: Int!) {
+          signalsLeaderboard(limit: $limit, offset: $offset) {
+            id username nmrStaked
+          }
+        }`
+      : `query($limit: Int!, $offset: Int!, $tournament: Int!) {
+          accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
+            id username displayName nmrStaked
+          }
+        }`;
+    const vars = isSignals
+      ? { limit: batchSize, offset }
+      : { limit: batchSize, offset, tournament };
 
-    const batch = result.accountLeaderboard;
-    if (!batch || batch.length === 0) break;
+    const result = await graphqlQuery<{
+      accountLeaderboard?: Array<{ id: string; username: string; displayName: string; nmrStaked: string | null }>;
+      signalsLeaderboard?: Array<{ id: string; username: string; nmrStaked: string | null }>;
+    }>(queryStr, vars);
+
+    const batch = isSignals
+      ? (result.signalsLeaderboard ?? []).map(e => ({
+          id: e.id,
+          username: e.username,
+          displayName: e.username, // Signals: username IS the model name
+          nmrStaked: e.nmrStaked
+        }))
+      : (result.accountLeaderboard ?? []);
+
+    if (batch.length === 0) break;
 
     for (const entry of batch) {
       if (models.length < limit) {
@@ -295,8 +311,14 @@ type PerformanceRound = {
   corr: number | null;
   mmc: number | null;
   tc: number | null;
+  // Signals "new scoring" metrics, sourced from v2RoundModelPerformances.submissionScores.
+  // Null for Classic (8) / Crypto (12) rows.
+  alpha: number | null;
+  mpc: number | null;
   stakeValue: number | null;
 };
+
+const SIGNALS_TOURNAMENT = 11;
 
 type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
 
@@ -391,12 +413,12 @@ function saveCache(
   }
   writeFileSync(CACHE_TOP_MODELS, modelLines.join('\n'), 'utf-8');
 
-  // Write performances.csv
-  const perfLines = ['modelName,roundNumber,corr,mmc,tc,stakeValue'];
+  // Write performances.csv (with alpha/mpc for Signals)
+  const perfLines = ['modelName,roundNumber,corr,mmc,tc,alpha,mpc,stakeValue'];
   for (const [modelName, rounds] of performanceData) {
     for (const r of rounds) {
       perfLines.push(
-        `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.stakeValue ?? ''}`
+        `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.stakeValue ?? ''}`
       );
     }
   }
@@ -421,20 +443,35 @@ function loadCache(): { allModels: TopModel[]; performanceData: Map<string, Perf
     });
   }
 
-  // Parse performances.csv
+  // Parse performances.csv. Tolerate the legacy 6-column format
+  // (no alpha/mpc) for caches written before this change.
   const perfContent = readFileSync(CACHE_PERFORMANCES, 'utf-8');
   const perfLines = perfContent.split('\n').filter(l => l.length > 0);
+  const headerCols = csvParseLine(perfLines[0] ?? '');
+  const hasAlphaMpc = headerCols.includes('alpha') && headerCols.includes('mpc');
   const performanceData = new Map<string, PerformanceRound[]>();
   for (let i = 1; i < perfLines.length; i++) {
     const fields = csvParseLine(perfLines[i]);
     const modelName = fields[0];
-    const round: PerformanceRound = {
-      roundNumber: parseInt(fields[1], 10),
-      corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
-      mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
-      tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
-      stakeValue: fields[5] !== '' ? parseFloat(fields[5]) : null
-    };
+    const round: PerformanceRound = hasAlphaMpc
+      ? {
+          roundNumber: parseInt(fields[1], 10),
+          corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
+          mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
+          tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
+          alpha: fields[5] !== '' ? parseFloat(fields[5]) : null,
+          mpc: fields[6] !== '' ? parseFloat(fields[6]) : null,
+          stakeValue: fields[7] !== '' ? parseFloat(fields[7]) : null
+        }
+      : {
+          roundNumber: parseInt(fields[1], 10),
+          corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
+          mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
+          tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
+          alpha: null,
+          mpc: null,
+          stakeValue: fields[5] !== '' ? parseFloat(fields[5]) : null
+        };
     if (!performanceData.has(modelName)) {
       performanceData.set(modelName, []);
     }
@@ -444,21 +481,36 @@ function loadCache(): { allModels: TopModel[]; performanceData: Map<string, Perf
   return { allModels, performanceData };
 }
 
+/**
+ * Fetch per-model resolved-round performance. Tournament-aware:
+ *  - Classic (8): uses v3UserProfile, reads corr20V2/mmc.
+ *  - Signals (11): uses v2SignalsProfile, reads fncV4/mmc20d. Alpha/mpc come
+ *    from a separate v2RoundModelPerformances.submissionScores pass below.
+ *
+ * Returns model UUIDs alongside rounds so the Signals alpha/mpc step can key
+ * by modelId (submissionScores requires it).
+ */
 async function fetchBatchedPerformance(
   modelNames: string[],
   batchSize: number,
-  rateLimitMs: number
-): Promise<Map<string, PerformanceRound[]>> {
-  const results = new Map<string, PerformanceRound[]>();
+  rateLimitMs: number,
+  tournament: number
+): Promise<Map<string, { modelId: string; rounds: PerformanceRound[] }>> {
+  const results = new Map<string, { modelId: string; rounds: PerformanceRound[] }>();
+  const isSignals = tournament === SIGNALS_TOURNAMENT;
+  const profileQuery = isSignals ? 'v2SignalsProfile' : 'v3UserProfile';
 
   for (let i = 0; i < modelNames.length; i += batchSize) {
     const batch = modelNames.slice(i, i + batchSize);
 
     const aliases = batch.map((name, idx) => {
-      return `m${idx}: v3UserProfile(modelName: ${JSON.stringify(name)}) {
+      // Both profiles share the same selection set; the field names below are
+      // present on both (nulls for whichever tournament doesn't populate them).
+      return `m${idx}: ${profileQuery}(modelName: ${JSON.stringify(name)}) {
         id username accountName
         roundModelPerformances {
-          roundNumber corr corr20V2 mmc tc selectedStakeValue roundResolved
+          roundNumber corr corr20V2 corrV4 mmc mmc20d tc fncV4
+          selectedStakeValue roundResolved
         }
       }`;
     });
@@ -474,8 +526,11 @@ async function fetchBatchedPerformance(
           roundNumber: number;
           corr: number | null;
           corr20V2: number | null;
+          corrV4: number | null;
           mmc: number | null;
+          mmc20d: number | null;
           tc: number | null;
+          fncV4: number | null;
           selectedStakeValue: number | null;
           roundResolved: boolean | null;
         }>;
@@ -487,27 +542,44 @@ async function fetchBatchedPerformance(
         const modelName = batch[idx];
 
         if (!profile) {
-          results.set(modelName.toLowerCase(), []);
+          results.set(modelName.toLowerCase(), { modelId: '', rounds: [] });
           continue;
         }
 
-        const rounds = profile.roundModelPerformances
-          .filter(r => r.roundResolved)
+        const rounds: PerformanceRound[] = profile.roundModelPerformances
+          // Signals: roundResolved is always false on this profile, so use
+          // "has any score" as the resolved-proxy. Classic: trust the flag.
+          .filter(r => {
+            if (isSignals) {
+              return (
+                r.fncV4 !== null || r.corrV4 !== null ||
+                r.corr20V2 !== null || r.corr !== null ||
+                r.mmc20d !== null || r.mmc !== null
+              );
+            }
+            return r.roundResolved;
+          })
           .map(r => ({
             roundNumber: r.roundNumber,
-            corr: r.corr20V2 ?? r.corr,
-            mmc: r.mmc,
+            // For Signals, the headline correlation is fncV4 (feature-neutral)
+            // and mmc20d, matching the alpha/mpc-era reporting.
+            corr: isSignals
+              ? (r.fncV4 ?? r.corrV4 ?? r.corr20V2 ?? r.corr)
+              : (r.corr20V2 ?? r.corr),
+            mmc: isSignals ? (r.mmc20d ?? r.mmc) : r.mmc,
             tc: r.tc,
+            alpha: null,
+            mpc: null,
             stakeValue: r.selectedStakeValue
           }));
 
-        results.set(modelName.toLowerCase(), rounds);
+        results.set(modelName.toLowerCase(), { modelId: profile.id, rounds });
       }
     } catch (error) {
       console.error(`  Error fetching batch at index ${i}:`, error);
       for (const name of batch) {
         if (!results.has(name.toLowerCase())) {
-          results.set(name.toLowerCase(), []);
+          results.set(name.toLowerCase(), { modelId: '', rounds: [] });
         }
       }
     }
@@ -521,6 +593,71 @@ async function fetchBatchedPerformance(
   }
 
   return results;
+}
+
+/**
+ * For each Signals model, fetch v2RoundModelPerformances.submissionScores and
+ * merge alpha/mpc into the existing rounds by round number. Mutates `byModel`
+ * in place. Best-effort: a failure on one model leaves its alpha/mpc null but
+ * doesn't stop the rest.
+ */
+async function augmentWithAlphaMpc(
+  byModel: Map<string, { modelId: string; rounds: PerformanceRound[] }>,
+  tournament: number,
+  rateLimitMs: number,
+  lastNRounds = 200
+): Promise<void> {
+  let processed = 0;
+  const total = byModel.size;
+  for (const [modelKey, entry] of byModel) {
+    if (!entry.modelId || entry.rounds.length === 0) {
+      processed++;
+      continue;
+    }
+    try {
+      const result = await graphqlQuery<{
+        v2RoundModelPerformances: Array<{
+          roundNumber: number;
+          submissionScores: Array<{ displayName: string; value: number | null }> | null;
+        }> | null;
+      }>(
+        `query($modelId: String!, $tournament: Int!, $lastNRounds: Int!) {
+          v2RoundModelPerformances(modelId: $modelId, tournament: $tournament, lastNRounds: $lastNRounds) {
+            roundNumber
+            submissionScores { displayName value }
+          }
+        }`,
+        { modelId: entry.modelId, tournament, lastNRounds }
+      );
+
+      const byRound = new Map<number, { alpha: number | null; mpc: number | null }>();
+      for (const r of result.v2RoundModelPerformances ?? []) {
+        let alpha: number | null = null;
+        let mpc: number | null = null;
+        for (const s of r.submissionScores ?? []) {
+          if (s.displayName === 'alpha') alpha = s.value;
+          if (s.displayName === 'mpc') mpc = s.value;
+        }
+        byRound.set(r.roundNumber, { alpha, mpc });
+      }
+
+      for (const round of entry.rounds) {
+        const scores = byRound.get(round.roundNumber);
+        if (scores) {
+          round.alpha = scores.alpha;
+          round.mpc = scores.mpc;
+        }
+      }
+    } catch (e) {
+      console.error(`  Warning: alpha/mpc fetch failed for ${modelKey}:`, e instanceof Error ? e.message : e);
+    }
+
+    processed++;
+    if (processed % 25 === 0) {
+      console.log(`  Augmented alpha/mpc for ${processed}/${total} models...`);
+    }
+    await sleep(rateLimitMs);
+  }
 }
 
 // --- D1 storage ---
@@ -559,9 +696,11 @@ async function storeInD1(
       const corr = round.corr !== null ? round.corr : 'NULL';
       const mmc = round.mmc !== null ? round.mmc : 'NULL';
       const tc = round.tc !== null ? round.tc : 'NULL';
+      const alpha = round.alpha !== null ? round.alpha : 'NULL';
+      const mpc = round.mpc !== null ? round.mpc : 'NULL';
       const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
       statements.push(
-        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${stake}, ${tournament}, ${now});`
+        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
       );
     }
   }
@@ -678,7 +817,33 @@ async function main() {
     // Step 4: Fetch performance data using batched alias queries
     console.log(`Step 4: Fetching performance data for ${allModels.length} models (batched)...`);
     const modelNames = allModels.map(m => m.modelName);
-    performanceData = await fetchBatchedPerformance(modelNames, config.batchSize, config.rateLimitMs);
+    const fetched = await fetchBatchedPerformance(
+      modelNames,
+      config.batchSize,
+      config.rateLimitMs,
+      config.tournament
+    );
+
+    // Step 4b: For Signals, fetch alpha/mpc from submissionScores. This is a
+    // per-model query so it's slow on large fleets — keep topN modest for
+    // Signals runs (config.topN drives it).
+    if (config.tournament === SIGNALS_TOURNAMENT) {
+      console.log(`Step 4b: Augmenting ${fetched.size} Signals models with alpha/mpc...`);
+      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.rateLimitMs);
+      console.log('  Alpha/mpc augmentation complete\n');
+    }
+
+    // Convert to the storage shape (Map<modelName, rounds[]>).
+    performanceData = new Map<string, PerformanceRound[]>();
+    for (const [modelName, entry] of fetched) {
+      performanceData.set(modelName, entry.rounds);
+      // If the leaderboard didn't supply a modelId (specific-model entries),
+      // backfill from the profile fetch so D1 has the canonical id.
+      const allModel = allModels.find(m => m.modelName.toLowerCase() === modelName);
+      if (allModel && !allModel.modelId && entry.modelId) {
+        allModel.modelId = entry.modelId;
+      }
+    }
 
     let totalRounds = 0;
     for (const rounds of performanceData.values()) {

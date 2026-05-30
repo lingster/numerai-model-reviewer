@@ -1,0 +1,77 @@
+name: Precompute Rankings
+
+# Refreshes the D1-backed rankings cache (top staked models + per-round
+# performance) for Classic and Signals. Runs the standalone precompute script
+# from worker/, which writes to the remote D1 via wrangler.
+#
+# Runs in GitHub Actions rather than a worker cron because a full 5k-model
+# backfill exceeds a Cloudflare Worker's CPU budget.
+
+on:
+  schedule:
+    # 06:00 UTC daily — after Numerai's daily round resolution (~04:00 UTC).
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      tournament:
+        description: 'Tournament to refresh (8=Classic, 11=Signals, all=both)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - '8'
+          - '11'
+      top_n:
+        description: 'Top N staked models per tournament'
+        required: false
+        default: '5000'
+
+concurrency:
+  group: precompute
+  cancel-in-progress: false
+
+jobs:
+  precompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TOP_N: ${{ inputs.top_n || '5000' }}
+      TOURNAMENT: ${{ inputs.tournament || 'all' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      # Run Classic (tournament 8). Skipped if user picked 11 only.
+      - name: Precompute Classic
+        if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '8' }}
+        working-directory: worker
+        run: npm run precompute:prod -- --tournament 8 --top-n "$TOP_N" --no-cache
+
+      # Run Signals (tournament 11). Skipped if user picked 8 only.
+      # Signals is per-model alpha/mpc fetch on top of profile — keep top-n
+      # modest if you trigger this manually with a big N.
+      - name: Precompute Signals
+        if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '11' }}
+        working-directory: worker
+        run: npm run precompute:prod -- --tournament 11 --top-n "$TOP_N" --no-cache
+
+      - name: Verify D1 row counts
+        if: always()
+        working-directory: worker
+        run: |
+          npx wrangler d1 execute numerai-cache --remote --command \
+            "SELECT tournament, COUNT(DISTINCT model_name) AS models, COUNT(*) AS rows FROM model_performances GROUP BY tournament;"
