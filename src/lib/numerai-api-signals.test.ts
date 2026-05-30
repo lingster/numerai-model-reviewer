@@ -49,6 +49,10 @@ const ZEUS_ROUND_1215: RawRoundModelPerformance = {
 	payout: '0.000000000000000000'
 };
 
+// fncs_zeus round 1215 alpha/mpc from v2RoundModelPerformances submissionScores.
+const ZEUS_1215_ALPHA = 0.003341;
+const ZEUS_1215_MPC = -0.022864;
+
 describe('mapRoundPerformance — Signals (tournament 11)', () => {
 	it('maps fncV4 to correlation when classic corr fields are null', () => {
 		const mapped = mapRoundPerformance(ZEUS_ROUND_1215, SIGNALS_TOURNAMENT_ID);
@@ -200,5 +204,21 @@ describe('Signals model performance via Worker REST endpoint', () => {
 		expect(round).toBeDefined();
 		expect(round?.correlation).toBeCloseTo(0.020263587551686744, 6);
 		expect(round?.mmc).toBeCloseTo(0.007138999205349989, 6);
+	}, 45000);
+
+	it('augments Signals rounds with alpha and mpc (new scoring) from submissionScores', async () => {
+		const response = await worker.fetch(
+			'/models/fncs_zeus/performance?tournament=11&username=fish_n_chips&modelId=3468a985-2e2d-4333-9879-97f9d764d5cf',
+			{ method: 'GET', headers: { Origin: TEST_ORIGIN } }
+		);
+		expect(response.status).toBe(200);
+
+		const perf = (await response.json()) as {
+			rounds: Array<{ roundNumber: number; alpha: number | null; mpc: number | null }>;
+		};
+		const round = perf.rounds.find((r) => r.roundNumber === 1215);
+		expect(round).toBeDefined();
+		expect(round?.alpha).toBeCloseTo(ZEUS_1215_ALPHA, 5);
+		expect(round?.mpc).toBeCloseTo(ZEUS_1215_MPC, 5);
 	}, 45000);
 });

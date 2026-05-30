@@ -33,6 +33,9 @@ export interface RoundPerformance {
 	mmc: number | null;
 	fnc: number | null;
 	tc?: number | null;
+	// New Numerai scoring (Signals): alpha + mpc
+	alpha?: number | null;
+	mpc?: number | null;
 	corrMultiplier: number | null;
 	mmcMultiplier?: number | null;
 	selectedStakeValue: number | null;
@@ -52,6 +55,11 @@ export interface ChartDataPoint {
 	fnc: number | null;
 	tc: number | null;
 	payout: number | null;
+	// New Numerai scoring (Signals)
+	alpha: number | null;
+	mpc: number | null;
+	// Calculated weighted score: alphaWeight*alpha + mpcWeight*mpc
+	score: number | null;
 }
 
 /**
@@ -69,7 +77,7 @@ export interface ModelSeries {
 /**
  * Available metrics for the time series chart
  */
-export type ChartMetric = 'corr20' | 'corr60' | 'mmc' | 'fnc' | 'tc' | 'payout';
+export type ChartMetric = 'corr20' | 'corr60' | 'mmc' | 'fnc' | 'tc' | 'payout' | 'alpha' | 'mpc' | 'score';
 
 /**
  * Stake information for a model

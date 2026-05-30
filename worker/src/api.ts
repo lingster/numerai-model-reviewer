@@ -258,6 +258,14 @@ export async function getModelPerformance(
     const profile = isSignals ? result.v2SignalsProfile : result.v3UserProfile;
     if (!profile) return null;
 
+    const rounds = mapRoundPerformances(profile.roundModelPerformances, tournament);
+
+    // Signals exposes the new scoring (alpha/mpc) only via submissionScores on
+    // v2RoundModelPerformances, keyed by modelId — merge them in by round.
+    if (isSignals && modelId) {
+      await augmentWithAlphaMpc(rounds, modelId, SIGNALS_TOURNAMENT, env);
+    }
+
     return {
       modelId: profile.id,
       modelName: profile.username,
@@ -268,11 +276,60 @@ export async function getModelPerformance(
         mmcMultiplier: toNumber(profile.stakeInfo.mmcMultiplier),
         tcMultiplier: toNumber(profile.stakeInfo.tcMultiplier)
       } : null,
-      rounds: mapRoundPerformances(profile.roundModelPerformances, tournament)
+      rounds
     };
   } catch (e) {
     console.error('Error getting model performance:', e);
     return null;
+  }
+}
+
+/**
+ * Fetch per-round submission scores (keyed displayName -> value) for a model.
+ * Used by both the Crypto path and the Signals alpha/mpc augmentation (DRY).
+ */
+async function fetchSubmissionScoresByRound(
+  modelId: string,
+  tournament: number,
+  env: Env,
+  lastNRounds = 100
+): Promise<Map<number, Map<string, number | null>>> {
+  const result = await query<{
+    v2RoundModelPerformances: Array<{
+      roundNumber: number;
+      submissionScores: Array<{ displayName: string; value: number | null }> | null;
+    }> | null;
+  }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds });
+
+  const byRound = new Map<number, Map<string, number | null>>();
+  for (const r of result.v2RoundModelPerformances ?? []) {
+    const scores = new Map<string, number | null>();
+    for (const s of r.submissionScores ?? []) {
+      scores.set(s.displayName, toNumber(s.value));
+    }
+    byRound.set(r.roundNumber, scores);
+  }
+  return byRound;
+}
+
+/** Merge alpha/mpc submission scores into already-mapped rounds, by round number. */
+async function augmentWithAlphaMpc(
+  rounds: RoundPerformance[],
+  modelId: string,
+  tournament: number,
+  env: Env
+): Promise<void> {
+  try {
+    const byRound = await fetchSubmissionScoresByRound(modelId, tournament, env);
+    for (const round of rounds) {
+      const scores = byRound.get(round.roundNumber);
+      if (!scores) continue;
+      round.alpha = scores.get('alpha') ?? null;
+      round.mpc = scores.get('mpc') ?? null;
+    }
+  } catch (e) {
+    // Non-fatal: alpha/mpc just stay null if the augmentation query fails.
+    console.error('Error augmenting alpha/mpc:', e);
   }
 }
 
@@ -304,21 +361,15 @@ async function fetchCryptoModelPerformance(
         roundOpenTime: string | null;
         roundResolveTime: string | null;
         roundResolved: boolean | null;
-        submissionScores: Array<{
-          displayName: string;
-          value: number | null;
-        }>;
-      }>;
+        submissionScores: Array<{ displayName: string; value: number | null }> | null;
+      }> | null;
     }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds: 100 });
 
     if (!result.v2RoundModelPerformances) return null;
 
     const rounds: RoundPerformance[] = result.v2RoundModelPerformances.map(r => {
-      const scores = r.submissionScores || [];
-      const getScore = (name: string) => {
-        const s = scores.find(x => x.displayName === name);
-        return s ? toNumber(s.value) : null;
-      };
+      const scores = new Map((r.submissionScores ?? []).map(s => [s.displayName, toNumber(s.value)]));
+      const getScore = (name: string) => scores.get(name) ?? null;
 
       return {
         roundNumber: r.roundNumber,
@@ -330,6 +381,8 @@ async function fetchCryptoModelPerformance(
         mmc: getScore('mmc'),
         fnc: getScore('fnc'),
         tc: getScore('tc'),
+        alpha: getScore('alpha'),
+        mpc: getScore('mpc'),
         corrMultiplier: null,
         mmcMultiplier: null,
         selectedStakeValue: null,

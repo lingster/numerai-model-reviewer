@@ -57,11 +57,24 @@
 		mmc: { label: 'MMC', axis: 'left', color: '#e41a1c' },
 		fnc: { label: 'FNC', axis: 'left', color: '#984ea3' },
 		tc: { label: 'TC', axis: 'right', color: '#ff7f00' },
-		payout: { label: 'Payout', axis: 'right', color: '#a65628' }
+		payout: { label: 'Payout', axis: 'right', color: '#a65628' },
+		// New Numerai scoring (Signals)
+		alpha: { label: 'Alpha', axis: 'left', color: '#00c0d0' },
+		mpc: { label: 'MPC', axis: 'left', color: '#ffb300' },
+		score: { label: 'Score', axis: 'left', color: '#e91e63' }
 	};
+
+	// Metrics shown in each scoring mode.
+	const CLASSIC_METRICS: ChartMetric[] = ['corr20', 'mmc', 'tc'];
+	const NEW_METRICS: ChartMetric[] = ['alpha', 'mpc', 'score'];
 
 	// State for metric toggles - default to corr20 and mmc
 	let activeMetrics = $state<Set<ChartMetric>>(new Set(['corr20', 'mmc']));
+
+	// Calculated score weights (default Numerai Signals: 0.3*alpha + 0.8*mpc).
+	// Adjustable so the score can track future scoring-rule changes.
+	let scoreAlphaWeight = $state(0.3);
+	let scoreMpcWeight = $state(0.8);
 
 	// State for model visibility
 	let modelVisibility = $state<Map<string, boolean>>(new Map());
@@ -155,7 +168,9 @@
 							|| round.corr60 !== null
 							|| round.fnc !== null
 							|| round.tc !== null
-							|| round.payout !== null;
+							|| round.payout !== null
+							|| round.alpha != null
+							|| round.mpc != null;
 						if (!hasMetric) return false;
 					}
 
@@ -167,17 +182,28 @@
 					}
 					return true;
 				})
-				.map(round => ({
-					roundNumber: round.roundNumber,
-					date: round.roundOpenTime ? new Date(round.roundOpenTime) : new Date(),
-					resolved: round.roundResolved ?? false,
-					corr20: toNumber(round.correlation),
-					corr60: toNumber(round.corr60),
-					mmc: toNumber(round.mmc),
-					fnc: toNumber(round.fnc),
-					tc: toNumber(round.tc),
-					payout: toNumber(round.payout)
-				}))
+				.map(round => {
+					const alpha = toNumber(round.alpha);
+					const mpc = toNumber(round.mpc);
+					// Weighted score; null only when both components are absent.
+					const score = (alpha === null && mpc === null)
+						? null
+						: scoreAlphaWeight * (alpha ?? 0) + scoreMpcWeight * (mpc ?? 0);
+					return {
+						roundNumber: round.roundNumber,
+						date: round.roundOpenTime ? new Date(round.roundOpenTime) : new Date(),
+						resolved: round.roundResolved ?? false,
+						corr20: toNumber(round.correlation),
+						corr60: toNumber(round.corr60),
+						mmc: toNumber(round.mmc),
+						fnc: toNumber(round.fnc),
+						tc: toNumber(round.tc),
+						payout: toNumber(round.payout),
+						alpha,
+						mpc,
+						score
+					};
+				})
 				.sort((a, b) => a.date.getTime() - b.date.getTime());
 
 			series.push({
@@ -197,7 +223,7 @@
 	const chartSeriesDisplay = $derived.by(() => {
 		if (!showCumulative) return chartSeries;
 
-		const metrics: ChartMetric[] = ['corr20', 'corr60', 'mmc', 'fnc', 'tc', 'payout'];
+		const metrics: ChartMetric[] = ['corr20', 'corr60', 'mmc', 'fnc', 'tc', 'payout', 'alpha', 'mpc', 'score'];
 
 		return chartSeries.map(series => {
 			const runningTotals: Record<ChartMetric, number> = {
@@ -206,7 +232,10 @@
 				mmc: 0,
 				fnc: 0,
 				tc: 0,
-				payout: 0
+				payout: 0,
+				alpha: 0,
+				mpc: 0,
+				score: 0
 			};
 
 			const seenMetric: Record<ChartMetric, boolean> = {
@@ -215,7 +244,10 @@
 				mmc: false,
 				fnc: false,
 				tc: false,
-				payout: false
+				payout: false,
+				alpha: false,
+				mpc: false,
+				score: false
 			};
 
 			const data = series.data.map(point => {
@@ -245,9 +277,15 @@
 			.flatMap(s => s.data);
 	});
 
+	// New scoring (alpha/mpc) is only present for Signals models — used to gate
+	// the Classic/New toggle and the score-weight controls.
+	const hasNewMetrics = $derived(
+		allDataPoints.some(p => p.alpha !== null || p.mpc !== null)
+	);
+
 	// Calculate domains for left and right axes
 	const leftAxisDomain = $derived.by(() => {
-		const leftMetrics: ChartMetric[] = ['corr20', 'corr60', 'mmc', 'fnc'];
+		const leftMetrics: ChartMetric[] = ['corr20', 'corr60', 'mmc', 'fnc', 'alpha', 'mpc', 'score'];
 		const activeLeftMetrics = leftMetrics.filter(m => activeMetrics.has(m));
 
 		if (activeLeftMetrics.length === 0 || allDataPoints.length === 0) {
@@ -378,6 +416,14 @@
 		return regions;
 	});
 
+	// Switch the active metric set between Classic (corr/mmc/tc) and New (alpha/mpc/score).
+	function setScoringMode(mode: 'classic' | 'new') {
+		activeMetrics = new Set<ChartMetric>(mode === 'classic' ? ['corr20', 'mmc'] : NEW_METRICS);
+	}
+
+	// True when the New (alpha/mpc/score) metric set is currently shown.
+	const newScoringActive = $derived(NEW_METRICS.some(m => activeMetrics.has(m)));
+
 	// Toggle metric
 	function toggleMetric(metric: ChartMetric) {
 		const newSet = new Set(activeMetrics);
@@ -447,7 +493,10 @@
 				mmc: point.mmc,
 				fnc: point.fnc,
 				tc: point.tc,
-				payout: point.payout
+				payout: point.payout,
+				alpha: point.alpha,
+				mpc: point.mpc,
+				score: point.score
 			}
 		};
 	}
@@ -609,6 +658,9 @@
 			fnc: number | null;
 			tc: number | null;
 			payout: number | null;
+			alpha: number | null;
+			mpc: number | null;
+			score: number | null;
 		}> = [];
 
 		chartSeries.filter(series => series.visible).forEach(series => {
@@ -624,7 +676,10 @@
 					mmc: point.mmc,
 					fnc: point.fnc,
 					tc: point.tc,
-					payout: point.payout
+					payout: point.payout,
+					alpha: point.alpha,
+					mpc: point.mpc,
+					score: point.score
 				});
 			});
 		});
@@ -765,22 +820,73 @@
 		</div>
 	{/if}
 
+	<!-- Scoring mode toggle + score weights (Signals: new alpha/mpc scoring) -->
+	{#if hasNewMetrics}
+		<div class="mb-4 rounded-md border-2 border-[var(--retro-primary)] p-3">
+			<div class="flex flex-wrap items-center gap-4">
+				<span class="text-sm font-medium retro-text-primary">Scoring:</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					<button
+						onclick={() => setScoringMode('classic')}
+						class="px-3 py-1 text-sm font-medium transition-colors"
+						style={!newScoringActive
+							? 'background-color: var(--retro-primary); color: white;'
+							: 'color: var(--retro-text-primary);'}
+					>
+						Classic (Corr/MMC/TC)
+					</button>
+					<button
+						onclick={() => setScoringMode('new')}
+						class="px-3 py-1 text-sm font-medium transition-colors"
+						style={newScoringActive
+							? 'background-color: var(--retro-primary); color: white;'
+							: 'color: var(--retro-text-primary);'}
+					>
+						New (Alpha/MPC)
+					</button>
+				</div>
+
+				<div class="flex items-center gap-2">
+					<span class="text-sm retro-text-secondary">Score =</span>
+					<input
+						type="number"
+						step="0.1"
+						bind:value={scoreAlphaWeight}
+						aria-label="Alpha weight"
+						class="retro-input w-16 rounded px-2 py-1 text-sm"
+					/>
+					<span class="text-sm retro-text-secondary">× Alpha +</span>
+					<input
+						type="number"
+						step="0.1"
+						bind:value={scoreMpcWeight}
+						aria-label="MPC weight"
+						class="retro-input w-16 rounded px-2 py-1 text-sm"
+					/>
+					<span class="text-sm retro-text-secondary">× MPC</span>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	<!-- Metric Toggle Buttons -->
 	<div class="mb-4">
 		<span class="text-sm font-medium retro-text-primary mr-2">Metrics:</span>
 		<div class="inline-flex flex-wrap gap-2">
 			{#each Object.entries(metricConfig) as [metric, config]}
-				<button
-					onclick={() => toggleMetric(metric as ChartMetric)}
-					class="px-3 py-1 text-sm rounded-md border-2 transition-colors"
-					class:active={activeMetrics.has(metric as ChartMetric)}
-					style="--metric-color: {config.color}; border-color: {config.color}; {activeMetrics.has(metric as ChartMetric) ? `background-color: ${config.color}; color: white;` : 'color: var(--retro-text-primary);'}"
-				>
-					{config.label}
-					{#if config.axis === 'right'}
-						<span class="text-xs opacity-70">(R)</span>
-					{/if}
-				</button>
+				{#if hasNewMetrics || !NEW_METRICS.includes(metric as ChartMetric)}
+					<button
+						onclick={() => toggleMetric(metric as ChartMetric)}
+						class="px-3 py-1 text-sm rounded-md border-2 transition-colors"
+						class:active={activeMetrics.has(metric as ChartMetric)}
+						style="--metric-color: {config.color}; border-color: {config.color}; {activeMetrics.has(metric as ChartMetric) ? `background-color: ${config.color}; color: white;` : 'color: var(--retro-text-primary);'}"
+					>
+						{config.label}
+						{#if config.axis === 'right'}
+							<span class="text-xs opacity-70">(R)</span>
+						{/if}
+					</button>
+				{/if}
 			{/each}
 		</div>
 		<div class="mt-2 flex flex-wrap items-center gap-4">
@@ -869,7 +975,7 @@
 			{/if}
 
 				<!-- padding={{ top: marginTop, right: marginRight, bottom: marginBottom, left: marginLeft }} -->
-			<LayerCake class="p-8"
+			<LayerCake
 				x={getX}
 				xScale={scaleTime()}
 				xDomain={[xDomainDates[0].getTime(), xDomainDates[1].getTime()]}
@@ -1313,6 +1419,11 @@
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Corr60</th>
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">FNC</th>
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">TC</th>
+								{#if hasNewMetrics}
+									<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
+									<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
+									<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Score</th>
+								{/if}
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Payout</th>
 							</tr>
 						</thead>
@@ -1333,6 +1444,11 @@
 									<td class="px-4 py-2 text-sm text-right font-mono {row.corr60 !== null ? (row.corr60 > 0 ? 'text-green-400' : row.corr60 < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.corr60)}</td>
 									<td class="px-4 py-2 text-sm text-right font-mono {row.fnc !== null ? (row.fnc > 0 ? 'text-green-400' : row.fnc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.fnc)}</td>
 									<td class="px-4 py-2 text-sm text-right font-mono {row.tc !== null ? (row.tc > 0 ? 'text-green-400' : row.tc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.tc)}</td>
+									{#if hasNewMetrics}
+										<td class="px-4 py-2 text-sm text-right font-mono {row.alpha !== null ? (row.alpha > 0 ? 'text-green-400' : row.alpha < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.alpha)}</td>
+										<td class="px-4 py-2 text-sm text-right font-mono {row.mpc !== null ? (row.mpc > 0 ? 'text-green-400' : row.mpc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.mpc)}</td>
+										<td class="px-4 py-2 text-sm text-right font-mono {row.score !== null ? (row.score > 0 ? 'text-green-400' : row.score < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.score)}</td>
+									{/if}
 									<td class="px-4 py-2 text-sm text-right font-mono {row.payout !== null ? (row.payout > 0 ? 'text-green-400' : row.payout < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.payout)}</td>
 								</tr>
 							{/each}

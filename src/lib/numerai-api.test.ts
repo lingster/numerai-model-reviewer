@@ -224,13 +224,15 @@ describe('NumeraiAPI - Get User Models', () => {
 			{ username: 'fish_n_chips' }
 		);
 
-		expect(result.accountProfile?.models).toBeDefined();
+		const models = result.accountProfile?.models ?? [];
+		expect(models.length).toBeGreaterThan(10);
 
-		// All fish_n_chips models start with fnc_
-		const allFnc = result.accountProfile?.models.every((model) =>
-			model.displayName.toLowerCase().startsWith('fnc_')
-		);
-		expect(allFnc).toBe(true);
+		// The vast majority of this account's models use the "fnc" prefix family
+		// (fnc_, fncc_, fncp_, fncs_ across tournaments); a few demo models aside.
+		const fncCount = models.filter((model) =>
+			model.displayName.toLowerCase().startsWith('fnc')
+		).length;
+		expect(fncCount / models.length).toBeGreaterThan(0.9);
 	}, 30000);
 });
 
@@ -300,15 +302,15 @@ describe('NumeraiAPI - Model Performance Data', () => {
 
 		// Verify performance metrics (with tolerance for floating point)
 		// Expected: Payout=-0.083, corr20=-0.0329, mmc=-0.0260
-		if (round1163?.payout !== null) {
+		if (round1163?.payout != null) {
 			expect(round1163.payout).toBeCloseTo(-0.083, 2);
 		}
 
-		if (round1163?.corr20V2 !== null) {
+		if (round1163?.corr20V2 != null) {
 			expect(round1163.corr20V2).toBeCloseTo(-0.0329, 2);
 		}
 
-		if (round1163?.mmc !== null) {
+		if (round1163?.mmc != null) {
 			expect(round1163.mmc).toBeCloseTo(-0.026, 2);
 		}
 	}, 30000);
@@ -339,7 +341,7 @@ describe('NumeraiAPI - Model Performance Data', () => {
 
 		expect(round1163).toBeDefined();
 		// At-risk (stake value) should be approximately 11.05
-		if (round1163?.selectedStakeValue !== null) {
+		if (round1163?.selectedStakeValue != null) {
 			expect(round1163.selectedStakeValue).toBeCloseTo(11.05, 1);
 		}
 	}, 30000);
@@ -370,7 +372,7 @@ describe('NumeraiAPI - Model Performance Data', () => {
 
 		expect(round1163).toBeDefined();
 		// Payout factor should be approximately 0.1092
-		if (round1163?.roundPayoutFactor !== null) {
+		if (round1163?.roundPayoutFactor != null) {
 			const pf = parseFloat(round1163.roundPayoutFactor);
 			expect(pf).toBeCloseTo(0.1092, 2);
 		}

@@ -78,6 +78,10 @@ export function mapRoundPerformance(
 		mmc,
 		fnc: toNumber(r.fncV4 ?? r.fncV3 ?? r.fnc),
 		tc: toNumber(r.tc),
+		// alpha/mpc are sourced separately from submissionScores (see api.ts);
+		// default to null so the shape is consistent for all tournaments.
+		alpha: null,
+		mpc: null,
 		corrMultiplier: toNumber(r.corrMultiplier),
 		mmcMultiplier: toNumber(r.mmcMultiplier),
 		selectedStakeValue: toNumber(r.selectedStakeValue),

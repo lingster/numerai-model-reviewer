@@ -26,6 +26,10 @@ export interface RoundPerformance {
   mmc: number | null;
   fnc: number | null;
   tc?: number | null;
+  // New Numerai scoring (Signals): alpha + mpc. Null for tournaments/rounds
+  // that do not expose them.
+  alpha?: number | null;
+  mpc?: number | null;
   corrMultiplier: number | null;
   mmcMultiplier?: number | null;
   selectedStakeValue: number | null;
