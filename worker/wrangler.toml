@@ -17,6 +17,10 @@ NUMERAI_API_URL = "https://api-tournament.numer.ai/graphql"
 
 # KV Namespace for rate limiting
 # Uncomment after creating: wrangler kv:namespace create "RATE_LIMIT"
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "a99eaf0e2f4a4be2b587bd6944926415"
+
 # [[kv_namespaces]]
 # binding = "RATE_LIMIT"
 # id = "<your-kv-namespace-id>"
