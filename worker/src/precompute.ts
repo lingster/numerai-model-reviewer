@@ -203,9 +203,11 @@ async function fetchTopStakedModels(
   const batchSize = 500;
   let offset = 0;
   const isSignals = tournament === SIGNALS_TOURNAMENT;
+  const isCrypto = tournament === CRYPTO_TOURNAMENT;
 
   while (models.length < limit && offset < limit + batchSize) {
     // Signals: signalsLeaderboard is model-level (id = model UUID, username = model name).
+    // Crypto: cryptosignalsLeaderboard is likewise model-level (one row per crypto model).
     // Classic: accountLeaderboard is account-level but its displayName is the primary
     // model name (one row per account), which is what v3UserProfile expects.
     const queryStr = isSignals
@@ -214,27 +216,37 @@ async function fetchTopStakedModels(
             id username nmrStaked
           }
         }`
+      : isCrypto
+      ? `query($limit: Int!, $offset: Int!) {
+          cryptosignalsLeaderboard(limit: $limit, offset: $offset) {
+            id username nmrStaked
+          }
+        }`
       : `query($limit: Int!, $offset: Int!, $tournament: Int!) {
           accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
             id username displayName nmrStaked
           }
         }`;
-    const vars = isSignals
+    const vars = isSignals || isCrypto
       ? { limit: batchSize, offset }
       : { limit: batchSize, offset, tournament };
 
     const result = await graphqlQuery<{
       accountLeaderboard?: Array<{ id: string; username: string; displayName: string; nmrStaked: string | null }>;
       signalsLeaderboard?: Array<{ id: string; username: string; nmrStaked: string | null }>;
+      cryptosignalsLeaderboard?: Array<{ id: string; username: string; nmrStaked: string | null }>;
     }>(queryStr, vars);
 
+    const mapModelLevel = (e: { id: string; username: string; nmrStaked: string | null }) => ({
+      id: e.id,
+      username: e.username,
+      displayName: e.username, // Signals/Crypto: username IS the model name
+      nmrStaked: e.nmrStaked
+    });
     const batch = isSignals
-      ? (result.signalsLeaderboard ?? []).map(e => ({
-          id: e.id,
-          username: e.username,
-          displayName: e.username, // Signals: username IS the model name
-          nmrStaked: e.nmrStaked
-        }))
+      ? (result.signalsLeaderboard ?? []).map(mapModelLevel)
+      : isCrypto
+      ? (result.cryptosignalsLeaderboard ?? []).map(mapModelLevel)
       : (result.accountLeaderboard ?? []);
 
     if (batch.length === 0) break;
@@ -319,6 +331,7 @@ type PerformanceRound = {
 };
 
 const SIGNALS_TOURNAMENT = 11;
+const CRYPTO_TOURNAMENT = 12;
 
 type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
 
@@ -665,6 +678,94 @@ async function augmentWithAlphaMpc(
   }
 }
 
+/**
+ * Pull the (corr, mmc) pair out of a crypto round's submissionScores. Crypto
+ * scores arrive under displayName 'corr'/'mmc' (alongside canon_corr, mcwcm,
+ * season_score, etc.); we rank on corr/mmc to match the worker's t12 metrics.
+ */
+export function extractCryptoMetrics(
+  submissionScores: Array<{ displayName: string; value: number | null }> | null
+): { corr: number | null; mmc: number | null } {
+  let corr: number | null = null;
+  let mmc: number | null = null;
+  for (const s of submissionScores ?? []) {
+    if (s.displayName === 'corr') corr = s.value;
+    if (s.displayName === 'mmc') mmc = s.value;
+  }
+  return { corr, mmc };
+}
+
+/**
+ * Fetch per-round corr/mmc for crypto models. Crypto has no profile query
+ * (v3UserProfile returns null for crypto models), so we read each model's
+ * v2RoundModelPerformances(tournament: 12).submissionScores directly. This is a
+ * per-model call (like the Signals alpha/mpc pass), so keep top-n reasonable.
+ *
+ * roundResolved is unreliable on crypto (stays false even once scored), so we
+ * use "has a non-null corr or mmc" as the resolved-proxy, matching Signals.
+ */
+async function fetchCryptoPerformance(
+  models: TopModel[],
+  rateLimitMs: number,
+  lastNRounds = 300
+): Promise<Map<string, { modelId: string; rounds: PerformanceRound[] }>> {
+  const results = new Map<string, { modelId: string; rounds: PerformanceRound[] }>();
+  let processed = 0;
+  const total = models.length;
+
+  for (const m of models) {
+    const key = m.modelName.toLowerCase();
+    if (!m.modelId) {
+      results.set(key, { modelId: '', rounds: [] });
+      processed++;
+      continue;
+    }
+    try {
+      const data = await graphqlQuery<{
+        v2RoundModelPerformances: Array<{
+          roundNumber: number;
+          submissionScores: Array<{ displayName: string; value: number | null }> | null;
+        }> | null;
+      }>(
+        `query($modelId: String!, $tournament: Int!, $lastNRounds: Int!) {
+          v2RoundModelPerformances(modelId: $modelId, tournament: $tournament, lastNRounds: $lastNRounds) {
+            roundNumber
+            submissionScores { displayName value }
+          }
+        }`,
+        { modelId: m.modelId, tournament: CRYPTO_TOURNAMENT, lastNRounds }
+      );
+
+      const rounds: PerformanceRound[] = [];
+      for (const r of data.v2RoundModelPerformances ?? []) {
+        const { corr, mmc } = extractCryptoMetrics(r.submissionScores);
+        if (corr === null && mmc === null) continue;
+        rounds.push({
+          roundNumber: r.roundNumber,
+          corr,
+          mmc,
+          tc: null,
+          alpha: null,
+          mpc: null,
+          stakeValue: m.stakeValue
+        });
+      }
+      results.set(key, { modelId: m.modelId, rounds });
+    } catch (e) {
+      console.error(`  Warning: crypto perf fetch failed for ${m.modelName}:`, e instanceof Error ? e.message : e);
+      results.set(key, { modelId: m.modelId, rounds: [] });
+    }
+
+    processed++;
+    if (processed % 50 === 0 || processed === total) {
+      console.log(`  Fetched crypto performance for ${processed}/${total} models...`);
+    }
+    await sleep(rateLimitMs);
+  }
+
+  return results;
+}
+
 // --- D1 storage ---
 
 async function storeInD1(
@@ -827,15 +928,18 @@ async function main() {
       console.log('');
     }
 
-    // Step 4: Fetch performance data using batched alias queries
-    console.log(`Step 4: Fetching performance data for ${allModels.length} models (batched)...`);
+    // Step 4: Fetch performance data. Crypto has no profile query, so it reads
+    // per-model v2RoundModelPerformances; Classic/Signals use batched profiles.
+    console.log(`Step 4: Fetching performance data for ${allModels.length} models...`);
     const modelNames = allModels.map(m => m.modelName);
-    const fetched = await fetchBatchedPerformance(
-      modelNames,
-      config.batchSize,
-      config.rateLimitMs,
-      config.tournament
-    );
+    const fetched = config.tournament === CRYPTO_TOURNAMENT
+      ? await fetchCryptoPerformance(allModels, config.rateLimitMs)
+      : await fetchBatchedPerformance(
+          modelNames,
+          config.batchSize,
+          config.rateLimitMs,
+          config.tournament
+        );
 
     // Step 4b: For Signals, fetch alpha/mpc from submissionScores. This is a
     // per-model query so it's slow on large fleets — keep topN modest for
@@ -886,7 +990,16 @@ async function main() {
   console.log(`  Tournament:          ${config.tournament}`);
 }
 
-main().catch(err => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+// Only run the pipeline when invoked as the CLI entry point — importing this
+// module (e.g. from tests for the pure helpers) must not kick off API calls.
+const invokedDirectly =
+  typeof process !== 'undefined' &&
+  Array.isArray(process.argv) &&
+  /precompute\.[cm]?ts$/.test(process.argv[1] ?? '');
+
+if (invokedDirectly) {
+  main().catch(err => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}

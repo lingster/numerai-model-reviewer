@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tournament:
-        description: 'Tournament to refresh (8=Classic, 11=Signals, all=both)'
+        description: 'Tournament to refresh (8=Classic, 11=Signals, 12=Crypto, all=every)'
         required: false
         default: 'all'
         type: choice
@@ -22,6 +22,7 @@ on:
           - 'all'
           - '8'
           - '11'
+          - '12'
       top_n:
         description: 'Top N staked models per tournament'
         required: false
@@ -72,6 +73,14 @@ jobs:
         if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '11' }}
         working-directory: worker
         run: npm run precompute:prod -- --tournament 11 --top-n "$TOP_N" --no-cache
+
+      # Run Crypto (tournament 12). Like Signals, performance is a per-model
+      # v2RoundModelPerformances fetch (no profile query exists for crypto), so
+      # it's slow on large fleets — keep top-n modest if triggered with a big N.
+      - name: Precompute Crypto
+        if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '12' }}
+        working-directory: worker
+        run: npm run precompute:prod -- --tournament 12 --top-n "$TOP_N" --no-cache
 
       - name: Verify D1 row counts
         if: always()
