@@ -4,7 +4,7 @@
 		► Compare and analyze the performance of Numerai tournament models over time.
 	</p>
 	
-	<div class="grid gap-6 md:grid-cols-2">
+	<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
 		<div class="retro-card rounded-lg p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Model Comparison</h2>
 			<p class="mb-4 retro-text-secondary">
@@ -20,7 +20,23 @@
 				</svg>
 			</a>
 		</div>
-		
+
+		<div class="retro-card rounded-lg p-6">
+			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Model Rankings</h2>
+			<p class="mb-4 retro-text-secondary">
+				Track model rank performance over time. Compare against top staked models using custom scoring formulas.
+			</p>
+			<a
+				href="/rankings"
+				class="retro-button inline-flex items-center rounded-md px-4 py-2 text-sm font-medium"
+			>
+				View Rankings
+				<svg class="ml-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+				</svg>
+			</a>
+		</div>
+
 		<div class="retro-card rounded-lg p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Features</h2>
 			<ul class="space-y-2 retro-text-secondary">
@@ -40,7 +56,7 @@
 					<svg class="mr-2 h-4 w-4 retro-text-success" fill="currentColor" viewBox="0 0 20 20">
 						<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
 					</svg>
-					Save & share chart configurations
+					Custom score ranking formulas
 				</li>
 				<li class="flex items-center">
 					<svg class="mr-2 h-4 w-4 retro-text-success" fill="currentColor" viewBox="0 0 20 20">
