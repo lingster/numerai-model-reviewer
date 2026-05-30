@@ -9,6 +9,7 @@
 		getTopModelsForRound,
 		getCurrentRound,
 		DEFAULT_SCORE_FORMULA,
+		getDefaultFormulaForTournament,
 		calculateCustomScore
 	} from '$lib/rankings-api.js';
 	import type { NumeraiUser, NumeraiModel, ModelRankingHistory, ScoreFormula, RoundModelScore } from '$lib/types.js';
@@ -64,21 +65,27 @@
 	onMount(async () => {
 		numeraiApi = new NumeraiAPI();
 
-		// Load tournament from URL or localStorage
+		// Load tournament from URL or localStorage. Signals is now supported on
+		// rankings (uses alpha+mpc scoring server-side); Crypto and Classic use
+		// corr+mmc. The frontend treats all three uniformly.
 		const url = new URL(window.location.href);
 		const tournamentParam = url.searchParams.get('tournament');
 		if (tournamentParam) {
 			const parsedTournament = parseInt(tournamentParam, 10) as TournamentId;
-			// Only allow Classic or Crypto for rankings
-			if (parsedTournament === TOURNAMENTS.CLASSIC || parsedTournament === TOURNAMENTS.CRYPTO) {
+			if (
+				parsedTournament === TOURNAMENTS.CLASSIC ||
+				parsedTournament === TOURNAMENTS.SIGNALS ||
+				parsedTournament === TOURNAMENTS.CRYPTO
+			) {
 				selectedTournament = parsedTournament;
 				setSelectedTournament(parsedTournament);
 			}
 		} else {
-			const stored = getSelectedTournament();
-			// Default to Classic if Signals is stored
-			selectedTournament = stored === TOURNAMENTS.SIGNALS ? TOURNAMENTS.CLASSIC : stored;
+			selectedTournament = getSelectedTournament();
 		}
+
+		// Seed the formula with the tournament-appropriate defaults.
+		scoreFormula = getDefaultFormulaForTournament(selectedTournament);
 
 		// Fetch current round
 		try {
@@ -230,12 +237,13 @@
 	}
 
 	function switchTournament(tournament: TournamentId) {
-		// Only allow Classic or Crypto
-		if (tournament === TOURNAMENTS.SIGNALS) return;
 		if (tournament === selectedTournament) return;
 
 		selectedTournament = tournament;
 		setSelectedTournament(tournament);
+
+		// Reset to tournament-appropriate scoring defaults.
+		scoreFormula = getDefaultFormulaForTournament(tournament);
 
 		// Clear selections
 		selectedModels = [];
@@ -409,7 +417,7 @@
 		<p class="mt-2 retro-text-secondary">Track model rank performance over time using custom scoring</p>
 	</div>
 
-	<!-- Tournament Tabs (Classic and Crypto only) -->
+	<!-- Tournament Tabs -->
 	<div class="tournament-tabs">
 		{#if config.features.enableClassic}
 			<button
@@ -418,6 +426,15 @@
 				onclick={() => switchTournament(TOURNAMENTS.CLASSIC)}
 			>
 				Classic
+			</button>
+		{/if}
+		{#if config.features.enableSignals}
+			<button
+				class="tournament-tab tab-signals"
+				class:active={selectedTournament === TOURNAMENTS.SIGNALS}
+				onclick={() => switchTournament(TOURNAMENTS.SIGNALS)}
+			>
+				Signals
 			</button>
 		{/if}
 		{#if config.features.enableCrypto}

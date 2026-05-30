@@ -31,6 +31,16 @@ jobs:
         working-directory: worker
         run: npm ci
 
+      # Apply schema before deploy so queries against the new tables work as soon
+      # as the worker goes live. CREATE TABLE IF NOT EXISTS is idempotent.
+      - name: Apply D1 schema
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          command: d1 execute numerai-cache --remote --file=src/schema.sql
+
       - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v3
         with:

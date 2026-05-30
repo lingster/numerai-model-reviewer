@@ -1,0 +1,304 @@
+/**
+ * Rankings API — D1-backed rank computation.
+ *
+ * Reads precomputed top-staked-model performance from D1 and computes a
+ * model's rank under a user-supplied score formula. Supports Classic (8),
+ * Signals (11) and Crypto (12). Signals uses the "new" alpha/mpc scoring
+ * regime; Classic/Crypto use corr/mmc.
+ *
+ * The endpoint contract is pinned by worker/src/rankings-api.test.ts:
+ *   GET /rankings/model-rank?modelName=&startRound=&endRound=&tournament=
+ *                            &corrWeight=&mmcWeight=
+ *   → { modelName, username, modelId, rounds: [{
+ *       roundNumber, rank, corr, mmc, customScore, totalModels
+ *     }] }
+ *
+ * For Signals, `corr` and `mmc` in the response are alpha and mpc respectively
+ * — the frontend renders them under the same axes (the "New scoring" toggle
+ * in the signals tab uses this same alias).
+ */
+import { SIGNALS_TOURNAMENT } from './mappers';
+
+export interface Env {
+	DB: D1Database;
+	NUMERAI_API_URL: string;
+}
+
+export interface ScoreFormula {
+	corrWeight: number;
+	mmcWeight: number;
+	tcWeight?: number;
+}
+
+export interface ModelRankRoundResult {
+	roundNumber: number;
+	rank: number | null;
+	corr: number | null;
+	mmc: number | null;
+	customScore: number | null;
+	totalModels: number;
+}
+
+export interface ModelRankResponse {
+	modelName: string;
+	username: string;
+	modelId: string;
+	rounds: ModelRankRoundResult[];
+}
+
+interface TopModelRow {
+	model_id: string;
+	model_name: string;
+	username: string;
+}
+
+interface RoundPerfRow {
+	model_name: string;
+	corr: number | null;
+	mmc: number | null;
+	tc: number | null;
+	alpha: number | null;
+	mpc: number | null;
+	stake_value: number | null;
+}
+
+/** Pick the (corr-like, mmc-like) metric pair for the given tournament. */
+function pickMetrics(row: RoundPerfRow, tournament: number): {
+	corrMetric: number | null;
+	mmcMetric: number | null;
+	tcMetric: number | null;
+} {
+	if (tournament === SIGNALS_TOURNAMENT) {
+		return { corrMetric: row.alpha, mmcMetric: row.mpc, tcMetric: null };
+	}
+	return { corrMetric: row.corr, mmcMetric: row.mmc, tcMetric: row.tc };
+}
+
+/**
+ * Look up a model's id/username/canonical-name from D1. Case-insensitive on
+ * model_name. Returns null if the model isn't in the precomputed set.
+ */
+async function lookupModel(
+	env: Env,
+	modelName: string,
+	tournament: number
+): Promise<TopModelRow | null> {
+	const row = await env.DB.prepare(
+		`SELECT model_id, model_name, username
+		   FROM top_staked_models
+		  WHERE LOWER(model_name) = LOWER(?) AND tournament = ?`
+	)
+		.bind(modelName, tournament)
+		.first<TopModelRow>();
+	return row ?? null;
+}
+
+/**
+ * Fetch all staked models' performance for a round and tournament. "Staked"
+ * here means `stake_value > 0` for Classic/Signals; Crypto rows have no stake
+ * data, so we include every row (the precompute writes one row per model).
+ */
+async function fetchRoundField(
+	env: Env,
+	round: number,
+	tournament: number
+): Promise<RoundPerfRow[]> {
+	const sql =
+		tournament === 12
+			? `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
+			     FROM model_performances
+			    WHERE round_number = ? AND tournament = ?`
+			: `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
+			     FROM model_performances
+			    WHERE round_number = ? AND tournament = ?
+			      AND stake_value IS NOT NULL AND stake_value > 0`;
+	const result = await env.DB.prepare(sql)
+		.bind(round, tournament)
+		.all<RoundPerfRow>();
+	return result.results ?? [];
+}
+
+/**
+ * Compute the model's rank for one round given the precomputed field.
+ * Models whose metric pair yields no numeric score are excluded from the
+ * field (they can't be ranked).
+ */
+function rankRound(
+	field: RoundPerfRow[],
+	targetModelLower: string,
+	tournament: number,
+	formula: ScoreFormula
+): ModelRankRoundResult | null {
+	const scored: Array<{
+		modelName: string;
+		score: number;
+		corr: number | null;
+		mmc: number | null;
+	}> = [];
+
+	for (const row of field) {
+		const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
+		if (corrMetric === null && mmcMetric === null && tcMetric === null) continue;
+		const score =
+			formula.corrWeight * (corrMetric ?? 0) +
+			formula.mmcWeight * (mmcMetric ?? 0) +
+			(formula.tcWeight ?? 0) * (tcMetric ?? 0);
+		if (!Number.isFinite(score)) continue;
+		scored.push({
+			modelName: row.model_name,
+			score,
+			corr: corrMetric,
+			mmc: mmcMetric
+		});
+	}
+
+	scored.sort((a, b) => b.score - a.score);
+	const totalModels = scored.length;
+
+	const idx = scored.findIndex(
+		(s) => s.modelName.toLowerCase() === targetModelLower
+	);
+	if (idx < 0) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels };
+
+	return {
+		roundNumber: 0,
+		rank: idx + 1,
+		corr: scored[idx].corr,
+		mmc: scored[idx].mmc,
+		customScore: scored[idx].score,
+		totalModels
+	};
+}
+
+/**
+ * Compute ranks for a model over [startRound, endRound]. Reads everything
+ * from D1 — no live API calls in the request path.
+ */
+export async function getModelRank(
+	env: Env,
+	params: {
+		modelName: string;
+		startRound: number;
+		endRound: number;
+		tournament: number;
+		formula: ScoreFormula;
+	}
+): Promise<ModelRankResponse> {
+	const { modelName, startRound, endRound, tournament, formula } = params;
+	const targetLower = modelName.toLowerCase();
+
+	const meta = await lookupModel(env, modelName, tournament);
+
+	const rounds: ModelRankRoundResult[] = [];
+	for (let r = startRound; r <= endRound; r++) {
+		const field = await fetchRoundField(env, r, tournament);
+		const ranked = rankRound(field, targetLower, tournament, formula);
+		if (ranked) {
+			rounds.push({ ...ranked, roundNumber: r });
+		} else {
+			rounds.push({
+				roundNumber: r,
+				rank: null,
+				corr: null,
+				mmc: null,
+				customScore: null,
+				totalModels: 0
+			});
+		}
+	}
+
+	return {
+		modelName: meta?.model_name ?? modelName,
+		username: meta?.username ?? '',
+		modelId: meta?.model_id ?? '',
+		rounds
+	};
+}
+
+/** Top-N entry returned by /rankings/top-models. */
+export interface TopModelEntry {
+	modelName: string;
+	rank: number;
+	corr: number | null;
+	mmc: number | null;
+	customScore: number;
+	totalModels: number;
+}
+
+/**
+ * Top-N models for a single round under the given formula. Reads the precomputed
+ * field from D1 and returns the top `limit` entries by custom score.
+ */
+export async function getTopModelsForRound(
+	env: Env,
+	params: {
+		round: number;
+		tournament: number;
+		formula: ScoreFormula;
+		limit: number;
+	}
+): Promise<TopModelEntry[]> {
+	const { round, tournament, formula, limit } = params;
+	const field = await fetchRoundField(env, round, tournament);
+
+	const scored: Array<{
+		modelName: string;
+		score: number;
+		corr: number | null;
+		mmc: number | null;
+	}> = [];
+	for (const row of field) {
+		const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
+		if (corrMetric === null && mmcMetric === null && tcMetric === null) continue;
+		const score =
+			formula.corrWeight * (corrMetric ?? 0) +
+			formula.mmcWeight * (mmcMetric ?? 0) +
+			(formula.tcWeight ?? 0) * (tcMetric ?? 0);
+		if (!Number.isFinite(score)) continue;
+		scored.push({ modelName: row.model_name, score, corr: corrMetric, mmc: mmcMetric });
+	}
+
+	scored.sort((a, b) => b.score - a.score);
+	const totalModels = scored.length;
+
+	return scored.slice(0, limit).map((s, i) => ({
+		modelName: s.modelName,
+		rank: i + 1,
+		corr: s.corr,
+		mmc: s.mmc,
+		customScore: s.score,
+		totalModels
+	}));
+}
+
+/**
+ * Live-API lookup for the current round number for a tournament. Bypasses D1
+ * since precompute may lag and the UI wants the freshest round to populate
+ * its default range. Cached by the worker layer (KV) if desired.
+ */
+export async function getCurrentRound(
+	env: Env & { NUMERAI_API_URL: string },
+	tournament: number
+): Promise<number> {
+	const response = await fetch(env.NUMERAI_API_URL, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			query: `query($tournament: Int!) { rounds(tournament: $tournament, limit: 1) { number } }`,
+			variables: { tournament }
+		})
+	});
+	if (!response.ok) {
+		throw new Error(`Numerai API error: ${response.status}`);
+	}
+	const result = (await response.json()) as {
+		data?: { rounds?: Array<{ number: number }> };
+		errors?: Array<{ message: string }>;
+	};
+	if (result.errors?.length) {
+		throw new Error(result.errors.map((e) => e.message).join(', '));
+	}
+	const round = result.data?.rounds?.[0]?.number;
+	if (!round) throw new Error('No rounds returned');
+	return round;
+}

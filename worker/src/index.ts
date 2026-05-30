@@ -5,6 +5,7 @@
 import * as api from './api';
 import { Env as ApiEnv } from './api';
 import { CRYPTO_TOURNAMENT } from './mappers';
+import * as rankings from './rankings-api';
 
 // Environment bindings interface
 interface Env extends ApiEnv {
@@ -13,6 +14,8 @@ interface Env extends ApiEnv {
   RATE_LIMIT_REQUESTS: string;
   RATE_LIMIT_WINDOW_SECONDS: string;
   RATE_LIMIT?: KVNamespace;
+  // D1 database for precomputed rankings data
+  DB: D1Database;
 }
 
 // Rate limit entry stored in KV
@@ -162,6 +165,69 @@ export default {
           tournament ? parseInt(tournament) : undefined
         );
         response = result ? jsonResponse(result) : new Response(JSON.stringify({ error: 'Model not found' }), { status: 404 });
+      }
+      // GET /rankings/current-round?tournament=8
+      else if (path === '/rankings/current-round' && request.method === 'GET') {
+        const tournament = parseInt(url.searchParams.get('tournament') || '8');
+        const round = await rankings.getCurrentRound(env, tournament);
+        response = jsonResponse({ tournament, round });
+      }
+      // GET /rankings/top-models?round=&tournament=&limit=&corrWeight=&mmcWeight=
+      else if (path === '/rankings/top-models' && request.method === 'GET') {
+        const roundStr = url.searchParams.get('round');
+        if (!roundStr) {
+          response = new Response(
+            JSON.stringify({ error: 'round is required' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        } else {
+          const round = parseInt(roundStr);
+          const tournament = parseInt(url.searchParams.get('tournament') || '8');
+          const limit = parseInt(url.searchParams.get('limit') || '10');
+          const formula: rankings.ScoreFormula = {
+            corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
+            mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
+            tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
+          };
+          const top = await rankings.getTopModelsForRound(env, { round, tournament, formula, limit });
+          response = jsonResponse(top);
+        }
+      }
+      // GET /rankings/model-rank?modelName=&startRound=&endRound=&tournament=&corrWeight=&mmcWeight=
+      else if (path === '/rankings/model-rank' && request.method === 'GET') {
+        const modelName = url.searchParams.get('modelName');
+        const startRoundStr = url.searchParams.get('startRound');
+        const endRoundStr = url.searchParams.get('endRound');
+        if (!modelName || !startRoundStr || !endRoundStr) {
+          response = new Response(
+            JSON.stringify({ error: 'modelName, startRound and endRound are required' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        } else {
+          const startRound = parseInt(startRoundStr);
+          const endRound = parseInt(endRoundStr);
+          if (!Number.isFinite(startRound) || !Number.isFinite(endRound) || endRound < startRound) {
+            response = new Response(
+              JSON.stringify({ error: 'Invalid startRound/endRound' }),
+              { status: 400, headers: { 'Content-Type': 'application/json' } }
+            );
+          } else {
+            const tournament = parseInt(url.searchParams.get('tournament') || '8');
+            const formula: rankings.ScoreFormula = {
+              corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
+              mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
+              tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
+            };
+            const result = await rankings.getModelRank(env, {
+              modelName,
+              startRound,
+              endRound,
+              tournament,
+              formula
+            });
+            response = jsonResponse(result);
+          }
+        }
       }
       // GET /models/:modelName
       else if (path.match(/^\/models\/[^/]+$/) && request.method === 'GET') {

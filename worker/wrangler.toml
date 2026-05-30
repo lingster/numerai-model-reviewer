@@ -8,6 +8,11 @@ routes = [
   { pattern = "numerdiff-api.imperialai.ai/*", zone_name = "imperialai.ai" }
 ]
 
+# Precompute scheduling lives outside the worker — full backfill of 5k+ models
+# doesn't fit in a worker cron's CPU budget. Run worker/src/precompute.ts via
+# `npm run precompute:prod` (manual) or a GitHub Actions schedule. A scheduled()
+# handler for incremental refresh can be added later if needed.
+
 # Environment variables (non-sensitive)
 [vars]
 ALLOWED_ORIGINS = "http://localhost:5173,https://numerdiff.imperialai.ai"
@@ -16,14 +21,15 @@ RATE_LIMIT_WINDOW_SECONDS = "60"
 NUMERAI_API_URL = "https://api-tournament.numer.ai/graphql"
 
 # KV Namespace for rate limiting
-# Uncomment after creating: wrangler kv:namespace create "RATE_LIMIT"
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
 id = "a99eaf0e2f4a4be2b587bd6944926415"
 
-# [[kv_namespaces]]
-# binding = "RATE_LIMIT"
-# id = "<your-kv-namespace-id>"
+# D1 database for cached rankings data (top staked models + per-round performance)
+[[d1_databases]]
+binding = "DB"
+database_name = "numerai-cache"
+database_id = "fed45222-4fc5-4acf-a089-cc798ee6f98e"
 
 # Secrets (set via wrangler secret put):
 # - NUMERAI_PUBLIC_KEY

@@ -70,7 +70,7 @@ async function queryNumerai<T>(graphqlQuery: string, variables?: Record<string, 
 
 describe('calculateCustomScore - unit tests', () => {
 	it('should calculate score with default formula (0.75*corr + 2.25*mmc)', () => {
-		const score = calculateCustomScore(0.0433, 0.0371, DEFAULT_SCORE_FORMULA);
+		const score = calculateCustomScore(0.0433, 0.0371, null, DEFAULT_SCORE_FORMULA);
 		// 0.75 * 0.0433 + 2.25 * 0.0371 = 0.032475 + 0.083475 = 0.11595
 		expect(score).toBeCloseTo(0.11595, 4);
 	});
@@ -79,6 +79,7 @@ describe('calculateCustomScore - unit tests', () => {
 		const score = calculateCustomScore(
 			EXPECTED[1170].corr,
 			EXPECTED[1170].mmc,
+			null,
 			DEFAULT_SCORE_FORMULA
 		);
 		expect(score).toBeCloseTo(0.1160, 3);
@@ -88,37 +89,38 @@ describe('calculateCustomScore - unit tests', () => {
 		const score = calculateCustomScore(
 			EXPECTED[1171].corr,
 			EXPECTED[1171].mmc,
+			null,
 			DEFAULT_SCORE_FORMULA
 		);
 		expect(score).toBeCloseTo(0.1103, 3);
 	});
 
 	it('should return null when all metrics are null', () => {
-		const score = calculateCustomScore(null, null, DEFAULT_SCORE_FORMULA);
+		const score = calculateCustomScore(null, null, null, DEFAULT_SCORE_FORMULA);
 		expect(score).toBeNull();
 	});
 
 	it('should treat null values as 0 in calculations', () => {
-		const score = calculateCustomScore(0.05, null, DEFAULT_SCORE_FORMULA);
+		const score = calculateCustomScore(0.05, null, null, DEFAULT_SCORE_FORMULA);
 		// 0.75 * 0.05 + 2.25 * 0 = 0.0375
 		expect(score).toBeCloseTo(0.0375, 4);
 	});
 
 	it('should handle custom formula weights', () => {
-		const formula: ScoreFormula = { corrWeight: 1.0, mmcWeight: 1.0 };
-		const score = calculateCustomScore(0.1, 0.2, formula);
-		// 1.0 * 0.1 + 1.0 * 0.2 + 1.0 * 0.3 = 0.6
-		expect(score).toBeCloseTo(0.6, 4);
+		const formula: ScoreFormula = { corrWeight: 1.0, mmcWeight: 1.0, tcWeight: 0 };
+		const score = calculateCustomScore(0.1, 0.2, null, formula);
+		// 1.0 * 0.1 + 1.0 * 0.2 = 0.3
+		expect(score).toBeCloseTo(0.3, 4);
 	});
 
 	it('should handle zero weights', () => {
-		const formula: ScoreFormula = { corrWeight: 0, mmcWeight: 0 };
-		const score = calculateCustomScore(0.1, 0.2, formula);
+		const formula: ScoreFormula = { corrWeight: 0, mmcWeight: 0, tcWeight: 0 };
+		const score = calculateCustomScore(0.1, 0.2, null, formula);
 		expect(score).toBeCloseTo(0, 4);
 	});
 
 	it('should handle negative metric values', () => {
-		const score = calculateCustomScore(-0.05, -0.03, DEFAULT_SCORE_FORMULA);
+		const score = calculateCustomScore(-0.05, -0.03, null, DEFAULT_SCORE_FORMULA);
 		// 0.75 * (-0.05) + 2.25 * (-0.03) = -0.0375 + -0.0675 = -0.105
 		expect(score).toBeCloseTo(-0.105, 4);
 	});
@@ -316,10 +318,11 @@ describe('Worker API - /rankings/model-rank endpoint', () => {
 		const round = data.rounds.find(r => r.roundNumber === 1170);
 		expect(round).toBeDefined();
 
-		if (round?.corr !== null && round?.mmc !== null) {
+		if (round && round.corr !== null && round.mmc !== null) {
 			const expectedScore = calculateCustomScore(
 				round.corr,
 				round.mmc,
+				null,
 				DEFAULT_SCORE_FORMULA
 			);
 			expect(round.customScore).toBeCloseTo(expectedScore!, 4);
