@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import * as d3Array from 'd3-array';
 	import * as d3Scale from 'd3-scale';
 	import * as d3Shape from 'd3-shape';
@@ -43,14 +43,21 @@
 	// Model visibility state
 	let modelVisibility = $state<Record<string, boolean>>({});
 
-	// Initialize visibility when histories change
+	// Initialize visibility when histories change.
+	// Depend ONLY on rankingHistories: the read+write of modelVisibility is
+	// wrapped in untrack so reassigning it (a new object reference) does not
+	// invalidate this effect's own dependency and loop forever
+	// (effect_update_depth_exceeded).
 	$effect(() => {
-		const newVisibility: Record<string, boolean> = {};
-		for (const history of rankingHistories) {
-			// Preserve existing visibility or default to true
-			newVisibility[history.modelId] = modelVisibility[history.modelId] ?? true;
-		}
-		modelVisibility = newVisibility;
+		const histories = rankingHistories;
+		untrack(() => {
+			const newVisibility: Record<string, boolean> = {};
+			for (const history of histories) {
+				// Preserve existing visibility or default to true
+				newVisibility[history.modelId] = modelVisibility[history.modelId] ?? true;
+			}
+			modelVisibility = newVisibility;
+		});
 	});
 
 	// Filter visible models

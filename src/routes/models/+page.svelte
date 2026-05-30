@@ -62,6 +62,10 @@
 	// Computed theme class based on selected tournament
 	const themeClass = $derived(TOURNAMENT_INFO[selectedTournament].theme);
 
+	// Alpha/MPC and the alpha+mpc weighted score only apply to Signals; Classic
+	// and Crypto have no such scores (they would render as N/A), so hide them.
+	const isSignals = $derived(selectedTournament === TOURNAMENTS.SIGNALS);
+
 	// Recent items
 	let recentUserModels = $state<RecentUserModel[]>([]);
 	let recentCharts = $state<RecentChart[]>([]);
@@ -1050,35 +1054,37 @@
 			{#if comparisonExpanded}
 				<!-- Simple bar charts for the latest in-range round, one per metric. -->
 				<div class="space-y-6 mt-4">
-					<!-- Current Numerai Signals scoring: alpha, mpc and the weighted score. -->
-					<MetricBarComparison
-						label="Alpha Comparison"
-						entries={metricEntries((r) => r?.alpha)}
-						positiveClass="bg-[var(--retro-success)]"
-						negativeClass="bg-[var(--retro-error)]"
-					/>
-					<MetricBarComparison
-						label="MPC Comparison"
-						entries={metricEntries((r) => r?.mpc)}
-						positiveClass="bg-[var(--retro-primary)]"
-						negativeClass="bg-[var(--retro-accent)]"
-					/>
-					<MetricBarComparison
-						label="Score Comparison (0.3·Alpha + 0.8·MPC)"
-						entries={metricEntries((r) => computeScore(r?.alpha, r?.mpc))}
-						positiveClass="bg-[var(--retro-success)]"
-						negativeClass="bg-[var(--retro-error)]"
-					/>
+					<!-- Alpha/MPC/Score are Signals-only; Classic & Crypto have no
+					     such scores, so show only Corr20/MMC there. -->
+					{#if isSignals}
+						<MetricBarComparison
+							label="Alpha Comparison"
+							entries={metricEntries((r) => r?.alpha)}
+							positiveClass="bg-[var(--retro-success)]"
+							negativeClass="bg-[var(--retro-error)]"
+						/>
+						<MetricBarComparison
+							label="MPC Comparison"
+							entries={metricEntries((r) => r?.mpc)}
+							positiveClass="bg-[var(--retro-primary)]"
+							negativeClass="bg-[var(--retro-accent)]"
+						/>
+						<MetricBarComparison
+							label="Score Comparison (0.3·Alpha + 0.8·MPC)"
+							entries={metricEntries((r) => computeScore(r?.alpha, r?.mpc))}
+							positiveClass="bg-[var(--retro-success)]"
+							negativeClass="bg-[var(--retro-error)]"
+						/>
+					{/if}
 
-					<!-- Deprecated metrics, retained for reference. -->
 					<MetricBarComparison
-						label="Corr20 Comparison (deprecated)"
+						label={isSignals ? 'Corr20 Comparison (deprecated)' : 'Corr20 Comparison'}
 						entries={metricEntries((r) => r?.correlation)}
 						positiveClass="bg-[var(--retro-success)]"
 						negativeClass="bg-[var(--retro-error)]"
 					/>
 					<MetricBarComparison
-						label="MMC Comparison (deprecated)"
+						label={isSignals ? 'MMC Comparison (deprecated)' : 'MMC Comparison'}
 						entries={metricEntries((r) => r?.mmc)}
 						positiveClass="bg-[var(--retro-primary)]"
 						negativeClass="bg-[var(--retro-accent)]"
@@ -1134,12 +1140,14 @@
 						<tr>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Model</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">User</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="0.3·Alpha + 0.8·MPC">Score</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-secondary">Corr20 <span class="normal-case">(deprecated)</span></th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-secondary">MMC <span class="normal-case">(deprecated)</span></th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-secondary">FNC <span class="normal-case">(deprecated)</span></th>
+							{#if isSignals}
+								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
+								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
+								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="0.3·Alpha + 0.8·MPC">Score</th>
+							{/if}
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">Corr20 {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">MMC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">FNC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Stake Value</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Corr Multiplier</th>
 						</tr>
@@ -1150,10 +1158,12 @@
 							<tr>
 								<td class="whitespace-nowrap px-6 py-4 text-sm font-medium retro-text-primary">{model.modelName}</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">{model.username}</td>
-								<!-- Current Signals scoring first; deprecated metrics follow. -->
-								{@render metricCell(latestRound?.alpha)}
-								{@render metricCell(latestRound?.mpc)}
-								{@render metricCell(computeScore(latestRound?.alpha, latestRound?.mpc))}
+								<!-- Signals-only scoring first; deprecated metrics follow. -->
+								{#if isSignals}
+									{@render metricCell(latestRound?.alpha)}
+									{@render metricCell(latestRound?.mpc)}
+									{@render metricCell(computeScore(latestRound?.alpha, latestRound?.mpc))}
+								{/if}
 								{@render metricCell(latestRound?.correlation)}
 								{@render metricCell(latestRound?.mmc)}
 								{@render metricCell(latestRound?.fnc)}
