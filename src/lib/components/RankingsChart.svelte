@@ -18,8 +18,14 @@
 
 	// Chart dimensions
 	const margin = { top: 40, right: 120, bottom: 60, left: 70 };
+	const BASE_HEIGHT = 400;
 	let containerWidth = $state(800);
-	let containerHeight = $state(400);
+	let viewportHeight = $state(BASE_HEIGHT);
+	let screenHeight = $state(BASE_HEIGHT);
+
+	// Cap at the smaller of BASE_HEIGHT, the visible browser viewport, and the
+	// device screen so the chart can never extend past what the user can see.
+	const containerHeight = $derived(Math.min(BASE_HEIGHT, viewportHeight, screenHeight));
 
 	const width = $derived(Math.max(containerWidth - margin.left - margin.right, 100));
 	const height = $derived(Math.max(containerHeight - margin.top - margin.bottom, 100));
@@ -203,13 +209,22 @@
 	let chartContainer: HTMLDivElement;
 
 	onMount(() => {
-		// Set up resize observer
+		viewportHeight = window.innerHeight;
+		screenHeight = window.screen?.height ?? window.innerHeight;
+
+		// Only observe width. Reading contentRect.height back into containerHeight
+		// would feed back into the SVG height (the SVG IS the container's tallest
+		// child), growing the chart unboundedly each tick.
 		const resizeObserver = new ResizeObserver((entries) => {
 			for (const entry of entries) {
 				containerWidth = entry.contentRect.width;
-				containerHeight = Math.max(400, entry.contentRect.height);
 			}
 		});
+
+		const onWindowResize = () => {
+			viewportHeight = window.innerHeight;
+		};
+		window.addEventListener('resize', onWindowResize);
 
 		if (chartContainer) {
 			resizeObserver.observe(chartContainer);
@@ -217,6 +232,7 @@
 
 		return () => {
 			resizeObserver.disconnect();
+			window.removeEventListener('resize', onWindowResize);
 		};
 	});
 </script>
