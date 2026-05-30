@@ -2,7 +2,9 @@
 	import { onMount } from 'svelte';
 	import Autocomplete from '$lib/components/Autocomplete.svelte';
 	import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
+	import MetricBarComparison from '$lib/components/MetricBarComparison.svelte';
 	import { NumeraiAPI } from '$lib/numerai-api.js';
+	import { computeScore } from '$lib/utils/scoring.js';
 	import { config } from '$lib/config.js';
 	import type { NumeraiUser, NumeraiModel, ModelPerformance, SavedChart } from '$lib/types.js';
 	import {
@@ -515,6 +517,27 @@
 		})
 	);
 
+	// Collapsible state for the bar-chart comparison card (expanded by default).
+	let comparisonExpanded = $state(true);
+
+	/**
+	 * Build per-model {name, username, value} entries for one metric, using each
+	 * model's latest in-range round. Shared by every MetricBarComparison so the
+	 * row set and ordering stay identical across metrics (DRY).
+	 */
+	function metricEntries(
+		getValue: (round: ReturnType<typeof getLatestRoundWithData>) => number | null | undefined
+	): Array<{ name: string; username: string; value: number | null }> {
+		return sortedModelPerformance.map((model) => {
+			const latestRound = getLatestRoundWithData(model, startDate, endDate);
+			return {
+				name: model.modelName,
+				username: model.username,
+				value: getValue(latestRound) ?? null
+			};
+		});
+	}
+
 	// URL query parameter management
 	function updateUrlParams() {
 		if (!browser) return;
@@ -1011,81 +1034,57 @@
 	<!-- Performance Chart -->
 	{#if modelPerformance.length > 0}
 		<div class="mb-6 rounded-lg retro-card p-6">
-			<div class="mb-4">
-				<h3 class="text-lg font-medium retro-text-primary uppercase">Model Performance Comparison</h3>
-				<p class="text-sm retro-text-secondary mt-1">Latest performance metrics for selected models (bar chart)</p>
-			</div>
-
-			<!-- Simple Bar Chart for Current Metrics -->
-			<div class="space-y-6">
-				<!-- Correlation Comparison -->
+			<button
+				type="button"
+				class="flex w-full items-center justify-between text-left"
+				aria-expanded={comparisonExpanded}
+				onclick={() => (comparisonExpanded = !comparisonExpanded)}
+			>
 				<div>
-					<h4 class="text-sm font-medium retro-text-primary mb-2">Corr20 Comparison</h4>
-					<div class="space-y-2">
-						{#each sortedModelPerformance as model, index}
-							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
-							{@const correlation = latestRound?.correlation}
-							{@const maxCorr = Math.max(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.correlation || 0))}
-							{@const minCorr = Math.min(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.correlation || 0))}
-							{@const range = maxCorr - minCorr || 1}
-							{@const barWidth = correlation !== null && correlation !== undefined ? Math.abs((correlation - minCorr) / range) * 100 : 0}
-							<div class="flex items-center gap-3">
-								<div class="w-32 text-sm retro-text-secondary truncate" title="{model.modelName} ({model.username})">
-									{model.modelName}
-								</div>
-								<div class="flex-1 retro-bg-secondary rounded-full h-6 relative">
-									{#if correlation !== null && correlation !== undefined}
-										<div
-											class="h-6 rounded-full flex items-center justify-end pr-2 text-xs text-white font-medium {correlation > 0 ? 'bg-[var(--retro-success)]' : 'bg-[var(--retro-error)]'}"
-											style="width: {Math.max(barWidth, 10)}%"
-										>
-											{correlation.toFixed(4)}
-										</div>
-									{:else}
-										<div class="h-6 rounded-full retro-bg-primary flex items-center justify-center text-xs retro-text-secondary">
-											N/A
-										</div>
-									{/if}
-								</div>
-							</div>
-						{/each}
-					</div>
+					<h3 class="text-lg font-medium retro-text-primary uppercase">Model Performance Comparison</h3>
+					<p class="text-sm retro-text-secondary mt-1">Latest performance metrics for selected models (bar chart)</p>
 				</div>
+				<span class="retro-text-primary text-xl ml-4" aria-hidden="true">{comparisonExpanded ? '▾' : '▸'}</span>
+			</button>
 
-				<!-- MMC Comparison -->
-				<div>
-					<h4 class="text-sm font-medium retro-text-primary mb-2">MMC Comparison</h4>
-					<div class="space-y-2">
-						{#each sortedModelPerformance as model, index}
-							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
-							{@const mmc = latestRound?.mmc}
-							{@const maxMmc = Math.max(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.mmc || 0))}
-							{@const minMmc = Math.min(...sortedModelPerformance.map(m => getLatestRoundWithData(m, startDate, endDate)?.mmc || 0))}
-							{@const range = maxMmc - minMmc || 1}
-							{@const barWidth = mmc !== null && mmc !== undefined ? Math.abs((mmc - minMmc) / range) * 100 : 0}
-							<div class="flex items-center gap-3">
-								<div class="w-32 text-sm retro-text-secondary truncate" title="{model.modelName} ({model.username})">
-									{model.modelName}
-								</div>
-								<div class="flex-1 retro-bg-secondary rounded-full h-6 relative">
-									{#if mmc !== null && mmc !== undefined}
-										<div
-											class="h-6 rounded-full flex items-center justify-end pr-2 text-xs text-white font-medium {mmc > 0 ? 'bg-[var(--retro-primary)]' : 'bg-[var(--retro-accent)]'}"
-											style="width: {Math.max(barWidth, 10)}%"
-										>
-											{mmc.toFixed(4)}
-										</div>
-									{:else}
-										<div class="h-6 rounded-full retro-bg-primary flex items-center justify-center text-xs retro-text-secondary">
-											N/A
-										</div>
-									{/if}
-								</div>
-							</div>
-						{/each}
-					</div>
+			{#if comparisonExpanded}
+				<!-- Simple bar charts for the latest in-range round, one per metric. -->
+				<div class="space-y-6 mt-4">
+					<!-- Current Numerai Signals scoring: alpha, mpc and the weighted score. -->
+					<MetricBarComparison
+						label="Alpha Comparison"
+						entries={metricEntries((r) => r?.alpha)}
+						positiveClass="bg-[var(--retro-success)]"
+						negativeClass="bg-[var(--retro-error)]"
+					/>
+					<MetricBarComparison
+						label="MPC Comparison"
+						entries={metricEntries((r) => r?.mpc)}
+						positiveClass="bg-[var(--retro-primary)]"
+						negativeClass="bg-[var(--retro-accent)]"
+					/>
+					<MetricBarComparison
+						label="Score Comparison (0.3·Alpha + 0.8·MPC)"
+						entries={metricEntries((r) => computeScore(r?.alpha, r?.mpc))}
+						positiveClass="bg-[var(--retro-success)]"
+						negativeClass="bg-[var(--retro-error)]"
+					/>
+
+					<!-- Deprecated metrics, retained for reference. -->
+					<MetricBarComparison
+						label="Corr20 Comparison (deprecated)"
+						entries={metricEntries((r) => r?.correlation)}
+						positiveClass="bg-[var(--retro-success)]"
+						negativeClass="bg-[var(--retro-error)]"
+					/>
+					<MetricBarComparison
+						label="MMC Comparison (deprecated)"
+						entries={metricEntries((r) => r?.mmc)}
+						positiveClass="bg-[var(--retro-primary)]"
+						negativeClass="bg-[var(--retro-accent)]"
+					/>
 				</div>
-			</div>
+			{/if}
 		</div>
 	{/if}
 
@@ -1108,6 +1107,20 @@
 	{/if}
 
 	<!-- Performance Table -->
+	<!-- Colored numeric cell shared by every metric column (DRY): green when
+	     positive, red when negative, "N/A" when the value is missing. -->
+	{#snippet metricCell(value: number | null | undefined)}
+		<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
+			{#if value !== null && value !== undefined}
+				<span class={value > 0 ? 'retro-text-success' : 'retro-text-error'}>
+					{value.toFixed(4)}
+				</span>
+			{:else}
+				<span class="retro-text-secondary">N/A</span>
+			{/if}
+		</td>
+	{/snippet}
+
 	{#if modelPerformance.length > 0}
 		<div class="rounded-lg retro-card">
 			<div class="px-6 py-4 border-b retro-border-secondary border-2">
@@ -1121,9 +1134,12 @@
 						<tr>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Model</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">User</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Corr20</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MMC</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">FNC</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="0.3·Alpha + 0.8·MPC">Score</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-secondary">Corr20 <span class="normal-case">(deprecated)</span></th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-secondary">MMC <span class="normal-case">(deprecated)</span></th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-secondary">FNC <span class="normal-case">(deprecated)</span></th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Stake Value</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Corr Multiplier</th>
 						</tr>
@@ -1134,33 +1150,13 @@
 							<tr>
 								<td class="whitespace-nowrap px-6 py-4 text-sm font-medium retro-text-primary">{model.modelName}</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">{model.username}</td>
-								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
-									{#if latestRound?.correlation !== null && latestRound?.correlation !== undefined}
-										<span class="{latestRound.correlation > 0 ? 'retro-text-success' : 'retro-text-error'}">
-											{latestRound.correlation.toFixed(4)}
-										</span>
-									{:else}
-										<span class="retro-text-secondary">N/A</span>
-									{/if}
-								</td>
-								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
-									{#if latestRound?.mmc !== null && latestRound?.mmc !== undefined}
-										<span class="{latestRound.mmc > 0 ? 'retro-text-success' : 'retro-text-error'}">
-											{latestRound.mmc.toFixed(4)}
-										</span>
-									{:else}
-										<span class="retro-text-secondary">N/A</span>
-									{/if}
-								</td>
-								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
-									{#if latestRound?.fnc !== null && latestRound?.fnc !== undefined}
-										<span class="{latestRound.fnc > 0 ? 'retro-text-success' : 'retro-text-error'}">
-											{latestRound.fnc.toFixed(4)}
-										</span>
-									{:else}
-										<span class="retro-text-secondary">N/A</span>
-									{/if}
-								</td>
+								<!-- Current Signals scoring first; deprecated metrics follow. -->
+								{@render metricCell(latestRound?.alpha)}
+								{@render metricCell(latestRound?.mpc)}
+								{@render metricCell(computeScore(latestRound?.alpha, latestRound?.mpc))}
+								{@render metricCell(latestRound?.correlation)}
+								{@render metricCell(latestRound?.mmc)}
+								{@render metricCell(latestRound?.fnc)}
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
 									{#if model.stakeValue !== null && model.stakeValue !== undefined && typeof model.stakeValue === 'number'}
 										{model.stakeValue.toFixed(2)} NMR

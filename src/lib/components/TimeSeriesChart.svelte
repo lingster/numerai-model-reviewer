@@ -5,6 +5,7 @@
 	import { scaleTime, scaleLinear, type ScaleTime, type ScaleLinear } from 'd3-scale';
 	import { line, curveMonotoneX } from 'd3-shape';
 	import type { ModelPerformance, ChartMetric, ModelSeries, ChartDataPoint } from '$lib/types.js';
+	import { SCORE_ALPHA_WEIGHT, SCORE_MPC_WEIGHT, computeScore } from '$lib/utils/scoring.js';
 
 	// Props
 	let {
@@ -73,8 +74,8 @@
 
 	// Calculated score weights (default Numerai Signals: 0.3*alpha + 0.8*mpc).
 	// Adjustable so the score can track future scoring-rule changes.
-	let scoreAlphaWeight = $state(0.3);
-	let scoreMpcWeight = $state(0.8);
+	let scoreAlphaWeight = $state(SCORE_ALPHA_WEIGHT);
+	let scoreMpcWeight = $state(SCORE_MPC_WEIGHT);
 
 	// State for model visibility
 	let modelVisibility = $state<Map<string, boolean>>(new Map());
@@ -186,9 +187,7 @@
 					const alpha = toNumber(round.alpha);
 					const mpc = toNumber(round.mpc);
 					// Weighted score; null only when both components are absent.
-					const score = (alpha === null && mpc === null)
-						? null
-						: scoreAlphaWeight * (alpha ?? 0) + scoreMpcWeight * (mpc ?? 0);
+					const score = computeScore(alpha, mpc, scoreAlphaWeight, scoreMpcWeight);
 					return {
 						roundNumber: round.roundNumber,
 						date: round.roundOpenTime ? new Date(round.roundOpenTime) : new Date(),
