@@ -94,21 +94,27 @@ export default {
         const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
         const rateLimitResult = await checkRateLimit(clientIP, env, ctx);
         if (!rateLimitResult.allowed) {
-          return new Response(
-            JSON.stringify({
-              error: 'Rate limit exceeded',
-              retryAfter: rateLimitResult.retryAfter
-            }),
-            {
-              status: 429,
-              headers: {
-                'Content-Type': 'application/json',
-                'Retry-After': String(rateLimitResult.retryAfter),
-                'X-RateLimit-Limit': env.RATE_LIMIT_REQUESTS,
-                'X-RateLimit-Remaining': '0',
-                'X-RateLimit-Reset': String(rateLimitResult.resetAt)
+          // Pass through handleCors so allowed browser clients receive the JSON
+          // error (with Access-Control-Allow-Origin) instead of a CORS failure.
+          return handleCors(
+            origin,
+            env,
+            new Response(
+              JSON.stringify({
+                error: 'Rate limit exceeded',
+                retryAfter: rateLimitResult.retryAfter
+              }),
+              {
+                status: 429,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Retry-After': String(rateLimitResult.retryAfter),
+                  'X-RateLimit-Limit': env.RATE_LIMIT_REQUESTS,
+                  'X-RateLimit-Remaining': '0',
+                  'X-RateLimit-Reset': String(rateLimitResult.resetAt)
+                }
               }
-            }
+            )
           );
         }
       }

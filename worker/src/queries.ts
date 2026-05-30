@@ -148,8 +148,6 @@ export const QUERY_GET_SIGNALS_MODEL_PERFORMANCE = `
         mmc
         mmc20d
         tc
-        ic
-        ric
         fnc
         fncV3
         fncV4
