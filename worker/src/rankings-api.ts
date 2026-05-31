@@ -261,7 +261,10 @@ export async function getTopModelsForRound(
 	scored.sort((a, b) => b.score - a.score);
 	const totalModels = scored.length;
 
-	return scored.slice(0, limit).map((s, i) => ({
+	// limit <= 0 means "return the whole ranked field" — the frontend pages and
+	// searches it client-side so users can find any staked model, not just top N.
+	const ranked = limit > 0 ? scored.slice(0, limit) : scored;
+	return ranked.map((s, i) => ({
 		modelName: s.modelName,
 		rank: i + 1,
 		corr: s.corr,

@@ -20,6 +20,7 @@
 		TOURNAMENT_INFO,
 		type TournamentId
 	} from '$lib/utils/storage.js';
+	import { paginateModels } from '$lib/utils/paginate-models.js';
 	import { replaceState } from '$app/navigation';
 	import { browser } from '$app/environment';
 
@@ -59,8 +60,16 @@
 	let rankingsError = $state<string | null>(null);
 	let loadingProgress = $state({ stage: '', loaded: 0, total: 0 });
 
-	// Selected round for top 10 table
+	// Per-round staked-model table. `topModels` now holds the FULL ranked field
+	// for the round; the table searches + paginates it client-side so users can
+	// find their own model, not just the top N.
 	let selectedRoundForTop10 = $state(0);
+	let modelTableQuery = $state('');
+	let modelTablePage = $state(1);
+	const MODEL_TABLE_PAGE_SIZE = 25;
+	const pagedTopModels = $derived(
+		paginateModels(topModels, modelTableQuery, modelTablePage, MODEL_TABLE_PAGE_SIZE)
+	);
 
 	onMount(async () => {
 		numeraiApi = new NumeraiAPI();
@@ -214,7 +223,7 @@
 			);
 
 			// Load top 10 for the selected round
-			await loadTop10ForRound(selectedRoundForTop10);
+			await loadTopModelsForRound(selectedRoundForTop10);
 
 			if (rankingHistories.length === 0) {
 				rankingsError = 'No ranking data was retrieved. The models may not have performance data in the selected round range.';
@@ -227,13 +236,15 @@
 		}
 	}
 
-	async function loadTop10ForRound(round: number) {
+	async function loadTopModelsForRound(round: number) {
+		// limit=0 → the worker returns the whole ranked field; we page it locally.
 		try {
-			topModels = await getTopModelsForRound(round, scoreFormula, selectedTournament, 10);
+			topModels = await getTopModelsForRound(round, scoreFormula, selectedTournament, 0);
 		} catch (error) {
-			console.error('Error loading top 10:', error);
+			console.error('Error loading staked models:', error);
 			topModels = [];
 		}
+		modelTablePage = 1;
 	}
 
 	function switchTournament(tournament: TournamentId) {
@@ -402,7 +413,7 @@
 	// Handle round selection for top 10 table
 	async function onSelectRoundForTop10() {
 		if (selectedRoundForTop10 > 0) {
-			await loadTop10ForRound(selectedRoundForTop10);
+			await loadTopModelsForRound(selectedRoundForTop10);
 		}
 	}
 </script>
@@ -710,7 +721,9 @@
 		<div class="rounded-lg retro-card">
 			<div class="px-6 py-4 border-b retro-border-secondary border-2">
 				<div class="flex items-center justify-between">
-					<h2 class="text-lg font-medium retro-text-primary uppercase">Top 10 Staked Models</h2>
+					<h2 class="text-lg font-medium retro-text-primary uppercase">
+						Top {topModels.length} Staked Models
+					</h2>
 					<div class="flex items-center gap-2">
 						<label for="roundSelect" class="text-sm retro-text-secondary">Round:</label>
 						<input
@@ -725,8 +738,30 @@
 					</div>
 				</div>
 				<p class="text-sm retro-text-secondary mt-1">
-					Top performing staked models for Round {selectedRoundForTop10} using current score formula
+					Staked models for Round {selectedRoundForTop10} ranked by the current score formula
 				</p>
+				<div class="mt-3 flex items-center gap-2">
+					<label for="modelTableSearch" class="sr-only">Search models</label>
+					<input
+						id="modelTableSearch"
+						type="text"
+						bind:value={modelTableQuery}
+						oninput={() => (modelTablePage = 1)}
+						placeholder="Search this round's models by name..."
+						class="retro-input w-full max-w-xs rounded-md px-3 py-1.5 text-sm"
+					/>
+					{#if modelTableQuery.trim()}
+						<span class="text-sm retro-text-secondary whitespace-nowrap">
+							{pagedTopModels.totalFiltered} match{pagedTopModels.totalFiltered === 1 ? '' : 'es'}
+						</span>
+						<button
+							onclick={() => { modelTableQuery = ''; modelTablePage = 1; }}
+							class="text-sm retro-text-accent hover:underline"
+						>
+							Clear
+						</button>
+					{/if}
+				</div>
 			</div>
 
 			<div class="overflow-x-auto">
@@ -743,7 +778,7 @@
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--retro-light-grey)] retro-bg-primary">
-						{#each topModels as model, index}
+						{#each pagedTopModels.items as model, index}
 							<tr class="{selectedModels.find(m => m.name.toLowerCase() === model.modelName.toLowerCase()) ? 'bg-[var(--retro-primary)]/20' : ''}">
 								<td class="whitespace-nowrap px-4 py-3 text-sm font-bold retro-text-accent">
 									#{model.rank ?? index + 1}
@@ -794,13 +829,47 @@
 						{:else}
 							<tr>
 								<td colspan="7" class="px-4 py-8 text-center retro-text-secondary">
-									Click "Calculate Rankings" to load top 10 models
+									{#if topModels.length > 0}
+										No models match "{modelTableQuery.trim()}" in Round {selectedRoundForTop10}
+									{:else}
+										Click "Calculate Rankings" to load this round's staked models
+									{/if}
 								</td>
 							</tr>
 						{/each}
 					</tbody>
 				</table>
 			</div>
+
+			{#if pagedTopModels.totalFiltered > MODEL_TABLE_PAGE_SIZE}
+				<div class="flex items-center justify-between px-6 py-3 border-t retro-border-secondary border-2">
+					<span class="text-sm retro-text-secondary">
+						Showing {(pagedTopModels.page - 1) * MODEL_TABLE_PAGE_SIZE + 1}–{Math.min(
+							pagedTopModels.page * MODEL_TABLE_PAGE_SIZE,
+							pagedTopModels.totalFiltered
+						)} of {pagedTopModels.totalFiltered}
+					</span>
+					<div class="flex items-center gap-2">
+						<button
+							onclick={() => (modelTablePage = pagedTopModels.page - 1)}
+							disabled={pagedTopModels.page <= 1}
+							class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:border-[var(--retro-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							Prev
+						</button>
+						<span class="text-sm retro-text-secondary">
+							Page {pagedTopModels.page} of {pagedTopModels.totalPages}
+						</span>
+						<button
+							onclick={() => (modelTablePage = pagedTopModels.page + 1)}
+							disabled={pagedTopModels.page >= pagedTopModels.totalPages}
+							class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:border-[var(--retro-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							Next
+						</button>
+					</div>
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
