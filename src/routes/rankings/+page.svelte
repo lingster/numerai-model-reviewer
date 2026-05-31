@@ -46,6 +46,14 @@
 	let selectedTournament = $state<TournamentId>(TOURNAMENTS.CLASSIC);
 	const themeClass = $derived(TOURNAMENT_INFO[selectedTournament].theme);
 
+	// Metric labels are tournament-specific. Classic/Crypto score on corr+mmc;
+	// Signals scores on alpha+mpc (the worker returns alpha/mpc in the corr/mmc
+	// fields for tournament 11). The corrWeight/mmcWeight inputs drive both.
+	const isSignals = $derived(selectedTournament === TOURNAMENTS.SIGNALS);
+	const metric1Label = $derived(isSignals ? 'Alpha' : 'Corr');
+	const metric2Label = $derived(isSignals ? 'MPC' : 'MMC');
+	const scoreFormulaDefault = $derived(getDefaultFormulaForTournament(selectedTournament));
+
 	// Round range
 	let currentRound = $state(0);
 	let startRound = $state(0);
@@ -359,7 +367,7 @@
 	}
 
 	function resetFormula() {
-		scoreFormula = { ...DEFAULT_SCORE_FORMULA };
+		scoreFormula = getDefaultFormulaForTournament(selectedTournament);
 	}
 
 	// URL parameter management
@@ -596,47 +604,36 @@
 		</div>
 
 		<p class="text-sm retro-text-secondary mb-4">
-			Custom Score = (Corr Weight × Corr) + (MMC Weight × MMC) + (TC Weight × TC)
+			Custom Score = ({metric1Label} Weight × {metric1Label}) + ({metric2Label} Weight × {metric2Label})
 		</p>
 
-		<div class="grid gap-4 md:grid-cols-3">
+		<div class="grid gap-4 md:grid-cols-2">
 			<div>
-				<label for="corrWeight" class="block text-sm font-medium retro-text-primary">Corr Weight</label>
+				<label for="corrWeight" class="block text-sm font-medium retro-text-primary">{metric1Label} Weight</label>
 				<input
 					id="corrWeight"
 					type="number"
-					step="0.25"
+					step="0.05"
 					value={scoreFormula.corrWeight}
 					onchange={(e) => updateFormula('corrWeight', parseFloat(e.currentTarget.value) || 0)}
 					class="retro-input mt-1 w-full rounded-md px-3 py-2 text-sm"
 				/>
 			</div>
 			<div>
-				<label for="mmcWeight" class="block text-sm font-medium retro-text-primary">MMC Weight</label>
+				<label for="mmcWeight" class="block text-sm font-medium retro-text-primary">{metric2Label} Weight</label>
 				<input
 					id="mmcWeight"
 					type="number"
-					step="0.25"
+					step="0.05"
 					value={scoreFormula.mmcWeight}
 					onchange={(e) => updateFormula('mmcWeight', parseFloat(e.currentTarget.value) || 0)}
-					class="retro-input mt-1 w-full rounded-md px-3 py-2 text-sm"
-				/>
-			</div>
-			<div>
-				<label for="tcWeight" class="block text-sm font-medium retro-text-primary">TC Weight</label>
-				<input
-					id="tcWeight"
-					type="number"
-					step="0.25"
-					value={scoreFormula.tcWeight}
-					onchange={(e) => updateFormula('tcWeight', parseFloat(e.currentTarget.value) || 0)}
 					class="retro-input mt-1 w-full rounded-md px-3 py-2 text-sm"
 				/>
 			</div>
 		</div>
 
 		<p class="mt-2 text-xs retro-text-secondary">
-			Default: {DEFAULT_SCORE_FORMULA.corrWeight}×Corr + {DEFAULT_SCORE_FORMULA.mmcWeight}×MMC + {DEFAULT_SCORE_FORMULA.tcWeight}×TC
+			Default: {scoreFormulaDefault.corrWeight}×{metric1Label} + {scoreFormulaDefault.mmcWeight}×{metric2Label}
 		</p>
 	</div>
 
@@ -801,9 +798,8 @@
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Rank</th>
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Model</th>
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">User</th>
-							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Corr</th>
-							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MMC</th>
-							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">TC</th>
+							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">{metric1Label}</th>
+							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">{metric2Label}</th>
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Custom Score</th>
 						</tr>
 					</thead>
@@ -837,15 +833,6 @@
 										<span class="retro-text-secondary">N/A</span>
 									{/if}
 								</td>
-								<td class="whitespace-nowrap px-4 py-3 text-sm">
-									{#if model.tc !== null}
-										<span class="{model.tc > 0 ? 'retro-text-success' : 'retro-text-error'}">
-											{model.tc.toFixed(4)}
-										</span>
-									{:else}
-										<span class="retro-text-secondary">N/A</span>
-									{/if}
-								</td>
 								<td class="whitespace-nowrap px-4 py-3 text-sm font-bold">
 									{#if model.customScore !== null}
 										<span class="{model.customScore > 0 ? 'retro-text-success' : 'retro-text-error'}">
@@ -858,7 +845,7 @@
 							</tr>
 						{:else}
 							<tr>
-								<td colspan="7" class="px-4 py-8 text-center retro-text-secondary">
+								<td colspan="6" class="px-4 py-8 text-center retro-text-secondary">
 									{#if topModels.length > 0}
 										No models match "{modelTableQuery.trim()}" in Round {selectedRoundForTop10}
 									{:else}

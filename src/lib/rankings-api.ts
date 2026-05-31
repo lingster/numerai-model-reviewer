@@ -25,14 +25,13 @@ export const DEFAULT_SCORE_FORMULA: ScoreFormula = {
 };
 
 /**
- * Default formula for Signals (alpha + mpc). Same coefficients as Classic —
- * the Worker reads alpha/mpc instead of corr/mmc for tournament 11, but the
- * UI keeps the same coefficient labels (the alpha/mpc fields are presented in
- * the same axes as corr/mmc in the rankings chart).
+ * Default formula for Signals: 0.3*alpha + 0.8*mpc (the current Signals payout
+ * weighting). The Worker reads alpha/mpc into the corr/mmc fields for tournament
+ * 11, so corrWeight drives alpha and mmcWeight drives mpc.
  */
 export const DEFAULT_SIGNALS_SCORE_FORMULA: ScoreFormula = {
-	corrWeight: 0.75,
-	mmcWeight: 2.25,
+	corrWeight: 0.3,
+	mmcWeight: 0.8,
 	tcWeight: 0
 };
 
