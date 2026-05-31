@@ -830,10 +830,52 @@ async function storeInD1(
   const flag = isLocal ? '--local' : '--remote';
   const now = Math.floor(Date.now() / 1000);
 
-  const statements: string[] = [];
+  const tmpFile = pathModule.join(os.tmpdir(), `numerai-precompute-${Date.now()}.sql`);
 
-  statements.push(`DELETE FROM top_staked_models WHERE tournament = ${tournament};`);
-  statements.push(`DELETE FROM model_performances WHERE tournament = ${tournament};`);
+  // D1 file-executes are transactional and occasionally hit a transient
+  // "storage operation exceeded timeout which caused object to be reset" (the
+  // DB rolls back, so it's safe to retry). Retry such failures with backoff;
+  // re-throw anything else or after exhausting attempts.
+  const isTransientD1Error = (msg: string): boolean =>
+    /exceeded timeout|object to be reset|connection (lost|reset)|please try again|temporarily/i.test(msg);
+
+  const execD1 = async (sql: string[], label: string): Promise<void> => {
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      fs.writeFileSync(tmpFile, sql.join('\n'));
+      try {
+        execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
+          cwd: process.cwd(),
+          stdio: ['inherit', 'pipe', 'pipe'],
+          encoding: 'utf-8'
+        });
+        return;
+      } catch (error: any) {
+        const msg = (error.stderr?.toString() || '') + (error.stdout?.toString() || '') || error.message;
+        if (attempt < maxAttempts && isTransientD1Error(msg)) {
+          const delaySec = attempt * 5;
+          console.log(`  ${label} attempt ${attempt}/${maxAttempts} hit a transient D1 error; retrying in ${delaySec}s...`);
+          await sleep(delaySec * 1000);
+          continue;
+        }
+        throw new Error(`D1 ${label} failed: ${msg}`);
+      }
+    }
+  };
+
+  // Clear the tournament's existing rows first, in their own retried execute, so
+  // the heavy DELETE isn't bundled into a 2000-statement insert batch (which is
+  // what was tripping D1's per-operation timeout).
+  console.log(`  Clearing existing tournament ${tournament} rows...`);
+  await execD1(
+    [
+      `DELETE FROM top_staked_models WHERE tournament = ${tournament};`,
+      `DELETE FROM model_performances WHERE tournament = ${tournament};`
+    ],
+    'delete'
+  );
+
+  const statements: string[] = [];
 
   for (const model of topModels) {
     const modelId = model.modelId.replace(/'/g, "''");
@@ -860,43 +902,23 @@ async function storeInD1(
   }
 
   // Each wrangler invocation carries ~2s of fixed overhead, which dominates the
-  // store phase (a 386k-row store was ~770 calls ≈ 26 min, almost all overhead).
-  // Larger batches cut the call count proportionally; 2000 inline-value INSERTs
-  // is a ~400KB SQL file, well within D1's execute limits.
+  // store phase. Larger batches cut the call count proportionally; 2000
+  // inline-value INSERTs is a ~400KB SQL file, well within D1's execute limits.
   const BATCH_SIZE = 2000;
   const totalBatches = Math.ceil(statements.length / BATCH_SIZE);
-  console.log(`  Executing ${statements.length} SQL statements in ${totalBatches} batches of ${BATCH_SIZE}...`);
+  console.log(`  Executing ${statements.length} INSERT statements in ${totalBatches} batches of ${BATCH_SIZE}...`);
 
-  const tmpFile = pathModule.join(os.tmpdir(), `numerai-precompute-${Date.now()}.sql`);
-
-  for (let b = 0; b < totalBatches; b++) {
-    const batch = statements.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-    fs.writeFileSync(tmpFile, batch.join('\n'));
-
-    try {
-      // Output is captured (not echoed): wrangler prints a multi-line summary
-      // per call, which floods the log across 100+ batches. Only surface it on
-      // failure (in the catch below) and emit a throttled progress line.
-      execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
-        cwd: process.cwd(),
-        stdio: ['inherit', 'pipe', 'pipe'],
-        encoding: 'utf-8'
-      });
+  try {
+    for (let b = 0; b < totalBatches; b++) {
+      const batch = statements.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+      await execD1(batch, `insert batch ${b + 1}/${totalBatches}`);
       if ((b + 1) % 20 === 0 || b + 1 === totalBatches) {
         console.log(`  Stored ${b + 1}/${totalBatches} batches...`);
       }
-    } catch (error: any) {
-      fs.unlinkSync(tmpFile);
-      const stderr = error.stderr ? error.stderr.toString() : '';
-      const stdout = error.stdout ? error.stdout.toString() : '';
-      console.error(`  Batch ${b + 1}/${totalBatches} failed:`);
-      if (stderr) console.error(`  stderr: ${stderr}`);
-      if (stdout) console.error(`  stdout: ${stdout}`);
-      throw new Error(`D1 batch ${b + 1} failed: ${stderr || stdout || error.message}`);
     }
+  } finally {
+    if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }
-
-  fs.unlinkSync(tmpFile);
 }
 
 // --- Main ---
