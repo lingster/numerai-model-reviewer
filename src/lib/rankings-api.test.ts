@@ -12,7 +12,7 @@
  *   Round 1171: rank=7, corr=0.0402, mmc=0.0356, totalModels=4093
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { calculateCustomScore, DEFAULT_SCORE_FORMULA, hasRankableData } from './rankings-api.js';
+import { calculateCustomScore, DEFAULT_SCORE_FORMULA, hasRankableData, latestRoundWithData } from './rankings-api.js';
 import type { ModelRankingHistory, ScoreFormula } from './types.js';
 
 // Worker API URL for integration tests. Overridable so CI can point at a
@@ -163,6 +163,40 @@ describe('hasRankableData - unit tests', () => {
 
 	it('treats rank=0 as rankable (non-null)', () => {
 		expect(hasRankableData(makeHistory([0]))).toBe(true);
+	});
+});
+
+describe('latestRoundWithData - unit tests', () => {
+	const history = (rounds: Array<{ roundNumber: number; totalModels: number }>): ModelRankingHistory => ({
+		modelId: 'id',
+		modelName: 'm',
+		username: 'u',
+		rankings: rounds.map((r) => ({
+			roundNumber: r.roundNumber,
+			rank: r.totalModels > 0 ? 1 : null,
+			customScore: null,
+			totalModels: r.totalModels
+		}))
+	});
+
+	it('returns null when no round has a populated field', () => {
+		expect(latestRoundWithData([history([{ roundNumber: 5, totalModels: 0 }])])).toBeNull();
+		expect(latestRoundWithData([])).toBeNull();
+	});
+
+	it('returns the latest round whose field is non-empty', () => {
+		const h = history([
+			{ roundNumber: 10, totalModels: 50 },
+			{ roundNumber: 11, totalModels: 50 },
+			{ roundNumber: 12, totalModels: 0 } // unresolved tail
+		]);
+		expect(latestRoundWithData([h])).toBe(11);
+	});
+
+	it('considers rounds across multiple histories', () => {
+		const a = history([{ roundNumber: 10, totalModels: 5 }]);
+		const b = history([{ roundNumber: 14, totalModels: 9 }]);
+		expect(latestRoundWithData([a, b])).toBe(14);
 	});
 });
 

@@ -10,7 +10,7 @@
 		getCurrentRound,
 		DEFAULT_SCORE_FORMULA,
 		getDefaultFormulaForTournament,
-		calculateCustomScore
+		latestRoundWithData
 	} from '$lib/rankings-api.js';
 	import type { NumeraiUser, NumeraiModel, ModelRankingHistory, ScoreFormula, RoundModelScore } from '$lib/types.js';
 	import {
@@ -222,7 +222,13 @@
 				}
 			);
 
-			// Load top 10 for the selected round
+			// Default the table to the latest round that actually has a staked
+			// field — the end of the range is often unresolved (empty), which would
+			// otherwise show "Top 0 Staked Models".
+			const bestRound = latestRoundWithData(rankingHistories);
+			if (bestRound !== null) {
+				selectedRoundForTop10 = bestRound;
+			}
 			await loadTopModelsForRound(selectedRoundForTop10);
 
 			if (rankingHistories.length === 0) {

@@ -62,6 +62,24 @@ export function hasRankableData(history: ModelRankingHistory): boolean {
 	return history.rankings.some((r) => r.rank !== null);
 }
 
+/**
+ * Latest round across the given histories that has a populated staked field
+ * (totalModels > 0), or null if none do. The tail of a requested range is
+ * usually unresolved (empty field), so the top-models table should default to
+ * this round rather than the raw endRound — otherwise it shows "Top 0".
+ */
+export function latestRoundWithData(histories: ModelRankingHistory[]): number | null {
+	let best: number | null = null;
+	for (const history of histories) {
+		for (const r of history.rankings) {
+			if (r.totalModels > 0 && (best === null || r.roundNumber > best)) {
+				best = r.roundNumber;
+			}
+		}
+	}
+	return best;
+}
+
 interface ModelRankRoundResponse {
 	roundNumber: number;
 	rank: number | null;
