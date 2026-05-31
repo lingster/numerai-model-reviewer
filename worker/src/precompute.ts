@@ -889,47 +889,56 @@ async function storeInD1(
     console.log('  Clear complete.');
   }
 
-  const statements: string[] = [];
-
-  for (const model of topModels) {
-    const modelId = model.modelId.replace(/'/g, "''");
-    const modelName = model.modelName.replace(/'/g, "''");
-    const username = model.username.replace(/'/g, "''");
-    statements.push(
-      `INSERT OR REPLACE INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at) VALUES ('${modelId}', '${modelName}', '${username}', ${model.stakeValue}, ${tournament}, ${now});`
-    );
-  }
-
-  for (const [modelName, rounds] of performanceData) {
-    for (const round of rounds) {
-      const safeName = modelName.replace(/'/g, "''");
-      const corr = round.corr !== null ? round.corr : 'NULL';
-      const mmc = round.mmc !== null ? round.mmc : 'NULL';
-      const tc = round.tc !== null ? round.tc : 'NULL';
-      const alpha = round.alpha !== null ? round.alpha : 'NULL';
-      const mpc = round.mpc !== null ? round.mpc : 'NULL';
-      const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
-      statements.push(
-        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
-      );
-    }
-  }
-
-  // Each wrangler invocation carries ~2s of fixed overhead, which dominates the
-  // store phase. Larger batches cut the call count proportionally; 2000
-  // inline-value INSERTs is a ~400KB SQL file, well within D1's execute limits.
+  // Stream INSERTs to D1 in fixed-size batches. We do NOT build one big array of
+  // all statements first: a full Classic fleet is ~5M+ rows, and materialising
+  // that many SQL strings at once exhausts the Node heap (OOM). Instead we
+  // accumulate up to BATCH_SIZE statements, flush, and reuse the buffer.
+  //
+  // Each wrangler invocation carries ~2s of fixed overhead; 2000 inline-value
+  // INSERTs is a ~400KB SQL file, well within D1's execute limits.
   const BATCH_SIZE = 2000;
-  const totalBatches = Math.ceil(statements.length / BATCH_SIZE);
-  console.log(`  Executing ${statements.length} INSERT statements in ${totalBatches} batches of ${BATCH_SIZE}...`);
+  let buffer: string[] = [];
+  let batchNum = 0;
+  let totalStored = 0;
+
+  const flush = async () => {
+    if (buffer.length === 0) return;
+    batchNum++;
+    await execD1(buffer, `insert batch ${batchNum}`);
+    totalStored += buffer.length;
+    if (batchNum % 20 === 0) console.log(`  Stored ${totalStored} statements (${batchNum} batches)...`);
+    buffer = [];
+  };
 
   try {
-    for (let b = 0; b < totalBatches; b++) {
-      const batch = statements.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-      await execD1(batch, `insert batch ${b + 1}/${totalBatches}`);
-      if ((b + 1) % 20 === 0 || b + 1 === totalBatches) {
-        console.log(`  Stored ${b + 1}/${totalBatches} batches...`);
+    for (const model of topModels) {
+      const modelId = model.modelId.replace(/'/g, "''");
+      const modelName = model.modelName.replace(/'/g, "''");
+      const username = model.username.replace(/'/g, "''");
+      buffer.push(
+        `INSERT OR REPLACE INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at) VALUES ('${modelId}', '${modelName}', '${username}', ${model.stakeValue}, ${tournament}, ${now});`
+      );
+      if (buffer.length >= BATCH_SIZE) await flush();
+    }
+
+    for (const [modelName, rounds] of performanceData) {
+      const safeName = modelName.replace(/'/g, "''");
+      for (const round of rounds) {
+        const corr = round.corr !== null ? round.corr : 'NULL';
+        const mmc = round.mmc !== null ? round.mmc : 'NULL';
+        const tc = round.tc !== null ? round.tc : 'NULL';
+        const alpha = round.alpha !== null ? round.alpha : 'NULL';
+        const mpc = round.mpc !== null ? round.mpc : 'NULL';
+        const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
+        buffer.push(
+          `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
+        );
+        if (buffer.length >= BATCH_SIZE) await flush();
       }
     }
+
+    await flush();
+    console.log(`  Stored ${totalStored} statements in ${batchNum} batches.`);
   } finally {
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }

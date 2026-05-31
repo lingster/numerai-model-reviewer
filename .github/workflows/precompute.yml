@@ -50,6 +50,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       RESET_FLAG: ${{ inputs.reset && '--reset' || '' }}
+      # A full Classic fleet holds millions of per-round records in memory during
+      # the run; raise Node's heap (GitHub runners have ~16GB RAM).
+      NODE_OPTIONS: --max-old-space-size=12288
       TOP_N: ${{ inputs.top_n || '5000' }}
       TOURNAMENT: ${{ inputs.tournament || 'all' }}
     steps:
