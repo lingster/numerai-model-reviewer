@@ -351,15 +351,20 @@
 		return `Search ${tournamentName} models by name (2+ chars)...`;
 	}
 
-	// Preset round ranges
-	function setRoundRange(rounds: number) {
-		endRound = currentRound - 1;
-		startRound = Math.max(1, endRound - rounds + 1);
-	}
+	// Preset round ranges. `rounds: null` means "all available history"
+	// (back to round 1) — useful now that precompute caches the full window.
+	const RANGE_PRESETS: Array<{ label: string; rounds: number | null }> = [
+		{ label: 'Last 50', rounds: 50 },
+		{ label: 'Last 100', rounds: 100 },
+		{ label: 'Last 200', rounds: 200 },
+		{ label: 'Last 500', rounds: 500 },
+		{ label: 'All', rounds: null }
+	];
 
-	function setLast50Rounds() { setRoundRange(50); }
-	function setLast100Rounds() { setRoundRange(100); }
-	function setLast200Rounds() { setRoundRange(200); }
+	function setRoundRange(rounds: number | null) {
+		endRound = currentRound - 1;
+		startRound = rounds === null ? 1 : Math.max(1, endRound - rounds + 1);
+	}
 
 	// Update score formula
 	function updateFormula(field: keyof ScoreFormula, value: number) {
@@ -673,24 +678,14 @@
 
 		<div class="mt-4 flex flex-wrap items-center gap-2">
 			<span class="text-sm font-medium retro-text-primary">Quick Range:</span>
-			<button
-				onclick={setLast50Rounds}
-				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
-			>
-				Last 50
-			</button>
-			<button
-				onclick={setLast100Rounds}
-				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
-			>
-				Last 100
-			</button>
-			<button
-				onclick={setLast200Rounds}
-				class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
-			>
-				Last 200
-			</button>
+			{#each RANGE_PRESETS as preset (preset.label)}
+				<button
+					onclick={() => setRoundRange(preset.rounds)}
+					class="rounded-md retro-bg-secondary border border-[var(--retro-light-grey)] px-3 py-1 text-sm retro-text-primary hover:retro-bg-primary hover:border-[var(--retro-primary)] transition-colors"
+				>
+					{preset.label}
+				</button>
+			{/each}
 		</div>
 
 		<div class="mt-4">

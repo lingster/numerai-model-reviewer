@@ -16,6 +16,7 @@ import {
   toNumber,
   SIGNALS_TOURNAMENT,
   CRYPTO_TOURNAMENT,
+  MAX_ROUNDS_HISTORY,
   type RawRoundModelPerformance
 } from './mappers';
 import { ModelPerformance, NumeraiModel, NumeraiUser, RoundPerformance } from './types';
@@ -351,7 +352,7 @@ async function fetchSubmissionScoresByRound(
   modelId: string,
   tournament: number,
   env: Env,
-  lastNRounds = 100
+  lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<Map<number, Map<string, number | null>>> {
   const result = await query<{
     v2RoundModelPerformances: Array<{
@@ -422,7 +423,7 @@ async function fetchCryptoModelPerformance(
         roundResolved: boolean | null;
         submissionScores: Array<{ displayName: string; value: number | null }> | null;
       }> | null;
-    }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds: 100 });
+    }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds: MAX_ROUNDS_HISTORY });
 
     if (!result.v2RoundModelPerformances) return null;
 

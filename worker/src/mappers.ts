@@ -18,6 +18,14 @@ export const SIGNALS_TOURNAMENT = 11;
 export const CRYPTO_TOURNAMENT = 12;
 
 /**
+ * Round history window for `v2RoundModelPerformances` (Crypto scores + Signals
+ * alpha/mpc). `lastNRounds` is required by the API, so we request a ceiling far
+ * above the lifetime round count to effectively fetch/cache all available
+ * history rather than truncating older rounds.
+ */
+export const MAX_ROUNDS_HISTORY = 1000;
+
+/**
  * Raw round shape as returned by `v3UserProfile`/`v2SignalsProfile`.
  * All score fields are optional/nullable; `Nmr` scalars arrive as strings.
  */

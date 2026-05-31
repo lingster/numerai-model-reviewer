@@ -380,6 +380,11 @@ type PerformanceRound = {
 const SIGNALS_TOURNAMENT = 11;
 const CRYPTO_TOURNAMENT = 12;
 
+// Round history window for v2RoundModelPerformances (Signals alpha/mpc + Crypto
+// scores). A ceiling well above the lifetime round count so precompute caches
+// all available history rather than truncating older rounds.
+const MAX_ROUNDS_HISTORY = 1000;
+
 type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
 
 // --- CSV cache ---
@@ -674,7 +679,7 @@ async function augmentWithAlphaMpc(
   byModel: Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>,
   tournament: number,
   rateLimitMs: number,
-  lastNRounds = 200
+  lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<void> {
   let processed = 0;
   const total = byModel.size;
@@ -758,7 +763,7 @@ export function extractCryptoMetrics(
 async function fetchCryptoPerformance(
   models: TopModel[],
   rateLimitMs: number,
-  lastNRounds = 300
+  lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>> {
   const results = new Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>();
   let processed = 0;
