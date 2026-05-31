@@ -24,6 +24,9 @@ export interface Env {
   NUMERAI_PUBLIC_KEY: string;
   NUMERAI_SECRET_KEY: string;
   NUMERAI_API_URL: string;
+  // D1 holds precomputed staked models (username + model_name per tournament),
+  // used as a fast-path index for user search.
+  DB: D1Database;
 }
 
 interface GraphQLResponse<T> {
@@ -65,6 +68,31 @@ async function query<T>(
   return result.data;
 }
 
+/**
+ * Fast-path search over precomputed staked models in D1. Matches the query as a
+ * case-insensitive substring of either the account/username or the model name,
+ * and returns distinct usernames. Anyone with stake (i.e. anyone who has
+ * rankings to show) is here, so this resolves the common case in a single
+ * indexed query — avoiding the multi-page leaderboard scan below.
+ */
+async function searchStakedUsernames(
+  env: Env,
+  searchLower: string,
+  limit: number
+): Promise<string[]> {
+  if (!env.DB) return [];
+  const like = `%${searchLower}%`;
+  const result = await env.DB.prepare(
+    `SELECT DISTINCT username FROM top_staked_models
+      WHERE username != '' AND (LOWER(username) LIKE ? OR LOWER(model_name) LIKE ?)
+      ORDER BY username
+      LIMIT ?`
+  )
+    .bind(like, like, limit)
+    .all<{ username: string }>();
+  return (result.results ?? []).map((r) => r.username).filter(Boolean);
+}
+
 export async function searchUsers(
   searchTerm: string,
   env: Env,
@@ -75,21 +103,44 @@ export async function searchUsers(
   const users: NumeraiUser[] = [];
   const searchLower = searchTerm.toLowerCase();
 
-  // 1. Direct lookup
+  // 0. Fast path: precomputed staked models in D1 (one indexed query). Covers
+  // the vast majority of real searches instantly; only fall through to the slow
+  // live leaderboard scan when D1 can't fill the result set.
+  try {
+    for (const username of await searchStakedUsernames(env, searchLower, limit)) {
+      if (!users.find((u) => u.username.toLowerCase() === username.toLowerCase())) {
+        users.push({ id: username, username });
+      }
+    }
+  } catch (e) {
+    console.error('Error in D1 user search:', e);
+  }
+
+  if (users.length >= limit) return users.slice(0, limit);
+
+  // 1. Direct lookup (single exact-match query — catches unstaked accounts the
+  // D1 index doesn't have).
   try {
     const accountResult = await query<{
       accountProfile: { id: string; username: string } | null;
     }>(env, QUERY_SEARCH_USER_BY_ACCOUNT, { username: searchTerm });
 
     if (accountResult.accountProfile) {
-      users.push({
-        id: accountResult.accountProfile.id,
-        username: accountResult.accountProfile.username
-      });
+      if (!users.find((u) => u.username.toLowerCase() === accountResult.accountProfile!.username.toLowerCase())) {
+        users.push({
+          id: accountResult.accountProfile.id,
+          username: accountResult.accountProfile.username
+        });
+      }
     }
   } catch (e) {
     console.error('Error in direct lookup:', e);
   }
+
+  // The cheap paths (D1 + exact lookup) resolve the overwhelming majority of
+  // searches. Only fall through to the slow multi-page leaderboard scan when
+  // they turned up nothing — that's the case that was making search feel slow.
+  if (users.length > 0) return users.slice(0, limit);
 
   // 2. Leaderboard Search
   let offset = 0;

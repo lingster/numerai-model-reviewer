@@ -80,6 +80,7 @@ interface ModelRankResponse {
 
 interface TopModelResponse {
 	modelName: string;
+	username: string;
 	rank: number;
 	corr: number | null;
 	mmc: number | null;
@@ -237,7 +238,7 @@ export async function getTopModelsForRound(
 			return top.map((t) => ({
 				modelId: '',
 				modelName: t.modelName,
-				username: '',
+				username: t.username ?? '',
 				roundNumber,
 				corr: t.corr,
 				mmc: t.mmc,

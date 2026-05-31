@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import Autocomplete from '$lib/components/Autocomplete.svelte';
 	import RankingsChart from '$lib/components/RankingsChart.svelte';
 	import { NumeraiAPI } from '$lib/numerai-api.js';
@@ -410,11 +410,32 @@
 		}
 	}
 
-	// Handle round selection for top 10 table
+	// Handle round selection for the staked-models table
 	async function onSelectRoundForTop10() {
 		if (selectedRoundForTop10 > 0) {
 			await loadTopModelsForRound(selectedRoundForTop10);
 		}
+	}
+
+	// Clicking a point in the ranking history jumps the table to that round and
+	// pages/scrolls so the clicked model sits in the middle of the view.
+	async function handleChartPointSelect(round: number, modelName: string) {
+		if (round <= 0) return;
+		selectedRoundForTop10 = round;
+		modelTableQuery = ''; // clear any filter so the model is in the full list
+		await loadTopModelsForRound(round);
+
+		const idx = topModels.findIndex(
+			(m) => m.modelName.toLowerCase() === modelName.toLowerCase()
+		);
+		if (idx < 0) return;
+
+		modelTablePage = Math.floor(idx / MODEL_TABLE_PAGE_SIZE) + 1;
+		await tick();
+		const rank = topModels[idx].rank;
+		document
+			.getElementById(`staked-row-${rank}`)
+			?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 	}
 </script>
 
@@ -708,10 +729,12 @@
 	{#if rankingHistories.length > 0}
 		<div class="mb-6 rounded-lg retro-card p-6">
 			<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Ranking History</h2>
+			<p class="mb-2 text-xs retro-text-secondary">Click a point to jump the table below to that round and model.</p>
 			<RankingsChart
 				{rankingHistories}
 				{startRound}
 				{endRound}
+				onPointSelect={handleChartPointSelect}
 			/>
 		</div>
 	{/if}
@@ -779,7 +802,7 @@
 					</thead>
 					<tbody class="divide-y divide-[var(--retro-light-grey)] retro-bg-primary">
 						{#each pagedTopModels.items as model, index}
-							<tr class="{selectedModels.find(m => m.name.toLowerCase() === model.modelName.toLowerCase()) ? 'bg-[var(--retro-primary)]/20' : ''}">
+							<tr id="staked-row-{model.rank}" class="{selectedModels.find(m => m.name.toLowerCase() === model.modelName.toLowerCase()) ? 'bg-[var(--retro-primary)]/20' : ''}">
 								<td class="whitespace-nowrap px-4 py-3 text-sm font-bold retro-text-accent">
 									#{model.rank ?? index + 1}
 								</td>

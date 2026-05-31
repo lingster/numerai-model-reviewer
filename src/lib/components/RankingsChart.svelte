@@ -9,11 +9,14 @@
 	let {
 		rankingHistories = [],
 		startRound = 0,
-		endRound = 0
+		endRound = 0,
+		onPointSelect
 	}: {
 		rankingHistories: ModelRankingHistory[];
 		startRound: number;
 		endRound: number;
+		/** Fired when a data point is clicked, with its round and model name. */
+		onPointSelect?: (round: number, modelName: string) => void;
 	} = $props();
 
 	// Chart dimensions
@@ -382,10 +385,18 @@
 								class="cursor-pointer hover:r-6 transition-all"
 								role="button"
 								tabindex="0"
+								aria-label="Round {dataPoint.roundNumber}, {history.modelName}, rank {dataPoint.rank}"
 								onmouseenter={(e) => showTooltip(e, history, dataPoint)}
 								onmouseleave={hideTooltip}
 								onfocus={(e) => showTooltipFromFocus(e, history, dataPoint)}
 								onblur={hideTooltip}
+								onclick={() => onPointSelect?.(dataPoint.roundNumber, history.modelName)}
+								onkeydown={(e) => {
+									if (e.key === 'Enter' || e.key === ' ') {
+										e.preventDefault();
+										onPointSelect?.(dataPoint.roundNumber, history.modelName);
+									}
+								}}
 							/>
 						{/each}
 					{/each}

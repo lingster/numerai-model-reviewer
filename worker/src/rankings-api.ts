@@ -218,11 +218,33 @@ export async function getModelRank(
 /** Top-N entry returned by /rankings/top-models. */
 export interface TopModelEntry {
 	modelName: string;
+	username: string;
 	rank: number;
 	corr: number | null;
 	mmc: number | null;
 	customScore: number;
 	totalModels: number;
+}
+
+/**
+ * Map of model_name (lowercased) → owning account username for a tournament.
+ * model_performances doesn't store the username, so we join it in from
+ * top_staked_models. For Signals/Crypto the username equals the model name.
+ */
+async function fetchUsernameMap(
+	env: Env,
+	tournament: number
+): Promise<Map<string, string>> {
+	const result = await env.DB.prepare(
+		`SELECT model_name, username FROM top_staked_models WHERE tournament = ?`
+	)
+		.bind(tournament)
+		.all<{ model_name: string; username: string }>();
+	const map = new Map<string, string>();
+	for (const row of result.results ?? []) {
+		map.set(row.model_name.toLowerCase(), row.username);
+	}
+	return map;
 }
 
 /**
@@ -239,7 +261,10 @@ export async function getTopModelsForRound(
 	}
 ): Promise<TopModelEntry[]> {
 	const { round, tournament, formula, limit } = params;
-	const field = await fetchRoundField(env, round, tournament);
+	const [field, usernames] = await Promise.all([
+		fetchRoundField(env, round, tournament),
+		fetchUsernameMap(env, tournament)
+	]);
 
 	const scored: Array<{
 		modelName: string;
@@ -266,6 +291,7 @@ export async function getTopModelsForRound(
 	const ranked = limit > 0 ? scored.slice(0, limit) : scored;
 	return ranked.map((s, i) => ({
 		modelName: s.modelName,
+		username: usernames.get(s.modelName.toLowerCase()) ?? '',
 		rank: i + 1,
 		corr: s.corr,
 		mmc: s.mmc,
