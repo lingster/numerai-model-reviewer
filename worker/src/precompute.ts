@@ -75,10 +75,15 @@ function loadYamlConfig(): Partial<PrecomputeConfig> {
   return {};
 }
 
-function parseCliArgs(): { isLocal: boolean; noCache: boolean; overrides: Partial<PrecomputeConfig> } {
+function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; overrides: Partial<PrecomputeConfig> } {
   const args = process.argv.slice(2);
   const isLocal = args.includes('--local');
   const noCache = args.includes('--no-cache');
+  // --reset clears the tournament's existing rows before writing. Off by default:
+  // normal runs upsert (INSERT OR REPLACE on the PK), so resolved history is
+  // rewritten harmlessly and new rounds/models are appended — no bulk DELETE.
+  // Use --reset only for one-off migrations (e.g. changing the model source).
+  const reset = args.includes('--reset');
   const overrides: Partial<PrecomputeConfig> = {};
 
   for (let i = 0; i < args.length; i++) {
@@ -107,12 +112,12 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; overrides: Partia
     }
   }
 
-  return { isLocal, noCache, overrides };
+  return { isLocal, noCache, reset, overrides };
 }
 
-function buildConfig(): { config: PrecomputeConfig; isLocal: boolean; noCache: boolean } {
+function buildConfig(): { config: PrecomputeConfig; isLocal: boolean; noCache: boolean; reset: boolean } {
   const yamlConfig = loadYamlConfig();
-  const { isLocal, noCache, overrides } = parseCliArgs();
+  const { isLocal, noCache, reset, overrides } = parseCliArgs();
 
   // Merge: defaults < yaml < cli args
   const config: PrecomputeConfig = {
@@ -130,7 +135,7 @@ function buildConfig(): { config: PrecomputeConfig; isLocal: boolean; noCache: b
     ])]
   };
 
-  return { config, isLocal, noCache };
+  return { config, isLocal, noCache, reset };
 }
 
 // --- API helpers ---
@@ -820,7 +825,8 @@ async function storeInD1(
   topModels: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>,
   performanceData: Map<string, PerformanceRound[]>,
   tournament: number,
-  isLocal: boolean
+  isLocal: boolean,
+  reset: boolean
 ): Promise<void> {
   const { execSync } = await import('child_process');
   const fs = await import('fs');
@@ -863,17 +869,25 @@ async function storeInD1(
     }
   };
 
-  // Clear the tournament's existing rows first, in their own retried execute, so
-  // the heavy DELETE isn't bundled into a 2000-statement insert batch (which is
-  // what was tripping D1's per-operation timeout).
-  console.log(`  Clearing existing tournament ${tournament} rows...`);
-  await execD1(
-    [
-      `DELETE FROM top_staked_models WHERE tournament = ${tournament};`,
-      `DELETE FROM model_performances WHERE tournament = ${tournament};`
-    ],
-    'delete'
-  );
+  // Normal runs upsert (INSERT OR REPLACE on the PK): resolved history is
+  // rewritten in place and new rounds/models are appended — no DELETE needed.
+  // --reset clears the tournament first, for one-off migrations (e.g. changing
+  // the model source). The clear is chunked by round range so it never hits the
+  // per-operation timeout that a single multi-million-row DELETE was causing.
+  if (reset) {
+    console.log(`  --reset: clearing existing tournament ${tournament} rows (chunked)...`);
+    await execD1([`DELETE FROM top_staked_models WHERE tournament = ${tournament};`], 'delete top_staked_models');
+    const CHUNK = 50; // rounds per DELETE — bounds rows-per-operation well under D1's timeout
+    for (let lo = 0; lo <= 2000; lo += CHUNK) {
+      await execD1(
+        [
+          `DELETE FROM model_performances WHERE tournament = ${tournament} AND round_number >= ${lo} AND round_number < ${lo + CHUNK};`
+        ],
+        `delete rounds ${lo}-${lo + CHUNK - 1}`
+      );
+    }
+    console.log('  Clear complete.');
+  }
 
   const statements: string[] = [];
 
@@ -924,7 +938,7 @@ async function storeInD1(
 // --- Main ---
 
 async function main() {
-  const { config, isLocal, noCache } = buildConfig();
+  const { config, isLocal, noCache, reset } = buildConfig();
 
   console.log('\n=== Numerai Rankings Precompute ===');
   console.log(`Tournament:  ${config.tournament}`);
@@ -1073,7 +1087,7 @@ async function main() {
 
   // Step 5: Store in D1
   console.log('Step 5: Storing in D1...');
-  await storeInD1(allModels, performanceData, config.tournament, isLocal);
+  await storeInD1(allModels, performanceData, config.tournament, isLocal, reset);
   console.log('  Done!\n');
 
   console.log('=== Precomputation complete! ===');

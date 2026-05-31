@@ -27,6 +27,11 @@ on:
         description: 'Top N staked models per tournament'
         required: false
         default: '5000'
+      reset:
+        description: 'Clear each tournament before writing (one-off migrations only; normal runs upsert)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: precompute
@@ -35,17 +40,16 @@ concurrency:
 jobs:
   precompute:
     runs-on: ubuntu-latest
-    # A full 'all' run now enumerates every staked Classic account's models
-    # (Step 2b) on top of the Signals + Crypto passes, so it can run a few hours.
-    # The store is DELETE-then-INSERT and not transactional across batches, so a
-    # mid-store timeout corrupts the table — give the job ample headroom to
-    # always finish what it started (GitHub's hard cap is 360 min).
+    # Normal runs upsert (INSERT OR REPLACE), so the store is incremental and
+    # quick. A full 'all' run still fetches every tournament's models, so allow
+    # generous headroom (GitHub's hard cap is 360 min).
     timeout-minutes: 330
     permissions:
       contents: read
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RESET_FLAG: ${{ inputs.reset && '--reset' || '' }}
       TOP_N: ${{ inputs.top_n || '5000' }}
       TOURNAMENT: ${{ inputs.tournament || 'all' }}
     steps:
@@ -65,7 +69,7 @@ jobs:
       - name: Precompute Classic
         if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '8' }}
         working-directory: worker
-        run: npm run precompute:prod -- --tournament 8 --top-n "$TOP_N" --no-cache
+        run: npm run precompute:prod -- --tournament 8 --top-n "$TOP_N" --no-cache $RESET_FLAG
 
       # Run Signals (tournament 11). Skipped if user picked 8 only.
       # Signals is per-model alpha/mpc fetch on top of profile — keep top-n
@@ -73,7 +77,7 @@ jobs:
       - name: Precompute Signals
         if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '11' }}
         working-directory: worker
-        run: npm run precompute:prod -- --tournament 11 --top-n "$TOP_N" --no-cache
+        run: npm run precompute:prod -- --tournament 11 --top-n "$TOP_N" --no-cache $RESET_FLAG
 
       # Run Crypto (tournament 12). Like Signals, performance is a per-model
       # v2RoundModelPerformances fetch (no profile query exists for crypto), so
@@ -81,7 +85,7 @@ jobs:
       - name: Precompute Crypto
         if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '12' }}
         working-directory: worker
-        run: npm run precompute:prod -- --tournament 12 --top-n "$TOP_N" --no-cache
+        run: npm run precompute:prod -- --tournament 12 --top-n "$TOP_N" --no-cache $RESET_FLAG
 
       - name: Verify D1 row counts
         if: always()
