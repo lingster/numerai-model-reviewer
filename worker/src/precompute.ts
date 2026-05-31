@@ -204,65 +204,45 @@ async function fetchTopStakedModels(
   let offset = 0;
   const isSignals = tournament === SIGNALS_TOURNAMENT;
   const isCrypto = tournament === CRYPTO_TOURNAMENT;
+  const isClassic = !isSignals && !isCrypto;
 
-  while (models.length < limit && offset < limit + batchSize) {
-    // Signals: signalsLeaderboard is model-level (id = model UUID, username = model name).
-    // Crypto: cryptosignalsLeaderboard is likewise model-level (one row per crypto model).
-    // Classic: accountLeaderboard is account-level but its displayName is the primary
-    // model name (one row per account), which is what v3UserProfile expects.
-    const queryStr = isSignals
-      ? `query($limit: Int!, $offset: Int!) {
-          signalsLeaderboard(limit: $limit, offset: $offset) {
-            id username nmrStaked
-          }
-        }`
-      : isCrypto
-      ? `query($limit: Int!, $offset: Int!) {
-          cryptosignalsLeaderboard(limit: $limit, offset: $offset) {
-            id username nmrStaked
-          }
-        }`
-      : `query($limit: Int!, $offset: Int!, $tournament: Int!) {
-          accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) {
-            id username displayName nmrStaked
-          }
-        }`;
-    const vars = isSignals || isCrypto
-      ? { limit: batchSize, offset }
-      : { limit: batchSize, offset, tournament };
+  // All three leaderboards are model-level (one row per model, with the model's
+  // own stake), so secondary staked models are captured:
+  //   Classic: v2Leaderboard, Signals: signalsLeaderboard, Crypto: cryptosignalsLeaderboard.
+  // v2Leaderboard is ordered by rank (not stake) and includes many unstaked
+  // models, so for Classic we keep only stake > 0 to bound the set; Signals/Crypto
+  // take their entries as-is.
+  const leaderboardField = isSignals
+    ? 'signalsLeaderboard'
+    : isCrypto
+      ? 'cryptosignalsLeaderboard'
+      : 'v2Leaderboard';
 
-    const result = await graphqlQuery<{
-      accountLeaderboard?: Array<{ id: string; username: string; displayName: string; nmrStaked: string | null }>;
-      signalsLeaderboard?: Array<{ id: string; username: string; nmrStaked: string | null }>;
-      cryptosignalsLeaderboard?: Array<{ id: string; username: string; nmrStaked: string | null }>;
-    }>(queryStr, vars);
+  while (models.length < limit) {
+    const queryStr = `query($limit: Int!, $offset: Int!) {
+      ${leaderboardField}(limit: $limit, offset: $offset) { id username nmrStaked }
+    }`;
+    const result = await graphqlQuery<Record<string, Array<{ id: string; username: string; nmrStaked: string | null }>>>(
+      queryStr,
+      { limit: batchSize, offset }
+    );
 
-    const mapModelLevel = (e: { id: string; username: string; nmrStaked: string | null }) => ({
-      id: e.id,
-      username: e.username,
-      displayName: e.username, // Signals/Crypto: username IS the model name
-      nmrStaked: e.nmrStaked
-    });
-    const batch = isSignals
-      ? (result.signalsLeaderboard ?? []).map(mapModelLevel)
-      : isCrypto
-      ? (result.cryptosignalsLeaderboard ?? []).map(mapModelLevel)
-      : (result.accountLeaderboard ?? []);
-
+    const batch = result[leaderboardField] ?? [];
     if (batch.length === 0) break;
 
     for (const entry of batch) {
-      if (models.length < limit) {
-        models.push({
-          modelId: entry.id,
-          modelName: entry.displayName || entry.username,
-          username: entry.username,
-          stakeValue: entry.nmrStaked ? parseFloat(entry.nmrStaked) : 0
-        });
-      }
+      if (models.length >= limit) break;
+      const stake = entry.nmrStaked ? parseFloat(entry.nmrStaked) : 0;
+      if (isClassic && stake <= 0) continue; // skip unstaked models in the Classic field
+      models.push({
+        modelId: entry.id,
+        modelName: entry.username, // username IS the model name on these leaderboards
+        username: entry.username, // backfilled to the owning account during the perf fetch
+        stakeValue: stake
+      });
     }
 
-    console.log(`  Fetched ${models.length}/${limit} top staked models...`);
+    console.log(`  Fetched ${models.length}/${limit} staked models (scanned ${offset + batch.length})...`);
     offset += batchSize;
     await sleep(rateLimitMs);
     if (batch.length < batchSize) break;
@@ -508,8 +488,8 @@ async function fetchBatchedPerformance(
   batchSize: number,
   rateLimitMs: number,
   tournament: number
-): Promise<Map<string, { modelId: string; rounds: PerformanceRound[] }>> {
-  const results = new Map<string, { modelId: string; rounds: PerformanceRound[] }>();
+): Promise<Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>> {
+  const results = new Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>();
   const isSignals = tournament === SIGNALS_TOURNAMENT;
   const profileQuery = isSignals ? 'v2SignalsProfile' : 'v3UserProfile';
 
@@ -555,7 +535,7 @@ async function fetchBatchedPerformance(
         const modelName = batch[idx];
 
         if (!profile) {
-          results.set(modelName.toLowerCase(), { modelId: '', rounds: [] });
+          results.set(modelName.toLowerCase(), { modelId: '', accountName: '', rounds: [] });
           continue;
         }
 
@@ -586,13 +566,17 @@ async function fetchBatchedPerformance(
             stakeValue: r.selectedStakeValue
           }));
 
-        results.set(modelName.toLowerCase(), { modelId: profile.id, rounds });
+        results.set(modelName.toLowerCase(), {
+          modelId: profile.id,
+          accountName: profile.accountName ?? '',
+          rounds
+        });
       }
     } catch (error) {
       console.error(`  Error fetching batch at index ${i}:`, error);
       for (const name of batch) {
         if (!results.has(name.toLowerCase())) {
-          results.set(name.toLowerCase(), { modelId: '', rounds: [] });
+          results.set(name.toLowerCase(), { modelId: '', accountName: '', rounds: [] });
         }
       }
     }
@@ -620,7 +604,7 @@ async function fetchBatchedPerformance(
  * doesn't stop the rest.
  */
 async function augmentWithAlphaMpc(
-  byModel: Map<string, { modelId: string; rounds: PerformanceRound[] }>,
+  byModel: Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>,
   tournament: number,
   rateLimitMs: number,
   lastNRounds = 200
@@ -708,15 +692,17 @@ async function fetchCryptoPerformance(
   models: TopModel[],
   rateLimitMs: number,
   lastNRounds = 300
-): Promise<Map<string, { modelId: string; rounds: PerformanceRound[] }>> {
-  const results = new Map<string, { modelId: string; rounds: PerformanceRound[] }>();
+): Promise<Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>> {
+  const results = new Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>();
   let processed = 0;
   const total = models.length;
 
   for (const m of models) {
     const key = m.modelName.toLowerCase();
+    // Crypto's owner column keeps the model name (cryptosignalsLeaderboard is
+    // model-level), so accountName is left empty here.
     if (!m.modelId) {
-      results.set(key, { modelId: '', rounds: [] });
+      results.set(key, { modelId: '', accountName: '', rounds: [] });
       processed++;
       continue;
     }
@@ -750,10 +736,10 @@ async function fetchCryptoPerformance(
           stakeValue: m.stakeValue
         });
       }
-      results.set(key, { modelId: m.modelId, rounds });
+      results.set(key, { modelId: m.modelId, accountName: '', rounds });
     } catch (e) {
       console.error(`  Warning: crypto perf fetch failed for ${m.modelName}:`, e instanceof Error ? e.message : e);
-      results.set(key, { modelId: m.modelId, rounds: [] });
+      results.set(key, { modelId: m.modelId, accountName: '', rounds: [] });
     }
 
     processed++;
@@ -888,7 +874,10 @@ async function main() {
     const currentRound = await getCurrentRound(config.tournament);
     console.log(`  Current round: ${currentRound}\n`);
 
-    // Step 2: Fetch top staked models
+    // Step 2: Fetch staked models. All three tournaments use model-level
+    // leaderboards (Classic: v2Leaderboard, Signals: signalsLeaderboard, Crypto:
+    // cryptosignalsLeaderboard), so every staked model — including an account's
+    // secondary models — is captured.
     console.log(`Step 2: Fetching top ${config.topN} staked models...`);
     const topModels = await fetchTopStakedModels(config.tournament, config.topN, config.rateLimitMs);
     console.log(`  Found ${topModels.length} models\n`);
@@ -954,11 +943,19 @@ async function main() {
     performanceData = new Map<string, PerformanceRound[]>();
     for (const [modelName, entry] of fetched) {
       performanceData.set(modelName, entry.rounds);
-      // If the leaderboard didn't supply a modelId (specific-model entries),
-      // backfill from the profile fetch so D1 has the canonical id.
       const allModel = allModels.find(m => m.modelName.toLowerCase() === modelName);
-      if (allModel && !allModel.modelId && entry.modelId) {
-        allModel.modelId = entry.modelId;
+      if (allModel) {
+        // If the leaderboard didn't supply a modelId (specific-model entries),
+        // backfill from the profile fetch so D1 has the canonical id.
+        if (!allModel.modelId && entry.modelId) {
+          allModel.modelId = entry.modelId;
+        }
+        // v2Leaderboard exposes only the model name, so set the owning account
+        // from the profile fetch — this populates the table's owner column.
+        const accountName = (entry as { accountName?: string }).accountName;
+        if (accountName) {
+          allModel.username = accountName;
+        }
       }
     }
 

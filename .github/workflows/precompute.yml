@@ -35,11 +35,12 @@ concurrency:
 jobs:
   precompute:
     runs-on: ubuntu-latest
-    # A full top-n=5000 Classic backfill (~2.3k accounts, >1.5M perf rows) plus
-    # Signals can run well over 90 min. The store is DELETE-then-INSERT and not
-    # transactional across batches, so a mid-store timeout corrupts the table —
-    # give the job enough headroom to always finish what it started.
-    timeout-minutes: 180
+    # A full 'all' run now enumerates every staked Classic account's models
+    # (Step 2b) on top of the Signals + Crypto passes, so it can run a few hours.
+    # The store is DELETE-then-INSERT and not transactional across batches, so a
+    # mid-store timeout corrupts the table — give the job ample headroom to
+    # always finish what it started (GitHub's hard cap is 360 min).
+    timeout-minutes: 330
     permissions:
       contents: read
     env:

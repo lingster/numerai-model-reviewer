@@ -24,7 +24,6 @@ users:
 
 # Specific model names to always include
 # These models will be fetched regardless of stake ranking.
-# Use this for sub-models that aren't on accountLeaderboard (which lists one
-# row per account/primary model) — e.g. additional models under an account.
 models:
-  - fnc_dl2_994b
+  # - my_model_name
+  # - another_model
