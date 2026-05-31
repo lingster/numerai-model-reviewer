@@ -43,6 +43,8 @@ export const QUERY_GET_USER_MODELS = `
         id
         displayName
         tournament
+        stake
+        return1y
       }
     }
   }
@@ -57,6 +59,8 @@ export const QUERY_GET_USER_MODELS_WITH_TOURNAMENT = `
         id
         displayName
         tournament
+        stake
+        return1y
       }
     }
   }

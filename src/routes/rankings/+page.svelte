@@ -21,6 +21,7 @@
 		type TournamentId
 	} from '$lib/utils/storage.js';
 	import { paginateModels } from '$lib/utils/paginate-models.js';
+	import { formatModelOption } from '$lib/utils/format-model-option.js';
 	import { replaceState } from '$app/navigation';
 	import { browser } from '$app/environment';
 
@@ -549,7 +550,7 @@
 						bind:value={modelSearchQuery}
 						options={filteredModels.map(model => ({
 							id: model.id,
-							label: `${model.name} (${model.username})`,
+							label: formatModelOption(model),
 							value: model
 						}))}
 						placeholder={getModelSearchPlaceholder()}

@@ -18,6 +18,10 @@ export interface NumeraiModel {
 	name: string;
 	username: string;
 	tournament?: number;
+	/** Current stake in NMR (when known) — shown in the model picker. */
+	stake?: number | null;
+	/** Trailing 1-year return as a percentage (when known) — shown in the model picker. */
+	return1y?: number | null;
 }
 
 /**

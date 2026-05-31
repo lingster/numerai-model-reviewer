@@ -8,6 +8,10 @@ export interface NumeraiModel {
   name: string;
   username: string;
   tournament?: number;
+  // Current stake (NMR) and 1-year return (%) — shown in the model picker so
+  // users can compare models at a glance. Optional: not all code paths populate them.
+  stake?: number | null;
+  return1y?: number | null;
 }
 
 export interface StakeInfo {

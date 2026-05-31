@@ -194,6 +194,68 @@ async function getCurrentRound(tournament: number): Promise<number> {
 
 // --- Data fetching ---
 
+/**
+ * Build a model-name → owning-account map for a tournament by enumerating its
+ * accountLeaderboard accounts and reading each account's models. Used for Crypto,
+ * whose model-level leaderboard (and per-round performance query) exposes only
+ * the model name, so the table's owner column would otherwise duplicate it.
+ * Classic/Signals get the account directly from their profile fetches.
+ */
+async function fetchModelAccountMap(
+  tournament: number,
+  batchSize: number,
+  rateLimitMs: number
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+
+  // 1. Collect account usernames from the (account-level) leaderboard.
+  const accounts: string[] = [];
+  const pageSize = 500;
+  let offset = 0;
+  while (true) {
+    const res = await graphqlQuery<{ accountLeaderboard: Array<{ username: string }> }>(
+      `query($limit: Int!, $offset: Int!, $tournament: Int!) {
+        accountLeaderboard(limit: $limit, offset: $offset, tournament: $tournament) { username }
+      }`,
+      { limit: pageSize, offset, tournament }
+    );
+    const batch = res.accountLeaderboard ?? [];
+    if (batch.length === 0) break;
+    for (const a of batch) if (a.username) accounts.push(a.username);
+    offset += pageSize;
+    await sleep(rateLimitMs);
+    if (batch.length < pageSize) break;
+  }
+
+  // 2. Read each account's models for this tournament and invert to model→account.
+  for (let i = 0; i < accounts.length; i += batchSize) {
+    const batch = accounts.slice(i, i + batchSize);
+    const aliases = batch.map(
+      (username, idx) =>
+        `a${idx}: accountProfile(username: ${JSON.stringify(username)}, tournament: ${tournament}) {
+          username models { displayName }
+        }`
+    );
+    try {
+      const data = await graphqlQuery<
+        Record<string, { username: string; models: Array<{ displayName: string }> | null } | null>
+      >(`query { ${aliases.join('\n')} }`);
+      for (let idx = 0; idx < batch.length; idx++) {
+        const profile = data[`a${idx}`];
+        if (!profile?.models) continue;
+        for (const m of profile.models) {
+          map.set(m.displayName.toLowerCase(), profile.username);
+        }
+      }
+    } catch (error) {
+      console.error(`  Error building account map at index ${i}:`, error instanceof Error ? error.message : error);
+    }
+    if (i + batchSize < accounts.length) await sleep(rateLimitMs);
+  }
+
+  return map;
+}
+
 async function fetchTopStakedModels(
   tournament: number,
   limit: number,
@@ -939,6 +1001,15 @@ async function main() {
       console.log('  Alpha/mpc augmentation complete\n');
     }
 
+    // Step 4c: Crypto's leaderboard/perf queries expose only the model name, so
+    // build a model→account map to populate the table's owner column.
+    let cryptoAccountMap = new Map<string, string>();
+    if (config.tournament === CRYPTO_TOURNAMENT) {
+      console.log('Step 4c: Resolving owning accounts for Crypto models...');
+      cryptoAccountMap = await fetchModelAccountMap(config.tournament, config.batchSize, config.rateLimitMs);
+      console.log(`  Resolved ${cryptoAccountMap.size} model→account mappings\n`);
+    }
+
     // Convert to the storage shape (Map<modelName, rounds[]>).
     performanceData = new Map<string, PerformanceRound[]>();
     for (const [modelName, entry] of fetched) {
@@ -950,9 +1021,11 @@ async function main() {
         if (!allModel.modelId && entry.modelId) {
           allModel.modelId = entry.modelId;
         }
-        // v2Leaderboard exposes only the model name, so set the owning account
-        // from the profile fetch — this populates the table's owner column.
-        const accountName = (entry as { accountName?: string }).accountName;
+        // Set the owning account so the table's owner column isn't just the model
+        // name. Classic/Signals get accountName from the profile fetch; Crypto
+        // from the model→account map built above.
+        const accountName =
+          (entry as { accountName?: string }).accountName || cryptoAccountMap.get(modelName);
         if (accountName) {
           allModel.username = accountName;
         }

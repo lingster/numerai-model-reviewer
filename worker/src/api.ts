@@ -208,7 +208,13 @@ export async function getUserModels(
       accountProfile: {
         id: string;
         username: string;
-        models: Array<{ id: string; displayName: string; tournament: number }> | null;
+        models: Array<{
+          id: string;
+          displayName: string;
+          tournament: number;
+          stake: string | number | null;
+          return1y: number | null;
+        }> | null;
       } | null;
     }>(env, q, vars);
 
@@ -217,7 +223,9 @@ export async function getUserModels(
         id: m.id,
         name: m.displayName,
         username: result.accountProfile!.username,
-        tournament: m.tournament
+        tournament: m.tournament,
+        stake: m.stake !== null && m.stake !== undefined ? Number(m.stake) : null,
+        return1y: m.return1y ?? null
       }));
     }
 
