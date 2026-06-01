@@ -23,6 +23,7 @@
 		type TournamentId
 	} from '$lib/utils/storage.js';
 	import { updateUrlWithChart, generateShareableUrl, clearUrlParams } from '$lib/utils/url.js';
+	import { roundRangeToDates } from '$lib/utils/round-date.js';
 	import { replaceState } from '$app/navigation';
 	import { browser } from '$app/environment';
 
@@ -598,6 +599,8 @@
 		const chartNameParam = url.searchParams.get('name');
 		const startDateParam = url.searchParams.get('startDate');
 		const endDateParam = url.searchParams.get('endDate');
+		const startRoundParam = url.searchParams.get('startRound');
+		const endRoundParam = url.searchParams.get('endRound');
 		const modelsParam = url.searchParams.get('models');
 
 		// Load chart name
@@ -643,6 +646,21 @@
 		// comparison chart appears without a manual "Compare" click.
 		if (selectedModels.length > 0) {
 			await loadModelPerformance();
+
+			// Honor round-based URLs (same shape as the rankings page). The page
+			// filters by date, so translate the round range into dates using the
+			// open-times of the rounds we just fetched. Round params take
+			// precedence over startDate/endDate when both are present.
+			if (startRoundParam || endRoundParam) {
+				const allRounds = modelPerformance.flatMap((m) => m.rounds);
+				const { startDate: s, endDate: e } = roundRangeToDates(
+					allRounds,
+					startRoundParam ? parseInt(startRoundParam, 10) : undefined,
+					endRoundParam ? parseInt(endRoundParam, 10) : undefined
+				);
+				if (s) startDate = s;
+				if (e) endDate = e;
+			}
 		}
 	}
 

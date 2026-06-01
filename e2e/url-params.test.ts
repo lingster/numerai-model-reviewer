@@ -86,6 +86,19 @@ async function installMocks(page: Page) {
 		const t = tournamentOf(url);
 		const name = modelNameOf(url);
 		if (new URL(url).pathname.endsWith('/performance')) {
+			const round = (n: number, openTime: string) => ({
+				roundNumber: n,
+				roundOpenTime: openTime,
+				roundResolved: true,
+				correlation: 0.02,
+				mmc: 0.01,
+				fnc: 0.0,
+				alpha: 0.02,
+				mpc: 0.01,
+				corrMultiplier: 0.5,
+				selectedStakeValue: 50,
+				payout: 1.0
+			});
 			json(route, {
 				modelId: `id-${name}`,
 				modelName: name,
@@ -93,19 +106,9 @@ async function installMocks(page: Page) {
 				stakeValue: 50,
 				stakeInfo: null,
 				rounds: [
-					{
-						roundNumber: 1278,
-						roundOpenTime: '2026-05-30T12:00:00Z',
-						roundResolved: true,
-						correlation: 0.02,
-						mmc: 0.01,
-						fnc: 0.0,
-						alpha: 0.02,
-						mpc: 0.01,
-						corrMultiplier: 0.5,
-						selectedStakeValue: 50,
-						payout: 1.0
-					}
+					round(1276, '2026-05-26T12:00:00Z'),
+					round(1277, '2026-05-27T12:00:00Z'),
+					round(1278, '2026-05-28T12:00:00Z')
 				]
 			});
 			return;
@@ -137,6 +140,16 @@ test.describe('URL-driven selection + auto-render', () => {
 			await expect(page.getByRole('heading', { name: 'Performance Over Time' })).toBeVisible();
 		});
 	}
+
+	test('reviews translates startRound/endRound into the date range', async ({ page }) => {
+		await installMocks(page);
+		await page.goto(`/models?tournament=12&user=${USER}&models=${MODEL}&startRound=1277&endRound=1278`);
+
+		// Chart auto-rendered, and the round range mapped to the rounds' open dates.
+		await expect(page.getByRole('heading', { name: 'Performance Over Time' })).toBeVisible();
+		await expect(page.locator('#startDate')).toHaveValue('2026-05-27');
+		await expect(page.locator('#endDate')).toHaveValue('2026-05-28');
+	});
 
 	test('rankings auto-renders with multiple models', async ({ page }) => {
 		await installMocks(page);
