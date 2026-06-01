@@ -7,7 +7,7 @@
  * (MAX_ROUNDS_HISTORY) rather than a short window that truncates older rounds.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModelPerformance, type Env } from './api';
+import { getModelPerformance, findCryptoModelByName, type Env } from './api';
 import { MAX_ROUNDS_HISTORY, CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 
 const env = {
@@ -66,5 +66,75 @@ describe('getModelPerformance round history window', () => {
 
     const augmentCall = calls.find((c) => 'lastNRounds' in c.variables);
     expect(augmentCall?.variables.lastNRounds).toBe(MAX_ROUNDS_HISTORY);
+  });
+});
+
+/**
+ * Build an Env whose DB returns `row` from the single-row top_staked_models
+ * lookup. Records every SQL statement prepared so tests can assert the query.
+ */
+function envWithStakedRow(row: Record<string, unknown> | null) {
+  const statements: string[] = [];
+  const db = {
+    prepare(sql: string) {
+      statements.push(sql);
+      return {
+        bind() {
+          return {
+            first: async () => row,
+            all: async () => ({ results: row ? [row] : [] })
+          };
+        }
+      };
+    }
+  };
+  return { env: { ...env, DB: db } as unknown as Env, statements };
+}
+
+describe('findCryptoModelByName N+1 avoidance', () => {
+  it('resolves from D1 top_staked_models without any API call', async () => {
+    const calls = mockFetch([{}]); // fetch must NOT be used
+    const { env: dbEnv, statements } = envWithStakedRow({
+      model_id: 'crypto-id-1',
+      model_name: 'ac_001',
+      username: 'aas',
+      tournament: CRYPTO_TOURNAMENT
+    });
+
+    const model = await findCryptoModelByName('ac_001', CRYPTO_TOURNAMENT, dbEnv);
+
+    expect(model).toEqual({
+      id: 'crypto-id-1',
+      name: 'ac_001',
+      username: 'aas',
+      tournament: CRYPTO_TOURNAMENT
+    });
+    // The whole point: no leaderboard scan / per-user fetch.
+    expect(calls.length).toBe(0);
+    // And it used the PK-indexed lookup on top_staked_models.
+    expect(statements.some((s) => /top_staked_models/i.test(s) && /model_name/i.test(s))).toBe(true);
+  });
+
+  it('falls back to a single getUserModels call when the username is known and the model is unstaked', async () => {
+    // D1 miss → one getUserModels(username) GraphQL call returning the model.
+    const calls = mockFetch([
+      {
+        accountProfile: {
+          id: 'acc-1',
+          username: 'aas',
+          models: [
+            { id: 'crypto-id-9', displayName: 'unstaked_x', tournament: CRYPTO_TOURNAMENT }
+          ]
+        }
+      }
+    ]);
+    const { env: dbEnv } = envWithStakedRow(null);
+
+    const model = await findCryptoModelByName('unstaked_x', CRYPTO_TOURNAMENT, dbEnv, 'aas');
+
+    expect(model?.name).toBe('unstaked_x');
+    expect(model?.id).toBe('crypto-id-9');
+    // Exactly one API call — the user's models — not a leaderboard scan.
+    expect(calls.length).toBe(1);
   });
 });

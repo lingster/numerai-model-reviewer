@@ -160,8 +160,15 @@ export class NumeraiAPI {
 	 * Get models by their names with SWR caching
 	 * @param modelNames Array of model names to look up
 	 * @param tournament Optional tournament ID - required for Crypto (12) models
+	 * @param username Optional owning account. For Crypto this lets the worker
+	 *   resolve the model via a single getUserModels call instead of scanning
+	 *   the leaderboard (avoids the N+1).
 	 */
-	async getModelsByNames(modelNames: string[], tournament?: number): Promise<NumeraiModel[]> {
+	async getModelsByNames(
+		modelNames: string[],
+		tournament?: number,
+		username?: string
+	): Promise<NumeraiModel[]> {
 		// Fetch all models in parallel with SWR caching
 		const promises = modelNames.map(async (modelName) => {
 			const cacheKey = tournament
@@ -177,7 +184,8 @@ export class NumeraiAPI {
 			return swrCache.fetch(cacheKey, async () => {
 				try {
 					return await this.fetchApi<NumeraiModel>(`/models/${modelName}`, {
-						tournament
+						tournament,
+						username
 					});
 				} catch (e) {
 					console.error(`Error fetching model by name ${modelName}:`, e);

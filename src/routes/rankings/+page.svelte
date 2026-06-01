@@ -415,7 +415,13 @@
 		if (modelsParam) {
 			const modelNames = modelsParam.split(',').map(n => n.trim());
 			try {
-				const models = await numeraiApi.getModelsByNames(modelNames, selectedTournament);
+				// Pass the URL's user as the owner hint so Crypto resolves via a
+				// single getUserModels call instead of a leaderboard scan.
+				const models = await numeraiApi.getModelsByNames(
+					modelNames,
+					selectedTournament,
+					userParam ?? undefined
+				);
 				selectedModels = models.filter(m => m.tournament === selectedTournament);
 			} catch (error) {
 				console.error('Error loading models from URL:', error);
@@ -427,6 +433,12 @@
 			await searchUsers();
 			const user = userSearchResults.find(u => u.username === userParam);
 			if (user) await selectUser(user);
+		}
+
+		// Auto-render: if the URL pre-selected models, run the calculation so the
+		// chart appears without a manual "Calculate Rankings" click.
+		if (selectedModels.length > 0 && startRound > 0 && endRound >= startRound) {
+			await loadRankings();
 		}
 	}
 

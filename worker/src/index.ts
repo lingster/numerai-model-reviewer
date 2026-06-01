@@ -235,9 +235,10 @@ export default {
         const tournamentParam = url.searchParams.get('tournament');
         const tournament = tournamentParam ? parseInt(tournamentParam) : undefined;
 
+        const usernameHint = url.searchParams.get('username') ?? undefined;
         let result = null;
         if (tournament === CRYPTO_TOURNAMENT) {
-             result = await api.findCryptoModelByName(modelName, CRYPTO_TOURNAMENT, env);
+             result = await api.findCryptoModelByName(modelName, CRYPTO_TOURNAMENT, env, usernameHint);
         } else {
              result = await api.getModelByName(modelName, env, tournament);
         }

@@ -464,11 +464,53 @@ async function fetchCryptoModelPerformance(
   }
 }
 
+/**
+ * Single PK-indexed lookup of a precomputed staked model by (name, tournament)
+ * from D1. `top_staked_models` carries model_id + username, so this resolves a
+ * model with no Numerai API call. Exact-match keeps it on the PRIMARY KEY index
+ * (Numerai model names are canonical lowercase).
+ */
+async function findStakedModelInD1(
+  env: Env,
+  modelName: string,
+  tournament: number
+): Promise<NumeraiModel | null> {
+  if (!env.DB) return null;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT model_id, model_name, username, tournament
+         FROM top_staked_models WHERE model_name = ? AND tournament = ?`
+    )
+      .bind(modelName, tournament)
+      .first<{ model_id: string; model_name: string; username: string; tournament: number }>();
+    if (!row) return null;
+    return { id: row.model_id, name: row.model_name, username: row.username, tournament: row.tournament };
+  } catch (e) {
+    console.error('Error looking up staked model in D1:', e);
+    return null;
+  }
+}
+
 export async function findCryptoModelByName(
   modelName: string,
   tournament: number,
-  env: Env
+  env: Env,
+  username?: string
 ): Promise<NumeraiModel | null> {
+  // Fast path: every staked crypto model is precomputed in D1, indexed by the
+  // (model_name, tournament) primary key — one lookup, zero API calls.
+  const staked = await findStakedModelInD1(env, modelName, tournament);
+  if (staked) return staked;
+
+  // Known owner (e.g. the URL's `user=` param): a single getUserModels call
+  // instead of paging the entire leaderboard.
+  if (username) {
+    const userModels = await getUserModels(username, env, tournament);
+    const model = userModels.find((m) => m.name.toLowerCase() === modelName.toLowerCase());
+    if (model) return model;
+  }
+
+  // Last resort (unstaked model with no known owner): bounded leaderboard scan.
   const batchSize = 500;
   const maxSearchUsers = 2000;
   let offset = 0;

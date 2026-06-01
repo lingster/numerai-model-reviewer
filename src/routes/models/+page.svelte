@@ -380,13 +380,14 @@
 		updateUrlParams();
 	}
 
-	async function loadModelsFromNames(modelNames: string[]) {
+	async function loadModelsFromNames(modelNames: string[], username?: string) {
 		if (!numeraiApi || modelNames.length === 0) return;
 
 
 		try {
-			// Pass tournament parameter - required for Crypto (12) models
-			const models = await numeraiApi.getModelsByNames(modelNames, selectedTournament);
+			// Pass tournament + owner hint - required for Crypto (12) models and
+			// lets the worker skip the leaderboard scan when the user is known.
+			const models = await numeraiApi.getModelsByNames(modelNames, selectedTournament, username);
 
 			if (models.length > 0) {
 				// Filter by selected tournament and add to selected models, avoiding duplicates
@@ -614,8 +615,9 @@
 		if (modelsParam) {
 			const modelNames = modelsParam.split(',').map(name => name.trim());
 
-			// Try to load models directly by name
-			await loadModelsFromNames(modelNames);
+			// Try to load models directly by name (passing the owner hint so
+			// Crypto skips the leaderboard scan).
+			await loadModelsFromNames(modelNames, userParam ?? undefined);
 		}
 
 		// Load user if specified
@@ -635,6 +637,12 @@
 			}
 
 			await selectUser(user);
+		}
+
+		// Auto-render: if the URL pre-selected models, fetch performance so the
+		// comparison chart appears without a manual "Compare" click.
+		if (selectedModels.length > 0) {
+			await loadModelPerformance();
 		}
 	}
 
