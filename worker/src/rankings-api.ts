@@ -118,6 +118,44 @@ async function fetchRoundField(
 	return result.results ?? [];
 }
 
+// Rounds per batched range query. Ranking needs every staked model's row for
+// each round, so a single all-rounds query can be huge (models × rounds);
+// chunking keeps each result set bounded while turning the old per-round N+1
+// (one query per round) into ~range/CHUNK queries.
+const RANGE_CHUNK_ROUNDS = 120;
+
+/**
+ * Fetch the staked field for every round in [startRound, endRound], grouped by
+ * round number. Issues one query per RANGE_CHUNK_ROUNDS window rather than one
+ * per round. Rounds with no rows simply don't appear in the map.
+ */
+async function fetchRoundFields(
+	env: Env,
+	startRound: number,
+	endRound: number,
+	tournament: number
+): Promise<Map<number, RoundPerfRow[]>> {
+	const stakeFilter =
+		tournament === 12 ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
+	const sql = `SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, stake_value
+		     FROM model_performances
+		    WHERE round_number BETWEEN ? AND ? AND tournament = ?${stakeFilter}`;
+
+	const byRound = new Map<number, RoundPerfRow[]>();
+	for (let lo = startRound; lo <= endRound; lo += RANGE_CHUNK_ROUNDS) {
+		const hi = Math.min(lo + RANGE_CHUNK_ROUNDS - 1, endRound);
+		const result = await env.DB.prepare(sql)
+			.bind(lo, hi, tournament)
+			.all<RoundPerfRow & { round_number: number }>();
+		for (const r of result.results ?? []) {
+			const list = byRound.get(r.round_number);
+			if (list) list.push(r);
+			else byRound.set(r.round_number, [r]);
+		}
+	}
+	return byRound;
+}
+
 /**
  * Compute the model's rank for one round given the precomputed field.
  * Models whose metric pair yields no numeric score are excluded from the
@@ -189,9 +227,14 @@ export async function getModelRank(
 
 	const meta = await lookupModel(env, modelName, tournament);
 
+	// Pull the whole range's field data in chunked queries up front (avoids a
+	// per-round N+1 that made "Last 500"/"All" take tens of seconds), then rank
+	// each round from the in-memory map.
+	const fields = await fetchRoundFields(env, startRound, endRound, tournament);
+
 	const rounds: ModelRankRoundResult[] = [];
 	for (let r = startRound; r <= endRound; r++) {
-		const field = await fetchRoundField(env, r, tournament);
+		const field = fields.get(r) ?? [];
 		const ranked = rankRound(field, targetLower, tournament, formula);
 		if (ranked) {
 			rounds.push({ ...ranked, roundNumber: r });
