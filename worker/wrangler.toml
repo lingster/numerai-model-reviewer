@@ -16,6 +16,9 @@ routes = [
 # Environment variables (non-sensitive)
 [vars]
 ALLOWED_ORIGINS = "http://localhost:5173,https://numerdiff.imperialai.ai"
+# Trusted host suffixes (comma-separated). Allows Cloudflare Pages preview
+# deployments — whose subdomains are generated per-deploy — to call the API.
+ALLOWED_ORIGIN_SUFFIXES = ".numerai-model-reviewer.pages.dev"
 RATE_LIMIT_REQUESTS = "100"
 RATE_LIMIT_WINDOW_SECONDS = "60"
 NUMERAI_API_URL = "https://api-tournament.numer.ai/graphql"

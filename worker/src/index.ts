@@ -6,11 +6,14 @@ import * as api from './api';
 import { Env as ApiEnv } from './api';
 import { CRYPTO_TOURNAMENT } from './mappers';
 import * as rankings from './rankings-api';
+import { isAllowedOrigin, handleCors } from './cors';
 
 // Environment bindings interface
 interface Env extends ApiEnv {
-  // Rate limiting vars
+  // Comma-separated exact-match origin allowlist.
   ALLOWED_ORIGINS: string;
+  // Comma-separated trusted host suffixes (e.g. Pages preview subdomains).
+  ALLOWED_ORIGIN_SUFFIXES?: string;
   RATE_LIMIT_REQUESTS: string;
   RATE_LIMIT_WINDOW_SECONDS: string;
   RATE_LIMIT?: KVNamespace;
@@ -22,19 +25,6 @@ interface Env extends ApiEnv {
 interface RateLimitEntry {
   count: number;
   resetAt: number;
-}
-
-/**
- * Parse allowed origins from environment variable
- */
-function getAllowedOrigins(env: Env): Set<string> {
-  const origins = env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean) || [];
-  return new Set(origins);
-}
-
-function isAllowedOrigin(origin: string | null, env: Env): boolean {
-  const allowedOrigins = getAllowedOrigins(env);
-  return Boolean(origin && allowedOrigins.has(origin));
 }
 
 // In-memory fallback rate limiting (per worker isolate)
@@ -81,7 +71,6 @@ export default {
 
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
-      const allowedOrigins = getAllowedOrigins(env);
       if (!isAllowedOrigin(origin, env)) {
         return new Response(JSON.stringify({ error: 'Forbidden origin' }), {
           status: 403,
@@ -274,28 +263,6 @@ function jsonResponse(data: any): Response {
   return new Response(JSON.stringify(data), {
     status: 200,
     headers: { 'Content-Type': 'application/json' }
-  });
-}
-
-/**
- * Handle CORS headers
- */
-function handleCors(origin: string | null, env: Env, response: Response): Response {
-  const allowedOrigins = getAllowedOrigins(env);
-  const corsOrigin = (origin && allowedOrigins.has(origin))
-    ? origin
-    : (allowedOrigins.values().next().value ?? '');
-
-  const headers = new Headers(response.headers);
-  headers.set('Access-Control-Allow-Origin', corsOrigin);
-  headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  headers.set('Access-Control-Max-Age', '86400');
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
   });
 }
 
