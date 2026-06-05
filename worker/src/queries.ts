@@ -173,6 +173,8 @@ export const QUERY_GET_CRYPTO_MODEL_PERFORMANCE = `
       roundOpenTime
       roundResolveTime
       roundResolved
+      corrMultiplier
+      mmcMultiplier
       submissionScores {
         displayName
         value
