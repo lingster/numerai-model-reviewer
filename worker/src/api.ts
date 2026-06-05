@@ -196,6 +196,38 @@ export async function searchUsers(
   return users;
 }
 
+// Short-lived cache of per-account model lists keyed by (username, tournament).
+// Comparing many models from one account otherwise issues one identical
+// accountProfile lookup per model (e.g. when resolving Crypto stake). Caching
+// the in-flight Promise also coalesces concurrent identical lookups.
+const USER_MODELS_TTL_MS = 60_000;
+const userModelsCache = new Map<string, { at: number; models: Promise<NumeraiModel[]> }>();
+
+/** Clear the per-account model cache. Exposed for test isolation. */
+export function clearUserModelsCache(): void {
+  userModelsCache.clear();
+}
+
+/**
+ * getUserModels with a short TTL cache keyed by (username, tournament). A
+ * rejected lookup is evicted so the next caller retries rather than caching the
+ * failure.
+ */
+export function getUserModelsCached(
+  username: string,
+  env: Env,
+  tournament?: number
+): Promise<NumeraiModel[]> {
+  const key = `${username.toLowerCase()}:${tournament ?? 'all'}`;
+  const hit = userModelsCache.get(key);
+  if (hit && Date.now() - hit.at < USER_MODELS_TTL_MS) return hit.models;
+
+  const models = getUserModels(username, env, tournament);
+  userModelsCache.set(key, { at: Date.now(), models });
+  models.catch(() => userModelsCache.delete(key));
+  return models;
+}
+
 export async function getUserModels(
   username: string,
   env: Env,
@@ -484,7 +516,7 @@ async function fetchCryptoStake(
 ): Promise<number | null> {
   if (!username) return null;
   try {
-    const models = await getUserModels(username, env, tournament);
+    const models = await getUserModelsCached(username, env, tournament);
     return models.find(m => m.id === modelId)?.stake ?? null;
   } catch (e) {
     console.error('Error fetching crypto stake:', e);

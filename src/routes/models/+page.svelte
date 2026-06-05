@@ -523,6 +523,13 @@
 		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 	}
 
+	// Defensive formatting for multiplier values: round to 4dp to strip any
+	// floating-point noise (e.g. 0.7499999999) without forcing trailing zeros,
+	// so clean values still render as "0.5"/"0.05" rather than "0.50"/"0.05".
+	function formatMultiplier(value: number): string {
+		return (Math.round(value * 10000) / 10000).toString();
+	}
+
 	// Stake multipliers shown as "0.75×CORR20v2 2.25×MMC". Account-level stakeInfo
 	// (Classic/Signals) takes precedence; Crypto carries them per round instead.
 	function getMultipliers(model: ModelPerformance, round?: RoundPerformance) {
@@ -1244,9 +1251,9 @@
 								</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
 									{#if mult.corr !== null || mult.mmc !== null}
-										{#if mult.corr !== null}{mult.corr}×{corrMultiplierLabel}{/if}
+										{#if mult.corr !== null}{formatMultiplier(mult.corr)}×{corrMultiplierLabel}{/if}
 										{#if mult.corr !== null && mult.mmc !== null}{' '}{/if}
-										{#if mult.mmc !== null}{mult.mmc}×{mmcMultiplierLabel}{/if}
+										{#if mult.mmc !== null}{formatMultiplier(mult.mmc)}×{mmcMultiplierLabel}{/if}
 									{:else}
 										<span class="retro-text-secondary">N/A</span>
 									{/if}

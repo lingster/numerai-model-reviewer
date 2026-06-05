@@ -7,7 +7,7 @@
  * (MAX_ROUNDS_HISTORY) rather than a short window that truncates older rounds.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModelPerformance, findCryptoModelByName, type Env } from './api';
+import { getModelPerformance, findCryptoModelByName, clearUserModelsCache, type Env } from './api';
 import { MAX_ROUNDS_HISTORY, CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 
 const env = {
@@ -44,6 +44,7 @@ function mockFetch(dataResponses: unknown[]): CapturedCall[] {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  clearUserModelsCache();
 });
 
 describe('getModelPerformance round history window', () => {
@@ -117,6 +118,34 @@ describe('getModelPerformance Crypto stake value', () => {
 
     expect(perf?.rounds[0].corrMultiplier).toBe(0.05);
     expect(perf?.rounds[0].mmcMultiplier).toBe(0.5);
+  });
+
+  it('caches the account model lookup across Crypto fetches for the same (username, tournament)', async () => {
+    // Comparing N models from one account must not issue N identical
+    // accountProfile lookups — the per-account model list is cached.
+    const calls = mockFetch([
+      { v2RoundModelPerformances: [] },
+      {
+        accountProfile: {
+          id: 'acc-1',
+          username: 'fish_n_chips',
+          models: [
+            { id: 'm1', displayName: 'fncc_t1', tournament: CRYPTO_TOURNAMENT, stake: '10' },
+            { id: 'm2', displayName: 'fncc_t2', tournament: CRYPTO_TOURNAMENT, stake: '20' }
+          ]
+        }
+      },
+      { v2RoundModelPerformances: [] }
+    ]);
+
+    const a = await getModelPerformance('fncc_t1', env, 'fish_n_chips', 'm1', CRYPTO_TOURNAMENT);
+    const b = await getModelPerformance('fncc_t2', env, 'fish_n_chips', 'm2', CRYPTO_TOURNAMENT);
+
+    expect(a?.stakeValue).toBe(10);
+    expect(b?.stakeValue).toBe(20);
+    // Exactly one accountProfile lookup despite two performance fetches.
+    const accountProfileCalls = calls.filter((c) => c.query.includes('accountProfile'));
+    expect(accountProfileCalls.length).toBe(1);
   });
 
   it('leaves stakeValue null when the model is not found among the account models', async () => {
