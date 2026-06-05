@@ -69,6 +69,68 @@ describe('getModelPerformance round history window', () => {
   });
 });
 
+describe('getModelPerformance Crypto stake value', () => {
+  it('populates stakeValue from the account model stake (not hard-coded null)', async () => {
+    // Crypto v2RoundModelPerformances carries no stake; it must be sourced from
+    // accountProfile(...).models[].stake. fncc_t1 stakes 56.2559… ≈ 56.26 NMR.
+    mockFetch([
+      {
+        v2RoundModelPerformances: [
+          { roundNumber: 1282, roundOpenTime: null, roundResolveTime: null, roundResolved: false, submissionScores: [] }
+        ]
+      },
+      {
+        accountProfile: {
+          id: 'acc-1',
+          username: 'fish_n_chips',
+          models: [
+            { id: 'b27db79e', displayName: 'fncc_t1', tournament: CRYPTO_TOURNAMENT, stake: '56.255925615126436000' }
+          ]
+        }
+      }
+    ]);
+
+    const perf = await getModelPerformance('fncc_t1', env, 'fish_n_chips', 'b27db79e', CRYPTO_TOURNAMENT);
+
+    expect(perf?.stakeValue).toBeCloseTo(56.26, 2);
+  });
+
+  it('maps corr/mmc multipliers from Crypto rounds (not hard-coded null)', async () => {
+    mockFetch([
+      {
+        v2RoundModelPerformances: [
+          {
+            roundNumber: 1282,
+            roundOpenTime: null,
+            roundResolveTime: null,
+            roundResolved: false,
+            corrMultiplier: 0.05,
+            mmcMultiplier: 0.5,
+            submissionScores: [{ displayName: 'corr', value: 0.01 }]
+          }
+        ]
+      },
+      { accountProfile: { id: 'acc-1', username: 'fish_n_chips', models: [] } }
+    ]);
+
+    const perf = await getModelPerformance('fncc_t1', env, 'fish_n_chips', 'b27db79e', CRYPTO_TOURNAMENT);
+
+    expect(perf?.rounds[0].corrMultiplier).toBe(0.05);
+    expect(perf?.rounds[0].mmcMultiplier).toBe(0.5);
+  });
+
+  it('leaves stakeValue null when the model is not found among the account models', async () => {
+    mockFetch([
+      { v2RoundModelPerformances: [] },
+      { accountProfile: { id: 'acc-1', username: 'fish_n_chips', models: [] } }
+    ]);
+
+    const perf = await getModelPerformance('fncc_t1', env, 'fish_n_chips', 'b27db79e', CRYPTO_TOURNAMENT);
+
+    expect(perf?.stakeValue).toBeNull();
+  });
+});
+
 /**
  * Build an Env whose DB returns `row` from the single-row top_staked_models
  * lookup. Records every SQL statement prepared so tests can assert the query.

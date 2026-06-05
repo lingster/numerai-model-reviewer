@@ -6,7 +6,7 @@
 	import { NumeraiAPI } from '$lib/numerai-api.js';
 	import { computeScore } from '$lib/utils/scoring.js';
 	import { config } from '$lib/config.js';
-	import type { NumeraiUser, NumeraiModel, ModelPerformance, SavedChart } from '$lib/types.js';
+	import type { NumeraiUser, NumeraiModel, ModelPerformance, RoundPerformance, SavedChart } from '$lib/types.js';
 	import {
 		saveChart,
 		getSavedCharts,
@@ -511,6 +511,41 @@
 			return true;
 		}) ?? model.rounds[0];
 	}
+
+	// The round's date that identifies which round's score the row is showing.
+	// Prefer the open time (how rounds are dated in the Numerai UI), fall back to
+	// resolve time. Returns 'N/A' when neither is available.
+	function formatRoundDate(round?: RoundPerformance): string {
+		const iso = round?.roundOpenTime ?? round?.roundResolveTime;
+		if (!iso) return 'N/A';
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return 'N/A';
+		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+	}
+
+	// Stake multipliers shown as "0.75×CORR20v2 2.25×MMC". Account-level stakeInfo
+	// (Classic/Signals) takes precedence; Crypto carries them per round instead.
+	function getMultipliers(model: ModelPerformance, round?: RoundPerformance) {
+		const corr = model.stakeInfo?.corrMultiplier ?? round?.corrMultiplier ?? null;
+		const mmc = model.stakeInfo?.mmcMultiplier ?? round?.mmcMultiplier ?? null;
+		return { corr, mmc };
+	}
+
+	// Metric labels for the two stake multipliers. The API only returns the
+	// multiplier *values* (stakeInfo.corrMultiplier / mmcMultiplier — never
+	// hard-coded here); which metric each applies to is a per-tournament
+	// convention the API does not expose (payoutSelection is empty):
+	//   Classic → CORR20v2 / MMC, Signals → ALPHA / MPC, Crypto → CORR / MMC.
+	const corrMultiplierLabel = $derived(
+		selectedTournament === TOURNAMENTS.CLASSIC
+			? 'CORR20v2'
+			: selectedTournament === TOURNAMENTS.SIGNALS
+				? 'ALPHA'
+				: 'CORR'
+	);
+	const mmcMultiplierLabel = $derived(
+		selectedTournament === TOURNAMENTS.SIGNALS ? 'MPC' : 'MMC'
+	);
 
 	// Sort model performance by correlation (best performing first) within date range
 	const sortedModelPerformance = $derived(
@@ -1157,7 +1192,7 @@
 		<div class="rounded-lg retro-card">
 			<div class="px-6 py-4 border-b retro-border-secondary border-2">
 				<h2 class="text-lg font-medium retro-text-primary uppercase">Latest Model Performance</h2>
-				<p class="text-sm retro-text-secondary mt-1">Current performance metrics for selected models</p>
+				<p class="text-sm retro-text-secondary mt-1">Most Recent Resolving/Resolved Round Score</p>
 			</div>
 
 			<div class="overflow-x-auto">
@@ -1166,6 +1201,7 @@
 						<tr>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Model</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">User</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="Date of the round whose score is shown">Round Date</th>
 							{#if isSignals}
 								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
 								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
@@ -1175,15 +1211,19 @@
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">MMC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">FNC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Stake Value</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Corr Multiplier</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="Stake payout multipliers">Multiplier</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--retro-light-grey)] retro-bg-primary">
 						{#each sortedModelPerformance as model}
 							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
+							{@const mult = getMultipliers(model, latestRound)}
 							<tr>
 								<td class="whitespace-nowrap px-6 py-4 text-sm font-medium retro-text-primary">{model.modelName}</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">{model.username}</td>
+								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-secondary" title={latestRound?.roundNumber ? `Round ${latestRound.roundNumber}${latestRound.roundResolved ? ' (resolved)' : ' (resolving)'}` : undefined}>
+									{formatRoundDate(latestRound)}
+								</td>
 								<!-- Signals-only scoring first; deprecated metrics follow. -->
 								{#if isSignals}
 									{@render metricCell(latestRound?.alpha)}
@@ -1203,10 +1243,10 @@
 									{/if}
 								</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
-									{#if model.stakeInfo?.corrMultiplier !== null && model.stakeInfo?.corrMultiplier !== undefined}
-										{model.stakeInfo.corrMultiplier.toFixed(2)}x
-									{:else if latestRound?.corrMultiplier !== null && latestRound?.corrMultiplier !== undefined}
-										{latestRound.corrMultiplier.toFixed(2)}x
+									{#if mult.corr !== null || mult.mmc !== null}
+										{#if mult.corr !== null}{mult.corr}×{corrMultiplierLabel}{/if}
+										{#if mult.corr !== null && mult.mmc !== null}{' '}{/if}
+										{#if mult.mmc !== null}{mult.mmc}×{mmcMultiplierLabel}{/if}
 									{:else}
 										<span class="retro-text-secondary">N/A</span>
 									{/if}

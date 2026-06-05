@@ -421,11 +421,17 @@ async function fetchCryptoModelPerformance(
         roundOpenTime: string | null;
         roundResolveTime: string | null;
         roundResolved: boolean | null;
+        corrMultiplier: number | null;
+        mmcMultiplier: number | null;
         submissionScores: Array<{ displayName: string; value: number | null }> | null;
       }> | null;
     }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds: MAX_ROUNDS_HISTORY });
 
     if (!result.v2RoundModelPerformances) return null;
+
+    // Crypto's round performances carry no stake — source the current stake from
+    // the account's ModelProfile.stake (matched by model id). Non-fatal on error.
+    const stakeValue = await fetchCryptoStake(username, modelId, tournament, env);
 
     const rounds: RoundPerformance[] = result.v2RoundModelPerformances.map(r => {
       const scores = new Map((r.submissionScores ?? []).map(s => [s.displayName, toNumber(s.value)]));
@@ -443,8 +449,8 @@ async function fetchCryptoModelPerformance(
         tc: getScore('tc'),
         alpha: getScore('alpha'),
         mpc: getScore('mpc'),
-        corrMultiplier: null,
-        mmcMultiplier: null,
+        corrMultiplier: toNumber(r.corrMultiplier),
+        mmcMultiplier: toNumber(r.mmcMultiplier),
         selectedStakeValue: null,
         payout: null
       };
@@ -454,12 +460,34 @@ async function fetchCryptoModelPerformance(
       modelId,
       modelName,
       username,
-      stakeValue: null,
+      stakeValue,
       stakeInfo: null,
       rounds
     };
   } catch (e) {
     console.error('Error getting crypto performance:', e);
+    return null;
+  }
+}
+
+/**
+ * Resolve a Crypto model's current stake (NMR) from the account's models.
+ * v2RoundModelPerformances omits stake, so we read ModelProfile.stake (a string
+ * coerced to number by getUserModels) matched by model id. Returns null if the
+ * username is unknown, the lookup fails, or the model isn't found.
+ */
+async function fetchCryptoStake(
+  username: string,
+  modelId: string,
+  tournament: number,
+  env: Env
+): Promise<number | null> {
+  if (!username) return null;
+  try {
+    const models = await getUserModels(username, env, tournament);
+    return models.find(m => m.id === modelId)?.stake ?? null;
+  } catch (e) {
+    console.error('Error fetching crypto stake:', e);
     return null;
   }
 }
