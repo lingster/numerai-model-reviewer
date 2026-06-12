@@ -6,6 +6,7 @@
 	import { config } from '$lib/config.js';
 	import {
 		getCurrentRound,
+		getLatestResolvedRound,
 		getRoundDistribution,
 		getDefaultFormulaForTournament
 	} from '$lib/rankings-api.js';
@@ -99,8 +100,15 @@
 		scoreFormula = getDefaultFormulaForTournament(selectedTournament);
 
 		try {
-			currentRound = await getCurrentRound(selectedTournament);
-			selectedRound = currentRound - 1;
+			// Fetch both in parallel: currentRound caps the round input's max value;
+			// latestResolved is what the D1 database actually has data for and is
+			// used as the default so the page never opens on an unresolved round.
+			const [live, resolved] = await Promise.all([
+				getCurrentRound(selectedTournament),
+				getLatestResolvedRound(selectedTournament)
+			]);
+			currentRound = live;
+			selectedRound = resolved ?? Math.max(live - 1, 1);
 		} catch (error) {
 			console.error('Error fetching current round:', error);
 		}
@@ -234,10 +242,10 @@
 		distribution = null;
 		distributionError = null;
 
-		getCurrentRound(tournament)
-			.then((round) => {
-				currentRound = round;
-				selectedRound = round - 1;
+		Promise.all([getCurrentRound(tournament), getLatestResolvedRound(tournament)])
+			.then(([live, resolved]) => {
+				currentRound = live;
+				selectedRound = resolved ?? Math.max(live - 1, 1);
 			})
 			.catch(() => {});
 

@@ -478,6 +478,25 @@ export async function getRoundDistribution(
 }
 
 /**
+ * Latest round in D1 that has resolved staked-model performance data for the
+ * given tournament. Returns null when the database is empty. Used by the
+ * distribution page to default to a round that actually has data rather than
+ * the live "current round - 1" which is often still unresolved.
+ */
+export async function getLatestResolvedRound(
+	env: Env,
+	tournament: number
+): Promise<number | null> {
+	const stakeFilter = tournament === 12 ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
+	const row = await env.DB.prepare(
+		`SELECT MAX(round_number) AS max_round FROM model_performances WHERE tournament = ?${stakeFilter}`
+	)
+		.bind(tournament)
+		.first<{ max_round: number | null }>();
+	return row?.max_round ?? null;
+}
+
+/**
  * Live-API lookup for the current round number for a tournament. Bypasses D1
  * since precompute may lag and the UI wants the freshest round to populate
  * its default range. Cached by the worker layer (KV) if desired.

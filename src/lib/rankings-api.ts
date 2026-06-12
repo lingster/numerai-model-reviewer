@@ -123,6 +123,24 @@ async function getJson<T>(url: URL): Promise<T> {
 	return response.json() as Promise<T>;
 }
 
+/**
+ * Latest round in D1 that has resolved staked-model data. Returns null when
+ * the database is empty. Use this to default UI selectors to a round that
+ * actually has data rather than `currentRound - 1` which may be unresolved.
+ */
+export async function getLatestResolvedRound(tournament: number = 8): Promise<number | null> {
+	const cacheKey = `latest-resolved-round:t${tournament}`;
+	const cached = swrCache.get<number | null>(cacheKey);
+	if (cached.data !== undefined && !cached.isStale) return cached.data;
+
+	return swrCache.fetch(cacheKey, async () => {
+		const url = new URL(`${config.apiUrl}/rankings/latest-resolved-round`);
+		url.searchParams.set('tournament', String(tournament));
+		const result = await getJson<{ tournament: number; round: number | null }>(url);
+		return result.round;
+	});
+}
+
 /** Get the current (latest) round number for a tournament. */
 export async function getCurrentRound(tournament: number = 8): Promise<number> {
 	const cacheKey = `current-round:t${tournament}`;
