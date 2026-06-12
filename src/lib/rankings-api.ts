@@ -10,7 +10,12 @@
  * because Signals (11) uses a different scoring regime (alpha + mpc) from
  * Classic (8) and Crypto (12) (corr + mmc).
  */
-import type { ModelRankingHistory, RoundModelScore, ScoreFormula } from '$lib/types.js';
+import type {
+	ModelRankingHistory,
+	RoundDistribution,
+	RoundModelScore,
+	ScoreFormula
+} from '$lib/types.js';
 import { config } from '$lib/config.js';
 import { swrCache } from '$lib/utils/swr-cache.svelte.js';
 
@@ -268,6 +273,40 @@ export async function getTopModelsForRound(
 			console.error('Error fetching top models:', error);
 			return [];
 		}
+	});
+}
+
+/**
+ * Score distribution for one round: histogram bins over the whole precomputed
+ * field (staked + unstaked) plus rank/percentile entries for the given models.
+ * Binning and ranking happen in the Worker against D1, so the payload stays
+ * small no matter how large the field is.
+ */
+export async function getRoundDistribution(
+	roundNumber: number,
+	formula: ScoreFormula,
+	tournament: number,
+	modelNames: string[]
+): Promise<RoundDistribution> {
+	const modelsKey = modelNames
+		.map((m) => m.toLowerCase())
+		.sort()
+		.join(',');
+	const cacheKey = `round-dist:r${roundNumber}:t${tournament}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}:${modelsKey}`;
+	const cached = swrCache.get<RoundDistribution>(cacheKey);
+	if (cached.data && !cached.isStale) return cached.data;
+
+	return swrCache.fetch(cacheKey, async () => {
+		const url = new URL(`${config.apiUrl}/rankings/round-distribution`);
+		url.searchParams.set('round', String(roundNumber));
+		url.searchParams.set('tournament', String(tournament));
+		url.searchParams.set('corrWeight', String(formula.corrWeight));
+		url.searchParams.set('mmcWeight', String(formula.mmcWeight));
+		url.searchParams.set('tcWeight', String(formula.tcWeight));
+		if (modelNames.length > 0) {
+			url.searchParams.set('models', modelNames.join(','));
+		}
+		return getJson<RoundDistribution>(url);
 	});
 }
 

@@ -97,14 +97,18 @@ async function lookupModel(
  * Fetch all staked models' performance for a round and tournament. "Staked"
  * here means `stake_value > 0` for Classic/Signals; Crypto rows have no stake
  * data, so we include every row (the precompute writes one row per model).
+ *
+ * Pass `includeUnstaked: true` to skip the stake filter and return the whole
+ * precomputed field — the distribution view needs unstaked models too.
  */
 async function fetchRoundField(
 	env: Env,
 	round: number,
-	tournament: number
+	tournament: number,
+	opts: { includeUnstaked?: boolean } = {}
 ): Promise<RoundPerfRow[]> {
 	const sql =
-		tournament === 12
+		tournament === 12 || opts.includeUnstaked
 			? `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
 			     FROM model_performances
 			    WHERE round_number = ? AND tournament = ?`
@@ -341,6 +345,136 @@ export async function getTopModelsForRound(
 		customScore: s.score,
 		totalModels
 	}));
+}
+
+/** One histogram bucket of the round's score distribution. */
+export interface DistributionBin {
+	/** Inclusive lower score bound of the bucket. */
+	x0: number;
+	/** Exclusive upper score bound (inclusive for the last bucket). */
+	x1: number;
+	/** Models in this bucket (staked + unstaked). */
+	allCount: number;
+	/** Staked models (stake_value > 0) in this bucket. */
+	stakedCount: number;
+}
+
+/** A requested model's position within the round's score distribution. */
+export interface DistributionModelEntry {
+	modelName: string;
+	username: string;
+	corr: number | null;
+	mmc: number | null;
+	stakeValue: number | null;
+	staked: boolean;
+	score: number;
+	/** 1 = best score in the field (staked and unstaked alike). */
+	rank: number;
+	/** 0–100, share of the field this model beats; 100 = top of the field. */
+	percentile: number;
+}
+
+export interface RoundDistributionResponse {
+	round: number;
+	tournament: number;
+	totalModels: number;
+	stakedModels: number;
+	bins: DistributionBin[];
+	models: DistributionModelEntry[];
+}
+
+const DISTRIBUTION_BIN_COUNT = 40;
+
+/**
+ * Score distribution for one round: histogram bins over the WHOLE precomputed
+ * field (staked and unstaked) under the given formula, plus rank/percentile
+ * entries for the requested models. Everything is computed server-side so the
+ * payload stays small regardless of field size.
+ */
+export async function getRoundDistribution(
+	env: Env,
+	params: {
+		round: number;
+		tournament: number;
+		formula: ScoreFormula;
+		/** Model names (case-insensitive) to locate within the distribution. */
+		models: string[];
+	}
+): Promise<RoundDistributionResponse> {
+	const { round, tournament, formula, models } = params;
+	const [field, usernames] = await Promise.all([
+		fetchRoundField(env, round, tournament, { includeUnstaked: true }),
+		fetchUsernameMap(env, tournament)
+	]);
+
+	const scored: Array<{
+		modelName: string;
+		score: number;
+		corr: number | null;
+		mmc: number | null;
+		stakeValue: number | null;
+		staked: boolean;
+	}> = [];
+	for (const row of field) {
+		const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
+		if (corrMetric === null && mmcMetric === null && tcMetric === null) continue;
+		const score =
+			formula.corrWeight * (corrMetric ?? 0) +
+			formula.mmcWeight * (mmcMetric ?? 0) +
+			(formula.tcWeight ?? 0) * (tcMetric ?? 0);
+		if (!Number.isFinite(score)) continue;
+		scored.push({
+			modelName: row.model_name,
+			score,
+			corr: corrMetric,
+			mmc: mmcMetric,
+			stakeValue: row.stake_value,
+			staked: row.stake_value !== null && row.stake_value > 0
+		});
+	}
+
+	scored.sort((a, b) => b.score - a.score);
+	const totalModels = scored.length;
+	const stakedModels = scored.reduce((n, s) => n + (s.staked ? 1 : 0), 0);
+
+	// Histogram over the score extent. A degenerate field (all identical scores)
+	// collapses to a single bucket rather than dividing by zero.
+	const bins: DistributionBin[] = [];
+	if (totalModels > 0) {
+		const min = scored[totalModels - 1].score;
+		const max = scored[0].score;
+		const binCount = max > min ? DISTRIBUTION_BIN_COUNT : 1;
+		const width = max > min ? (max - min) / binCount : 1;
+		for (let i = 0; i < binCount; i++) {
+			bins.push({ x0: min + i * width, x1: min + (i + 1) * width, allCount: 0, stakedCount: 0 });
+		}
+		for (const s of scored) {
+			const idx = Math.min(Math.floor((s.score - min) / width), binCount - 1);
+			bins[idx].allCount++;
+			if (s.staked) bins[idx].stakedCount++;
+		}
+	}
+
+	const wanted = new Set(models.map((m) => m.toLowerCase()));
+	const entries: DistributionModelEntry[] = [];
+	for (let i = 0; i < scored.length; i++) {
+		const s = scored[i];
+		if (!wanted.has(s.modelName.toLowerCase())) continue;
+		const rank = i + 1;
+		entries.push({
+			modelName: s.modelName,
+			username: usernames.get(s.modelName.toLowerCase()) ?? '',
+			corr: s.corr,
+			mmc: s.mmc,
+			stakeValue: s.stakeValue,
+			staked: s.staked,
+			score: s.score,
+			rank,
+			percentile: totalModels <= 1 ? 100 : ((totalModels - rank) / (totalModels - 1)) * 100
+		});
+	}
+
+	return { round, tournament, totalModels, stakedModels, bins, models: entries };
 }
 
 /**
