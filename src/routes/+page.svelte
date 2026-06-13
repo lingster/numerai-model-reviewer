@@ -38,6 +38,22 @@
 		</div>
 
 		<div class="retro-card rounded-lg p-6">
+			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Model Distribution</h2>
+			<p class="mb-4 retro-text-secondary">
+				See where your models land in a round's score distribution — staked vs unstaked field, with rank and percentile per model.
+			</p>
+			<a
+				href="/distribution"
+				class="retro-button inline-flex items-center rounded-md px-4 py-2 text-sm font-medium"
+			>
+				View Distribution
+				<svg class="ml-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+				</svg>
+			</a>
+		</div>
+
+		<div class="retro-card rounded-lg p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Features</h2>
 			<ul class="space-y-2 retro-text-secondary">
 				<li class="flex items-center">

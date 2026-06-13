@@ -166,3 +166,42 @@ export interface ScoreFormula {
 	corrWeight: number;
 	tcWeight: number;
 }
+
+/**
+ * One histogram bucket of a round's score distribution
+ */
+export interface DistributionBin {
+	x0: number;
+	x1: number;
+	allCount: number;
+	stakedCount: number;
+}
+
+/**
+ * A model's position within a round's score distribution
+ */
+export interface DistributionModelEntry {
+	modelName: string;
+	username: string;
+	corr: number | null;
+	mmc: number | null;
+	stakeValue: number | null;
+	staked: boolean;
+	score: number;
+	/** 1 = best score in the field. */
+	rank: number;
+	/** 0–100; 100 = top of the field. */
+	percentile: number;
+}
+
+/**
+ * Score distribution for a round (histogram + the user's models within it)
+ */
+export interface RoundDistribution {
+	round: number;
+	tournament: number;
+	totalModels: number;
+	stakedModels: number;
+	bins: DistributionBin[];
+	models: DistributionModelEntry[];
+}

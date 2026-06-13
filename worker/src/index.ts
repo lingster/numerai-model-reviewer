@@ -161,6 +161,12 @@ export default {
         const round = await rankings.getCurrentRound(env, tournament);
         response = jsonResponse({ tournament, round });
       }
+      // GET /rankings/latest-resolved-round?tournament=8
+      else if (path === '/rankings/latest-resolved-round' && request.method === 'GET') {
+        const tournament = parseInt(url.searchParams.get('tournament') || '8');
+        const round = await rankings.getLatestResolvedRound(env, tournament);
+        response = jsonResponse({ tournament, round });
+      }
       // GET /rankings/top-models?round=&tournament=&limit=&corrWeight=&mmcWeight=
       else if (path === '/rankings/top-models' && request.method === 'GET') {
         const roundStr = url.searchParams.get('round');
@@ -180,6 +186,30 @@ export default {
           };
           const top = await rankings.getTopModelsForRound(env, { round, tournament, formula, limit });
           response = jsonResponse(top);
+        }
+      }
+      // GET /rankings/round-distribution?round=&tournament=&corrWeight=&mmcWeight=&models=a,b
+      else if (path === '/rankings/round-distribution' && request.method === 'GET') {
+        const roundStr = url.searchParams.get('round');
+        if (!roundStr || !Number.isFinite(parseInt(roundStr))) {
+          response = new Response(
+            JSON.stringify({ error: 'round is required' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        } else {
+          const round = parseInt(roundStr);
+          const tournament = parseInt(url.searchParams.get('tournament') || '8');
+          const models = (url.searchParams.get('models') || '')
+            .split(',')
+            .map((m) => m.trim())
+            .filter(Boolean);
+          const formula: rankings.ScoreFormula = {
+            corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
+            mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
+            tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
+          };
+          const dist = await rankings.getRoundDistribution(env, { round, tournament, formula, models });
+          response = jsonResponse(dist);
         }
       }
       // GET /rankings/model-rank?modelName=&startRound=&endRound=&tournament=&corrWeight=&mmcWeight=
