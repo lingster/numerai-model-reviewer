@@ -161,6 +161,12 @@ export default {
         const round = await rankings.getCurrentRound(env, tournament);
         response = jsonResponse({ tournament, round });
       }
+      // GET /rankings/cache-status?tournament=8
+      else if (path === '/rankings/cache-status' && request.method === 'GET') {
+        const tournament = parseInt(url.searchParams.get('tournament') || '8');
+        const status = await rankings.getCacheStatus(env, tournament);
+        response = jsonResponse(status);
+      }
       // GET /rankings/top-models?round=&tournament=&limit=&corrWeight=&mmcWeight=
       else if (path === '/rankings/top-models' && request.method === 'GET') {
         const roundStr = url.searchParams.get('round');

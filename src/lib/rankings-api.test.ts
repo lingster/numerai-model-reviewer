@@ -12,7 +12,7 @@
  *   Round 1171: rank=7, corr=0.0402, mmc=0.0356, totalModels=4093
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { calculateCustomScore, DEFAULT_SCORE_FORMULA, hasRankableData, latestRoundWithData } from './rankings-api.js';
+import { calculateCustomScore, classifyRankingHistory, DEFAULT_SCORE_FORMULA, hasRankableData, latestRoundWithData } from './rankings-api.js';
 import type { ModelRankingHistory, ScoreFormula } from './types.js';
 
 // Worker API URL for integration tests. Overridable so CI can point at a
@@ -163,6 +163,44 @@ describe('hasRankableData - unit tests', () => {
 
 	it('treats rank=0 as rankable (non-null)', () => {
 		expect(hasRankableData(makeHistory([0]))).toBe(true);
+	});
+});
+
+describe('classifyRankingHistory - unit tests', () => {
+	const makeHistory = (
+		rounds: Array<{ rank: number | null; totalModels: number }>
+	): ModelRankingHistory => ({
+		modelId: 'id',
+		modelName: 'm',
+		username: 'u',
+		rankings: rounds.map((r, i) => ({
+			roundNumber: 1000 + i,
+			rank: r.rank,
+			customScore: r.rank === null ? null : 0.01,
+			totalModels: r.totalModels
+		}))
+	});
+
+	it("is 'ranked' when any round has a non-null rank", () => {
+		expect(
+			classifyRankingHistory(makeHistory([{ rank: null, totalModels: 50 }, { rank: 7, totalModels: 50 }]))
+		).toBe('ranked');
+	});
+
+	it("is 'unstaked' when never ranked but a field existed (totalModels > 0)", () => {
+		expect(
+			classifyRankingHistory(makeHistory([{ rank: null, totalModels: 50 }, { rank: null, totalModels: 48 }]))
+		).toBe('unstaked');
+	});
+
+	it("is 'no-data' when never ranked and no round had a field", () => {
+		expect(
+			classifyRankingHistory(makeHistory([{ rank: null, totalModels: 0 }, { rank: null, totalModels: 0 }]))
+		).toBe('no-data');
+	});
+
+	it("is 'no-data' for an empty rankings array", () => {
+		expect(classifyRankingHistory(makeHistory([]))).toBe('no-data');
 	});
 });
 

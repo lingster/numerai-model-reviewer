@@ -38,6 +38,22 @@
 		</div>
 
 		<div class="retro-card rounded-lg p-6">
+			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Round Summary</h2>
+			<p class="mb-4 retro-text-secondary">
+				See the distribution of a metric across all staked models for a single round, with your models marked on the curve.
+			</p>
+			<a
+				href="/round-summary"
+				class="retro-button inline-flex items-center rounded-md px-4 py-2 text-sm font-medium"
+			>
+				View Round Summary
+				<svg class="ml-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+				</svg>
+			</a>
+		</div>
+
+		<div class="retro-card rounded-lg p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Features</h2>
 			<ul class="space-y-2 retro-text-secondary">
 				<li class="flex items-center">

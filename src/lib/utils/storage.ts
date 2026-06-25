@@ -3,11 +3,17 @@
  */
 import { browser } from '$app/environment';
 import type { SavedChart } from '$lib/types.js';
+import {
+	DEFAULT_RANKING_DISPLAY_MODE,
+	RANKING_DISPLAY_MODES,
+	type RankingDisplayMode
+} from '$lib/utils/ranking-display.js';
 
 const STORAGE_KEY = 'numerai_saved_charts';
 const RECENT_USER_MODELS_KEY = 'numerai_recent_user_models';
 const RECENT_CHARTS_KEY = 'numerai_recent_charts';
 const TOURNAMENT_KEY = 'numerai_selected_tournament';
+const RANKING_DISPLAY_MODE_KEY = 'numerai_ranking_display_mode';
 const MAX_RECENT_ITEMS = 5;
 
 /**
@@ -75,6 +81,42 @@ export function setSelectedTournament(tournament: TournamentId): void {
 		localStorage.setItem(TOURNAMENT_KEY, tournament.toString());
 	} catch (error) {
 		console.error('Error saving selected tournament:', error);
+	}
+}
+
+/**
+ * Get the rankings display mode ('rank' | 'percentile') from localStorage.
+ * Defaults to DEFAULT_RANKING_DISPLAY_MODE when unset or invalid.
+ */
+export function getRankingDisplayMode(): RankingDisplayMode {
+	if (!browser) {
+		return DEFAULT_RANKING_DISPLAY_MODE;
+	}
+
+	try {
+		const stored = localStorage.getItem(RANKING_DISPLAY_MODE_KEY);
+		if (stored && RANKING_DISPLAY_MODES.includes(stored as RankingDisplayMode)) {
+			return stored as RankingDisplayMode;
+		}
+	} catch (error) {
+		console.error('Error loading ranking display mode:', error);
+	}
+
+	return DEFAULT_RANKING_DISPLAY_MODE;
+}
+
+/**
+ * Save the rankings display mode to localStorage.
+ */
+export function setRankingDisplayMode(mode: RankingDisplayMode): void {
+	if (!browser) {
+		return;
+	}
+
+	try {
+		localStorage.setItem(RANKING_DISPLAY_MODE_KEY, mode);
+	} catch (error) {
+		console.error('Error saving ranking display mode:', error);
 	}
 }
 

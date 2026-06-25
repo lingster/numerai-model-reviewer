@@ -8,18 +8,27 @@
 		calculateModelRankings,
 		getTopModelsForRound,
 		getCurrentRound,
+		getCacheStatus,
 		DEFAULT_SCORE_FORMULA,
 		getDefaultFormulaForTournament,
-		latestRoundWithData
+		latestRoundWithData,
+		type UnrankedModel
 	} from '$lib/rankings-api.js';
 	import type { NumeraiUser, NumeraiModel, ModelRankingHistory, ScoreFormula, RoundModelScore } from '$lib/types.js';
 	import {
 		getSelectedTournament,
 		setSelectedTournament,
+		getRankingDisplayMode,
+		setRankingDisplayMode,
 		TOURNAMENTS,
 		TOURNAMENT_INFO,
 		type TournamentId
 	} from '$lib/utils/storage.js';
+	import {
+		formatPercentile,
+		rankToPercentile,
+		type RankingDisplayMode
+	} from '$lib/utils/ranking-display.js';
 	import { paginateModels } from '$lib/utils/paginate-models.js';
 	import { formatModelOption } from '$lib/utils/format-model-option.js';
 	import { replaceState } from '$app/navigation';
@@ -42,6 +51,15 @@
 	// Selected models
 	let selectedModels = $state<NumeraiModel[]>([]);
 
+	// Models that "Calculate Rankings" will rank: the explicitly selected ones,
+	// or — when none are picked — every model of the selected user. Lets a user
+	// chart a whole account in one click without selecting each model.
+	const modelsToRank = $derived(
+		selectedModels.length > 0 ? selectedModels : selectedUser ? availableModels : []
+	);
+	// True when the fallback (all of the user's models) is in effect.
+	const usingAllUserModels = $derived(selectedModels.length === 0 && modelsToRank.length > 0);
+
 	// Tournament selection (Classic and Crypto only)
 	let selectedTournament = $state<TournamentId>(TOURNAMENTS.CLASSIC);
 	const themeClass = $derived(TOURNAMENT_INFO[selectedTournament].theme);
@@ -59,14 +77,62 @@
 	let startRound = $state(0);
 	let endRound = $state(0);
 
+	// Latest round the precomputed cache holds for this tournament (lags the live
+	// current round until the next precompute run). null = unknown / endpoint
+	// unavailable. Surfaced so users know which rounds actually have data.
+	let cacheLatestRound = $state<number | null>(null);
+	let cacheEarliestRound = $state<number | null>(null);
+
+	async function loadCacheStatus() {
+		const status = await getCacheStatus(selectedTournament);
+		cacheLatestRound = status?.latestRound ?? null;
+		cacheEarliestRound = status?.earliestRound ?? null;
+	}
+
+	// Default round range: end at the last cached round (later rounds have no data
+	// yet), start 30 rounds earlier. Falls back to currentRound-1 when the cache
+	// coverage is unknown. Applies to all tournaments.
+	const DEFAULT_RANGE_ROUNDS = 30;
+	// Highest selectable round: the last cached round (data past it is empty),
+	// falling back to currentRound-1 when cache coverage is unknown.
+	const maxRound = $derived(cacheLatestRound ?? Math.max(1, currentRound - 1));
+
+	function applyDefaultRange() {
+		const end = maxRound;
+		endRound = end;
+		startRound = Math.max(1, end - DEFAULT_RANGE_ROUNDS);
+		selectedRoundForTop10 = end;
+	}
+
+	// endRound never exceeds the latest cached round; keep startRound <= endRound.
+	function clampRange() {
+		if (endRound > maxRound) endRound = maxRound;
+		if (endRound < 1) endRound = 1;
+		if (startRound < 1) startRound = 1;
+		if (startRound > endRound) startRound = endRound;
+		if (selectedRoundForTop10 > maxRound) selectedRoundForTop10 = maxRound;
+	}
+
 	// Score formula
 	let scoreFormula = $state<ScoreFormula>({ ...DEFAULT_SCORE_FORMULA });
+
+	// How ranks are displayed: 'rank' (1 = best, lower better) or 'percentile'
+	// (higher better). Derived client-side from rank + totalModels; persisted.
+	let rankingDisplayMode = $state<RankingDisplayMode>('rank');
+
+	function setDisplayMode(mode: RankingDisplayMode) {
+		rankingDisplayMode = mode;
+		setRankingDisplayMode(mode);
+	}
 
 	// Rankings data
 	let rankingHistories = $state<ModelRankingHistory[]>([]);
 	let topModels = $state<RoundModelScore[]>([]);
 	let loadingRankings = $state(false);
 	let rankingsError = $state<string | null>(null);
+	// Selected models that couldn't be ranked, with the reason (not staked for
+	// the range, or no cached data). Surfaced so they aren't silently dropped.
+	let unrankedModels = $state<UnrankedModel[]>([]);
 	let loadingProgress = $state({ stage: '', loaded: 0, total: 0 });
 
 	// Per-round staked-model table. `topModels` now holds the FULL ranked field
@@ -105,22 +171,26 @@
 		// Seed the formula with the tournament-appropriate defaults.
 		scoreFormula = getDefaultFormulaForTournament(selectedTournament);
 
-		// Fetch current round
+		// Restore the persisted rankings display mode.
+		rankingDisplayMode = getRankingDisplayMode();
+
+		// Fetch current round (used as a fallback when the cache coverage is unknown).
 		try {
 			currentRound = await getCurrentRound(selectedTournament);
-			endRound = currentRound - 1; // Latest resolved round
-			startRound = Math.max(1, endRound - 99); // Last 100 rounds
-			selectedRoundForTop10 = endRound;
 		} catch (error) {
 			console.error('Error fetching current round:', error);
-			// Fallback values
-			currentRound = 900;
-			endRound = 899;
-			startRound = 800;
-			selectedRoundForTop10 = endRound;
+			currentRound = 900; // Fallback
 		}
 
-		// Load from URL params
+		// Surface the cache's round coverage (non-blocking; safe if unavailable).
+		await loadCacheStatus();
+
+		// Default the range to the cache window: end at the last cached round (data
+		// past it is empty), start 30 rounds earlier. Falls back to currentRound-1
+		// when cache coverage is unknown.
+		applyDefaultRange();
+
+		// Load from URL params (explicit start/end override the defaults above).
 		await loadFromUrlParams();
 	});
 
@@ -212,16 +282,20 @@
 	}
 
 	async function loadRankings() {
-		if (selectedModels.length === 0) return;
+		// Rank the explicitly selected models, or fall back to all of the selected
+		// user's models when none are picked.
+		const models = modelsToRank;
+		if (models.length === 0) return;
 
 		loadingRankings = true;
 		rankingsError = null;
 		loadingProgress = { stage: 'Initializing', loaded: 0, total: 0 };
 
+		unrankedModels = [];
 		try {
-			// Calculate rankings for selected models
-			rankingHistories = await calculateModelRankings(
-				selectedModels.map(m => ({ modelName: m.name, modelId: m.id, username: m.username })),
+			// Calculate rankings for the resolved models
+			const result = await calculateModelRankings(
+				models.map(m => ({ modelName: m.name, modelId: m.id, username: m.username })),
 				startRound,
 				endRound,
 				scoreFormula,
@@ -230,6 +304,8 @@
 					loadingProgress = { stage, loaded, total };
 				}
 			);
+			rankingHistories = result.histories;
+			unrankedModels = result.unranked;
 
 			// Default the table to the latest round that actually has a staked
 			// field — the end of the range is often unresolved (empty), which would
@@ -241,7 +317,15 @@
 			await loadTopModelsForRound(selectedRoundForTop10);
 
 			if (rankingHistories.length === 0) {
-				rankingsError = 'No ranking data was retrieved. The models may not have performance data in the selected round range.';
+				// Refresh coverage in case the cache advanced since page load, then
+				// point the user at the rounds that actually have data.
+				await loadCacheStatus();
+				let msg =
+					'No ranking data was retrieved. The selected models may not be in the staked field for this round range.';
+				if (cacheLatestRound !== null) {
+					msg += ` The cache currently has data for rounds ${cacheEarliestRound ?? 1}–${cacheLatestRound} (it lags the live round ${currentRound}). Try a range ending at or before round ${cacheLatestRound}.`;
+				}
+				rankingsError = msg;
 			}
 		} catch (error) {
 			console.error('Error loading rankings:', error);
@@ -274,6 +358,7 @@
 		// Clear selections
 		selectedModels = [];
 		rankingHistories = [];
+		unrankedModels = [];
 		topModels = [];
 		selectedUser = null;
 		userSearchQuery = '';
@@ -282,13 +367,15 @@
 		modelSearchQuery = '';
 		modelSearchResults = [];
 
-		// Refetch current round for new tournament
-		getCurrentRound(tournament).then(round => {
-			currentRound = round;
-			endRound = round - 1;
-			startRound = Math.max(1, endRound - 99);
-			selectedRoundForTop10 = endRound;
-		}).catch(() => {});
+		// Refetch current round + cache coverage, then default the range to the new
+		// tournament's cache window (end = last cached round, start 30 earlier).
+		getCurrentRound(tournament)
+			.then((round) => (currentRound = round))
+			.catch(() => {});
+		loadCacheStatus().then(() => {
+			applyDefaultRange();
+			updateUrlParams();
+		});
 
 		updateUrlParams();
 	}
@@ -362,8 +449,9 @@
 	];
 
 	function setRoundRange(rounds: number | null) {
-		endRound = currentRound - 1;
+		endRound = maxRound;
 		startRound = rounds === null ? 1 : Math.max(1, endRound - rounds + 1);
+		clampRange();
 	}
 
 	// Update score formula
@@ -411,6 +499,8 @@
 
 		if (startParam) startRound = parseInt(startParam, 10) || startRound;
 		if (endParam) endRound = parseInt(endParam, 10) || endRound;
+		// endRound from a URL can point past the cache (empty tail) — clamp it.
+		clampRange();
 
 		if (modelsParam) {
 			const modelNames = modelsParam.split(',').map(n => n.trim());
@@ -435,9 +525,10 @@
 			if (user) await selectUser(user);
 		}
 
-		// Auto-render: if the URL pre-selected models, run the calculation so the
+		// Auto-render: if the URL pre-selected models — or just a user, in which
+		// case we fall back to all of their models — run the calculation so the
 		// chart appears without a manual "Calculate Rankings" click.
-		if (selectedModels.length > 0 && startRound > 0 && endRound >= startRound) {
+		if (modelsToRank.length > 0 && startRound > 0 && endRound >= startRound) {
 			await loadRankings();
 		}
 	}
@@ -605,6 +696,13 @@
 					{/each}
 				</div>
 			</div>
+		{:else if selectedUser && availableModels.length > 0}
+			<div class="mt-4 rounded-md bg-[var(--retro-primary)]/10 border border-[var(--retro-primary)] p-3">
+				<p class="text-sm retro-text-primary">
+					<span class="font-medium">Tip:</span> no models selected — all {availableModels.length}
+					of {selectedUser.username}'s models will be ranked. Pick specific models above to focus on just those.
+				</p>
+			</div>
 		{/if}
 	</div>
 
@@ -654,6 +752,36 @@
 		</p>
 	</div>
 
+	<!-- Ranking Display Mode -->
+	<div class="mb-6 rounded-lg retro-card p-6">
+		<div class="flex flex-wrap items-center gap-4">
+			<span class="text-sm font-medium retro-text-primary uppercase">Display:</span>
+			<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+				<button
+					onclick={() => setDisplayMode('rank')}
+					class="px-3 py-1 text-sm font-medium transition-colors"
+					style={rankingDisplayMode === 'rank'
+						? 'background-color: var(--retro-primary); color: white;'
+						: 'color: var(--retro-text-primary);'}
+				>
+					Rank (lower is better)
+				</button>
+				<button
+					onclick={() => setDisplayMode('percentile')}
+					class="px-3 py-1 text-sm font-medium transition-colors"
+					style={rankingDisplayMode === 'percentile'
+						? 'background-color: var(--retro-primary); color: white;'
+						: 'color: var(--retro-text-primary);'}
+				>
+					Percentile (higher is better)
+				</button>
+			</div>
+		</div>
+		<p class="mt-2 text-xs retro-text-secondary">
+			Percentile = (totalModels − rank + 1) / totalModels × 100, per round (best ≈ 100).
+		</p>
+	</div>
+
 	<!-- Round Range Configuration -->
 	<div class="mb-6 rounded-lg retro-card p-6">
 		<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Round Range</h2>
@@ -665,6 +793,7 @@
 					id="startRound"
 					type="number"
 					bind:value={startRound}
+					onchange={clampRange}
 					min="1"
 					max={endRound}
 					class="retro-input mt-1 w-full rounded-md px-3 py-2 text-sm"
@@ -676,15 +805,21 @@
 					id="endRound"
 					type="number"
 					bind:value={endRound}
+					onchange={clampRange}
 					min={startRound}
-					max={currentRound - 1}
+					max={maxRound}
 					class="retro-input mt-1 w-full rounded-md px-3 py-2 text-sm"
 				/>
 			</div>
-			<div class="flex items-end">
+			<div class="flex flex-col justify-end">
 				<span class="text-sm retro-text-secondary">
 					Current Round: {currentRound}
 				</span>
+				{#if cacheLatestRound !== null}
+					<span class="text-xs retro-text-secondary">
+						Cache data: rounds {cacheEarliestRound ?? 1}–{cacheLatestRound}
+					</span>
+				{/if}
 			</div>
 		</div>
 
@@ -703,11 +838,20 @@
 		<div class="mt-4">
 			<button
 				onclick={loadRankings}
-				disabled={selectedModels.length === 0 || loadingRankings}
+				disabled={modelsToRank.length === 0 || loadingRankings}
 				class="retro-button rounded-md px-6 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
 			>
-				{loadingRankings ? 'Loading...' : 'Calculate Rankings'}
+				{loadingRankings
+					? 'Loading...'
+					: usingAllUserModels
+						? `Calculate Rankings (all ${modelsToRank.length} of ${selectedUser?.username ?? 'user'}'s models)`
+						: 'Calculate Rankings'}
 			</button>
+			{#if usingAllUserModels}
+				<p class="mt-2 text-xs retro-text-secondary">
+					No models selected — ranking all {modelsToRank.length} of {selectedUser?.username}'s models. Add models above to narrow this down.
+				</p>
+			{/if}
 		</div>
 
 		<!-- Loading Progress -->
@@ -734,6 +878,27 @@
 				<p class="text-sm retro-text-warning">{rankingsError}</p>
 			</div>
 		{/if}
+
+		<!-- Unranked models (not staked for the range, or no cached data) -->
+		{#if unrankedModels.length > 0}
+			<div class="mt-4 rounded-md bg-[var(--retro-warning)]/20 border border-[var(--retro-warning)] p-4">
+				<p class="text-sm font-medium retro-text-warning mb-1">
+					{unrankedModels.length} model{unrankedModels.length === 1 ? '' : 's'} could not be ranked for rounds {startRound}–{endRound}:
+				</p>
+				<ul class="list-disc pl-5 text-sm retro-text-warning">
+					{#each unrankedModels as m (m.modelName)}
+						<li>
+							<span class="font-medium">{m.modelName}</span>
+							{#if m.reason === 'unstaked'}
+								— not staked in this round range (no ranking).
+							{:else}
+								— no cached data for this range{cacheLatestRound !== null ? ` (cache covers rounds ${cacheEarliestRound ?? 1}–${cacheLatestRound})` : ''}.
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			</div>
+		{/if}
 	</div>
 
 	<!-- Rankings Chart -->
@@ -745,6 +910,7 @@
 				{rankingHistories}
 				{startRound}
 				{endRound}
+				displayMode={rankingDisplayMode}
 				onPointSelect={handleChartPointSelect}
 			/>
 		</div>
@@ -765,7 +931,7 @@
 							type="number"
 							bind:value={selectedRoundForTop10}
 							min="1"
-							max={currentRound - 1}
+							max={maxRound}
 							onchange={onSelectRoundForTop10}
 							class="retro-input w-24 rounded-md px-2 py-1 text-sm"
 						/>
@@ -802,7 +968,7 @@
 				<table class="min-w-full divide-y retro-border-secondary border-2">
 					<thead class="retro-bg-secondary">
 						<tr>
-							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Rank</th>
+							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">{rankingDisplayMode === 'percentile' ? 'Percentile' : 'Rank'}</th>
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Model</th>
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">User</th>
 							<th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">{metric1Label}</th>
@@ -813,8 +979,13 @@
 					<tbody class="divide-y divide-[var(--retro-light-grey)] retro-bg-primary">
 						{#each pagedTopModels.items as model, index}
 							<tr id="staked-row-{model.rank}" class="{selectedModels.find(m => m.name.toLowerCase() === model.modelName.toLowerCase()) ? 'bg-[var(--retro-primary)]/20' : ''}">
-								<td class="whitespace-nowrap px-4 py-3 text-sm font-bold retro-text-accent">
-									#{model.rank ?? index + 1}
+								<td class="whitespace-nowrap px-4 py-3 text-sm font-bold {rankingDisplayMode === 'percentile' ? 'retro-text-primary' : 'retro-text-accent'}">
+									{#if rankingDisplayMode === 'percentile'}
+										{@const pct = rankToPercentile(model.rank ?? index + 1, model.totalModels)}
+										{pct !== null ? formatPercentile(pct) : 'N/A'}
+									{:else}
+										#{model.rank ?? index + 1}
+									{/if}
 								</td>
 								<td class="whitespace-nowrap px-4 py-3 text-sm font-medium retro-text-primary">
 									{model.modelName}

@@ -13,7 +13,8 @@ function makeModels(names: string[]): RoundModelScore[] {
 		tc: null,
 		stakeValue: null,
 		customScore: 0,
-		rank: i + 1
+		rank: i + 1,
+		totalModels: names.length
 	}));
 }
 

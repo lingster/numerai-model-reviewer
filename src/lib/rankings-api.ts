@@ -61,6 +61,37 @@ export function hasRankableData(history: ModelRankingHistory): boolean {
 	return history.rankings.some((r) => r.rank !== null);
 }
 
+/** Why a model could (or couldn't) be ranked over the requested round range. */
+export type ModelRankStatus = 'ranked' | 'unstaked' | 'no-data';
+
+/**
+ * Classify a model's ranking history over the requested range:
+ *  - 'ranked'   — at least one round has a non-null rank.
+ *  - 'unstaked' — never ranked, but at least one round had a populated staked
+ *                 field (totalModels > 0). The round data exists; the model just
+ *                 wasn't in the staked set (not staked / not a top staked model).
+ *  - 'no-data'  — never ranked and no round had a field (totalModels === 0 for
+ *                 every round). The cache doesn't cover this range yet.
+ */
+export function classifyRankingHistory(history: ModelRankingHistory): ModelRankStatus {
+	if (hasRankableData(history)) return 'ranked';
+	const fieldExisted = history.rankings.some((r) => r.totalModels > 0);
+	return fieldExisted ? 'unstaked' : 'no-data';
+}
+
+/** A selected model that could not be ranked, with the reason why. */
+export interface UnrankedModel {
+	modelName: string;
+	username: string;
+	reason: Exclude<ModelRankStatus, 'ranked'>;
+}
+
+/** Result of calculateModelRankings: rankable histories plus unranked models. */
+export interface ModelRankingsResult {
+	histories: ModelRankingHistory[];
+	unranked: UnrankedModel[];
+}
+
 /**
  * Latest round across the given histories that has a populated staked field
  * (totalModels > 0), or null if none do. The tail of a requested range is
@@ -133,6 +164,34 @@ export async function getCurrentRound(tournament: number = 8): Promise<number> {
 	});
 }
 
+export interface CacheStatus {
+	tournament: number;
+	latestRound: number | null;
+	earliestRound: number | null;
+}
+
+/**
+ * Get the round range the precomputed cache currently covers for a tournament.
+ * Returns null if the endpoint is unavailable (e.g. an older deployed Worker) so
+ * callers can simply omit the coverage hint rather than error.
+ */
+export async function getCacheStatus(tournament: number = 8): Promise<CacheStatus | null> {
+	const cacheKey = `cache-status:t${tournament}`;
+	const cached = swrCache.get<CacheStatus>(cacheKey);
+	if (cached.data && !cached.isStale) return cached.data;
+
+	try {
+		return await swrCache.fetch(cacheKey, async () => {
+			const url = new URL(`${config.apiUrl}/rankings/cache-status`);
+			url.searchParams.set('tournament', String(tournament));
+			return getJson<CacheStatus>(url);
+		});
+	} catch (error) {
+		console.error('Error fetching cache status:', error);
+		return null;
+	}
+}
+
 /** Compute the same custom score the worker uses — kept for UI display. */
 export function calculateCustomScore(
 	corr: number | null,
@@ -162,8 +221,8 @@ export async function calculateModelRankings(
 	formula: ScoreFormula,
 	tournament: number = 8,
 	onProgress?: (stage: string, loaded: number, total: number) => void
-): Promise<ModelRankingHistory[]> {
-	if (selectedModels.length === 0) return [];
+): Promise<ModelRankingsResult> {
+	if (selectedModels.length === 0) return { histories: [], unranked: [] };
 
 	const total = selectedModels.length;
 	if (onProgress) onProgress('Fetching model rankings', 0, total);
@@ -218,10 +277,21 @@ export async function calculateModelRankings(
 		if (onProgress) onProgress('Fetching model rankings', results.length, total);
 	}
 
-	// Filter out models with no rankable data (empty histories, or histories
-	// where every round is rank=null). Dropping all-null histories lets the page
-	// show its "no data" message instead of an empty chart. See hasRankableData.
-	return results.filter(hasRankableData);
+	// Split into rankable histories (for the chart/table) and unranked models so
+	// the page can explain WHY a model is missing — not staked for the range, or
+	// no cached data for it — instead of silently dropping it. See
+	// classifyRankingHistory.
+	const histories: ModelRankingHistory[] = [];
+	const unranked: UnrankedModel[] = [];
+	for (const history of results) {
+		const status = classifyRankingHistory(history);
+		if (status === 'ranked') {
+			histories.push(history);
+		} else {
+			unranked.push({ modelName: history.modelName, username: history.username, reason: status });
+		}
+	}
+	return { histories, unranked };
 }
 
 /**
@@ -262,7 +332,8 @@ export async function getTopModelsForRound(
 				tc: null,
 				stakeValue: null,
 				customScore: t.customScore,
-				rank: t.rank
+				rank: t.rank,
+				totalModels: t.totalModels
 			}));
 		} catch (error) {
 			console.error('Error fetching top models:', error);

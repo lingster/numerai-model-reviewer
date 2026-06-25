@@ -4,20 +4,36 @@
 	import * as d3Scale from 'd3-scale';
 	import * as d3Shape from 'd3-shape';
 	import type { ModelRankingHistory } from '$lib/types.js';
+	import {
+		formatPercentile,
+		rankDisplayValue,
+		type RankingDisplayMode
+	} from '$lib/utils/ranking-display.js';
 
 	// Props
 	let {
 		rankingHistories = [],
 		startRound = 0,
 		endRound = 0,
+		displayMode = 'rank',
 		onPointSelect
 	}: {
 		rankingHistories: ModelRankingHistory[];
 		startRound: number;
 		endRound: number;
+		/** 'rank' = raw position (1 best, lower better); 'percentile' = higher better. */
+		displayMode?: RankingDisplayMode;
 		/** Fired when a data point is clicked, with its round and model name. */
 		onPointSelect?: (round: number, modelName: string) => void;
 	} = $props();
+
+	const isPercentile = $derived(displayMode === 'percentile');
+
+	// Plotted value for a round under the active mode: raw rank, or a 0–100
+	// percentile derived from (rank, totalModels). null points are skipped.
+	function plotValue(point: { rank: number | null; totalModels: number }): number | null {
+		return rankDisplayValue(point.rank, point.totalModels, displayMode);
+	}
 
 	// Chart dimensions
 	const margin = { top: 40, right: 120, bottom: 60, left: 70 };
@@ -99,18 +115,21 @@
 			.range([0, width])
 	);
 
+	// Percentile mode: 0 at the bottom, 100 (best) at the top — higher is better.
+	// Rank mode: rank 1 at the top, larger (worse) ranks lower — lower is better.
 	const yScale = $derived(
-		d3Scale.scaleLinear()
-			.domain([1, maxRank]) // Rank 1 at top
-			.range([0, height])
+		isPercentile
+			? d3Scale.scaleLinear().domain([0, 100]).range([height, 0])
+			: d3Scale.scaleLinear().domain([1, maxRank]).range([0, height])
 	);
 
-	// Line generator
+	// Line generator. Plots rank or percentile depending on mode; points whose
+	// plotted value is null (unranked / empty field) are skipped.
 	const line = $derived(
-		d3Shape.line<{ roundNumber: number; rank: number | null }>()
-			.defined(d => d.rank !== null)
+		d3Shape.line<{ roundNumber: number; rank: number | null; totalModels: number }>()
+			.defined(d => plotValue(d) !== null)
 			.x(d => xScale(d.roundNumber))
-			.y(d => yScale(d.rank!))
+			.y(d => yScale(plotValue(d)!))
 			.curve(d3Shape.curveMonotoneX)
 	);
 
@@ -127,6 +146,7 @@
 	});
 
 	const yTicks = $derived.by(() => {
+		if (isPercentile) return [0, 25, 50, 75, 100];
 		const max = maxRank;
 		const step = Math.max(1, Math.ceil(max / 10));
 		const ticks: number[] = [];
@@ -157,6 +177,7 @@
 		modelName: string;
 		round: number;
 		rank: number | null;
+		totalModels: number;
 		score: number | null;
 	}>({
 		visible: false,
@@ -165,13 +186,14 @@
 		modelName: '',
 		round: 0,
 		rank: null,
+		totalModels: 0,
 		score: null
 	});
 
 	function showTooltip(
 		event: MouseEvent,
 		history: ModelRankingHistory,
-		dataPoint: { roundNumber: number; rank: number | null; customScore: number | null }
+		dataPoint: { roundNumber: number; rank: number | null; totalModels: number; customScore: number | null }
 	) {
 		const rect = (event.currentTarget as Element).getBoundingClientRect();
 		tooltip = {
@@ -181,6 +203,7 @@
 			modelName: history.modelName,
 			round: dataPoint.roundNumber,
 			rank: dataPoint.rank,
+			totalModels: dataPoint.totalModels,
 			score: dataPoint.customScore
 		};
 	}
@@ -190,7 +213,7 @@
 	function showTooltipFromFocus(
 		event: FocusEvent,
 		history: ModelRankingHistory,
-		dataPoint: { roundNumber: number; rank: number | null; customScore: number | null }
+		dataPoint: { roundNumber: number; rank: number | null; totalModels: number; customScore: number | null }
 	) {
 		const circle = event.currentTarget as SVGCircleElement;
 		tooltip = {
@@ -200,6 +223,7 @@
 			modelName: history.modelName,
 			round: dataPoint.roundNumber,
 			rank: dataPoint.rank,
+			totalModels: dataPoint.totalModels,
 			score: dataPoint.customScore
 		};
 	}
@@ -355,7 +379,7 @@
 							font-size="14"
 							font-weight="bold"
 						>
-							Rank (lower is better)
+							{isPercentile ? 'Percentile (higher is better)' : 'Rank (lower is better)'}
 						</text>
 					</g>
 
@@ -374,10 +398,10 @@
 						{/if}
 
 						<!-- Data points -->
-						{#each history.rankings.filter(r => r.rank !== null) as dataPoint}
+						{#each history.rankings.filter(r => plotValue(r) !== null) as dataPoint}
 							<circle
 								cx={xScale(dataPoint.roundNumber)}
-								cy={yScale(dataPoint.rank!)}
+								cy={yScale(plotValue(dataPoint)!)}
 								r="4"
 								fill={getModelColor(rankingHistories.indexOf(history))}
 								stroke="var(--retro-bg-dark)"
@@ -385,7 +409,9 @@
 								class="cursor-pointer hover:r-6 transition-all"
 								role="button"
 								tabindex="0"
-								aria-label="Round {dataPoint.roundNumber}, {history.modelName}, rank {dataPoint.rank}"
+								aria-label={isPercentile
+									? `Round ${dataPoint.roundNumber}, ${history.modelName}, percentile ${formatPercentile(plotValue(dataPoint)!)}`
+									: `Round ${dataPoint.roundNumber}, ${history.modelName}, rank ${dataPoint.rank}`}
 								onmouseenter={(e) => showTooltip(e, history, dataPoint)}
 								onmouseleave={hideTooltip}
 								onfocus={(e) => showTooltipFromFocus(e, history, dataPoint)}
@@ -412,7 +438,13 @@
 					<div class="text-sm font-bold retro-text-primary">{tooltip.modelName}</div>
 					<div class="text-xs retro-text-secondary mt-1">Round: {tooltip.round}</div>
 					{#if tooltip.rank !== null}
-						<div class="text-xs retro-text-accent">Rank: #{tooltip.rank}</div>
+						{#if isPercentile}
+							<div class="text-xs retro-text-accent">
+								Percentile: {formatPercentile(rankDisplayValue(tooltip.rank, tooltip.totalModels, 'percentile')!)}
+							</div>
+						{:else}
+							<div class="text-xs retro-text-accent">Rank: #{tooltip.rank}</div>
+						{/if}
 					{:else}
 						<div class="text-xs retro-text-secondary">Not ranked (no stake)</div>
 					{/if}

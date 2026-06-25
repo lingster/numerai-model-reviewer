@@ -258,6 +258,35 @@ export async function getModelRank(
 	};
 }
 
+/** Cache coverage for a tournament: the round range present in model_performances. */
+export interface CacheStatus {
+	tournament: number;
+	latestRound: number | null;
+	earliestRound: number | null;
+}
+
+/**
+ * Report the round range the precomputed cache currently covers for a tournament
+ * (min/max round_number in model_performances). Used by the UI to tell users
+ * which rounds have data when a requested range comes back empty — the cache
+ * lags the live current round by however long since the last precompute run.
+ * Returns nulls when the cache holds no rows for the tournament.
+ */
+export async function getCacheStatus(env: Env, tournament: number): Promise<CacheStatus> {
+	const row = await env.DB.prepare(
+		`SELECT MAX(round_number) AS latestRound, MIN(round_number) AS earliestRound
+		   FROM model_performances
+		  WHERE tournament = ?`
+	)
+		.bind(tournament)
+		.first<{ latestRound: number | null; earliestRound: number | null }>();
+	return {
+		tournament,
+		latestRound: row?.latestRound ?? null,
+		earliestRound: row?.earliestRound ?? null
+	};
+}
+
 /** Top-N entry returned by /rankings/top-models. */
 export interface TopModelEntry {
 	modelName: string;

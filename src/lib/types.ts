@@ -141,6 +141,8 @@ export interface RoundModelScore {
 	stakeValue: number | null;
 	customScore: number | null;
 	rank: number | null;
+	/** Size of the ranked field for this round; used to derive a percentile. */
+	totalModels: number;
 }
 
 /**
