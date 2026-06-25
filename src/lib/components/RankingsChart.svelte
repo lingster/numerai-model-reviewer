@@ -16,6 +16,9 @@
 		startRound = 0,
 		endRound = 0,
 		displayMode = 'rank',
+		metric1Label = 'Corr',
+		metric2Label = 'MMC',
+		rollingWindow = 1,
 		onPointSelect
 	}: {
 		rankingHistories: ModelRankingHistory[];
@@ -23,11 +26,27 @@
 		endRound: number;
 		/** 'rank' = raw position (1 best, lower better); 'percentile' = higher better. */
 		displayMode?: RankingDisplayMode;
+		/** Label for the corr-like metric (Corr for Classic/Crypto, Alpha for Signals). */
+		metric1Label?: string;
+		/** Label for the mmc-like metric (MMC for Classic/Crypto, MPC for Signals). */
+		metric2Label?: string;
+		/** Trailing round window the data was computed with (1 = per-round). Used to
+		 *  annotate the overlaid metric lines (e.g. "MMC (20r avg)"). */
+		rollingWindow?: number;
 		/** Fired when a data point is clicked, with its round and model name. */
 		onPointSelect?: (round: number, modelName: string) => void;
 	} = $props();
 
 	const isPercentile = $derived(displayMode === 'percentile');
+
+	// Optional raw-metric overlay lines (corr/mmc on a secondary right axis),
+	// toggled by the user. Off by default so the rank line stays the focus.
+	let showMetric1 = $state(false);
+	let showMetric2 = $state(false);
+	const anyMetricOverlay = $derived(showMetric1 || showMetric2);
+
+	// Suffix the metric labels with the rolling window when one is active.
+	const metricSuffix = $derived(rollingWindow > 1 ? ` (${rollingWindow}r avg)` : '');
 
 	// Plotted value for a round under the active mode: raw rank, or a 0–100
 	// percentile derived from (rank, totalModels). null points are skipped.
@@ -133,6 +152,47 @@
 			.curve(d3Shape.curveMonotoneX)
 	);
 
+	// ── Raw-metric overlay (secondary right axis) ───────────────────────────────
+	// Domain spans the enabled metrics across visible models, padded 10%. null
+	// when no overlay is active or there are no values to plot.
+	type MetricKey = 'corr' | 'mmc';
+	const metricExtent = $derived.by((): [number, number] | null => {
+		if (!anyMetricOverlay) return null;
+		const vals: number[] = [];
+		for (const h of visibleHistories) {
+			for (const r of h.rankings) {
+				if (showMetric1 && r.corr !== null) vals.push(r.corr);
+				if (showMetric2 && r.mmc !== null) vals.push(r.mmc);
+			}
+		}
+		if (vals.length === 0) return null;
+		const min = d3Array.min(vals)!;
+		const max = d3Array.max(vals)!;
+		if (min === max) return [min - 0.01, max + 0.01];
+		const pad = (max - min) * 0.1;
+		return [min - pad, max + pad];
+	});
+
+	// Right-axis scale for metric values (higher value = higher on the chart).
+	const yScaleMetric = $derived(
+		d3Scale.scaleLinear()
+			.domain(metricExtent ?? [0, 1])
+			.range([height, 0])
+	);
+
+	const metricTicks = $derived(metricExtent ? yScaleMetric.ticks(5) : []);
+
+	// Line generator for a given metric; skips null points.
+	function metricLineFor(key: MetricKey) {
+		return d3Shape.line<{ roundNumber: number; corr: number | null; mmc: number | null }>()
+			.defined(d => d[key] !== null)
+			.x(d => xScale(d.roundNumber))
+			.y(d => yScaleMetric(d[key]!))
+			.curve(d3Shape.curveMonotoneX);
+	}
+	const corrLine = $derived(metricLineFor('corr'));
+	const mmcLine = $derived(metricLineFor('mmc'));
+
 	// Generate tick values for axes
 	const xTicks = $derived.by(() => {
 		const [min, max] = roundRange;
@@ -179,6 +239,8 @@
 		rank: number | null;
 		totalModels: number;
 		score: number | null;
+		corr: number | null;
+		mmc: number | null;
 	}>({
 		visible: false,
 		x: 0,
@@ -187,35 +249,29 @@
 		round: 0,
 		rank: null,
 		totalModels: 0,
-		score: null
+		score: null,
+		corr: null,
+		mmc: null
 	});
 
-	function showTooltip(
-		event: MouseEvent,
+	// Position the tooltip from the hovered/focused circle's own geometry. cx/cy
+	// live in the inner <g> space (offset by margin), which matches the absolutely
+	// positioned tooltip's coordinate space — so the tooltip lands next to the
+	// point. (The old version derived x/y from the mouse offset *within* the tiny
+	// circle, which always collapsed to ~the top-left margin corner.) Both mouse
+	// and keyboard handlers share this since event.currentTarget is the circle.
+	function setTooltipFromCircle(
+		circle: SVGCircleElement,
 		history: ModelRankingHistory,
-		dataPoint: { roundNumber: number; rank: number | null; totalModels: number; customScore: number | null }
+		dataPoint: {
+			roundNumber: number;
+			rank: number | null;
+			totalModels: number;
+			customScore: number | null;
+			corr: number | null;
+			mmc: number | null;
+		}
 	) {
-		const rect = (event.currentTarget as Element).getBoundingClientRect();
-		tooltip = {
-			visible: true,
-			x: event.clientX - rect.left + margin.left,
-			y: event.clientY - rect.top + margin.top,
-			modelName: history.modelName,
-			round: dataPoint.roundNumber,
-			rank: dataPoint.rank,
-			totalModels: dataPoint.totalModels,
-			score: dataPoint.customScore
-		};
-	}
-
-	// Keyboard focus has no pointer coordinates, so position the tooltip from the
-	// focused circle's own geometry (cx/cy are in the inner <g> space offset by margin).
-	function showTooltipFromFocus(
-		event: FocusEvent,
-		history: ModelRankingHistory,
-		dataPoint: { roundNumber: number; rank: number | null; totalModels: number; customScore: number | null }
-	) {
-		const circle = event.currentTarget as SVGCircleElement;
 		tooltip = {
 			visible: true,
 			x: parseFloat(circle.getAttribute('cx') ?? '0') + margin.left,
@@ -224,7 +280,9 @@
 			round: dataPoint.roundNumber,
 			rank: dataPoint.rank,
 			totalModels: dataPoint.totalModels,
-			score: dataPoint.customScore
+			score: dataPoint.customScore,
+			corr: dataPoint.corr,
+			mmc: dataPoint.mmc
 		};
 	}
 
@@ -285,6 +343,23 @@
 					<span class="retro-text-primary">{history.modelName}</span>
 				</button>
 			{/each}
+		</div>
+
+		<!-- Raw-metric overlay toggles. Overlay the per-round (or windowed) metric
+		     values on a secondary right axis, alongside the rank line. -->
+		<div class="mb-4 flex flex-wrap items-center gap-4">
+			<span class="text-sm font-medium retro-text-secondary">Overlay metric lines:</span>
+			<label class="flex items-center gap-2 text-sm retro-text-primary cursor-pointer">
+				<input type="checkbox" bind:checked={showMetric1} class="accent-[var(--retro-primary)]" />
+				{metric1Label}{metricSuffix} <span class="retro-text-secondary">(dashed)</span>
+			</label>
+			<label class="flex items-center gap-2 text-sm retro-text-primary cursor-pointer">
+				<input type="checkbox" bind:checked={showMetric2} class="accent-[var(--retro-primary)]" />
+				{metric2Label}{metricSuffix} <span class="retro-text-secondary">(dotted)</span>
+			</label>
+			{#if anyMetricOverlay}
+				<span class="text-xs retro-text-secondary">Values use the right axis; colour matches each model.</span>
+			{/if}
 		</div>
 
 		<!-- SVG Chart -->
@@ -383,6 +458,74 @@
 						</text>
 					</g>
 
+					<!-- Right (secondary) Axis: raw metric values when an overlay is on -->
+					{#if metricExtent}
+						<g class="y-axis-right" transform="translate({width}, 0)">
+							<line x1="0" y1="0" x2="0" y2={height} stroke="var(--retro-text-dim)" />
+							{#each metricTicks as tick}
+								<g transform="translate(0, {yScaleMetric(tick)})">
+									<line x1="0" x2="6" stroke="var(--retro-text-dim)" />
+									<text
+										x="12"
+										dy="0.35em"
+										text-anchor="start"
+										fill="var(--retro-text-dim)"
+										font-size="12"
+									>
+										{tick.toFixed(3)}
+									</text>
+								</g>
+							{/each}
+							<text
+								transform="rotate(-90)"
+								x={-height / 2}
+								y="56"
+								text-anchor="middle"
+								fill="var(--retro-text)"
+								font-size="14"
+								font-weight="bold"
+							>
+								{[showMetric1 ? metric1Label : null, showMetric2 ? metric2Label : null]
+									.filter(Boolean)
+									.join(' / ')}{metricSuffix}
+							</text>
+						</g>
+					{/if}
+
+					<!-- Metric overlay lines (drawn under the rank line/points so the rank
+					     stays the focal series). Dashed = metric1 (corr), dotted = metric2. -->
+					{#if anyMetricOverlay}
+						{#each visibleHistories as history}
+							{@const color = getModelColor(rankingHistories.indexOf(history))}
+							{#if showMetric1}
+								{@const corrPath = corrLine(history.rankings)}
+								{#if corrPath}
+									<path
+										d={corrPath}
+										fill="none"
+										stroke={color}
+										stroke-width="1.5"
+										stroke-dasharray="6,4"
+										stroke-opacity="0.7"
+									/>
+								{/if}
+							{/if}
+							{#if showMetric2}
+								{@const mmcPath = mmcLine(history.rankings)}
+								{#if mmcPath}
+									<path
+										d={mmcPath}
+										fill="none"
+										stroke={color}
+										stroke-width="1.5"
+										stroke-dasharray="2,3"
+										stroke-opacity="0.7"
+									/>
+								{/if}
+							{/if}
+						{/each}
+					{/if}
+
 					<!-- Data lines -->
 					{#each visibleHistories as history, index}
 						{@const pathData = line(history.rankings)}
@@ -412,9 +555,9 @@
 								aria-label={isPercentile
 									? `Round ${dataPoint.roundNumber}, ${history.modelName}, percentile ${formatPercentile(plotValue(dataPoint)!)}`
 									: `Round ${dataPoint.roundNumber}, ${history.modelName}, rank ${dataPoint.rank}`}
-								onmouseenter={(e) => showTooltip(e, history, dataPoint)}
+								onmouseenter={(e) => setTooltipFromCircle(e.currentTarget, history, dataPoint)}
 								onmouseleave={hideTooltip}
-								onfocus={(e) => showTooltipFromFocus(e, history, dataPoint)}
+								onfocus={(e) => setTooltipFromCircle(e.currentTarget, history, dataPoint)}
 								onblur={hideTooltip}
 								onclick={() => onPointSelect?.(dataPoint.roundNumber, history.modelName)}
 								onkeydown={(e) => {
@@ -432,24 +575,30 @@
 			<!-- Tooltip -->
 			{#if tooltip.visible}
 				<div
-					class="absolute pointer-events-none z-10 retro-bg-secondary border-2 border-[var(--retro-primary)] rounded-lg p-3 shadow-lg"
+					class="rankings-tooltip absolute pointer-events-none z-10 retro-bg-secondary border-2 border-[var(--retro-primary)] rounded-lg p-3 shadow-lg"
 					style="left: {tooltip.x + 10}px; top: {tooltip.y - 10}px; transform: translate(0, -100%);"
 				>
-					<div class="text-sm font-bold retro-text-primary">{tooltip.modelName}</div>
-					<div class="text-xs retro-text-secondary mt-1">Round: {tooltip.round}</div>
+					<div class="text-sm font-bold">{tooltip.modelName}</div>
+					<div class="text-xs mt-1">Round: {tooltip.round}</div>
 					{#if tooltip.rank !== null}
 						{#if isPercentile}
-							<div class="text-xs retro-text-accent">
+							<div class="text-xs">
 								Percentile: {formatPercentile(rankDisplayValue(tooltip.rank, tooltip.totalModels, 'percentile')!)}
 							</div>
 						{:else}
-							<div class="text-xs retro-text-accent">Rank: #{tooltip.rank}</div>
+							<div class="text-xs">Rank: #{tooltip.rank}</div>
 						{/if}
 					{:else}
-						<div class="text-xs retro-text-secondary">Not ranked (no stake)</div>
+						<div class="text-xs">Not ranked (no stake)</div>
+					{/if}
+					{#if tooltip.corr !== null}
+						<div class="text-xs">{metric1Label}{metricSuffix}: {tooltip.corr.toFixed(4)}</div>
+					{/if}
+					{#if tooltip.mmc !== null}
+						<div class="text-xs">{metric2Label}{metricSuffix}: {tooltip.mmc.toFixed(4)}</div>
 					{/if}
 					{#if tooltip.score !== null}
-						<div class="text-xs retro-text-secondary">Score: {tooltip.score.toFixed(4)}</div>
+						<div class="text-xs">Score: {tooltip.score.toFixed(4)}</div>
 					{/if}
 				</div>
 			{/if}
@@ -471,6 +620,12 @@
 
 	.rankings-chart {
 		display: block;
+	}
+
+	/* All tooltip text white for readability against the dark tooltip background. */
+	.rankings-tooltip,
+	.rankings-tooltip :global(*) {
+		color: #ffffff;
 	}
 
 	circle:hover {

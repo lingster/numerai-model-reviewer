@@ -144,6 +144,8 @@ describe('hasRankableData - unit tests', () => {
 		rankings: ranks.map((rank, i) => ({
 			roundNumber: 1000 + i,
 			rank,
+			corr: null,
+			mmc: null,
 			customScore: rank === null ? null : 0.01,
 			totalModels: rank === null ? 0 : 50
 		}))
@@ -176,6 +178,8 @@ describe('classifyRankingHistory - unit tests', () => {
 		rankings: rounds.map((r, i) => ({
 			roundNumber: 1000 + i,
 			rank: r.rank,
+			corr: null,
+			mmc: null,
 			customScore: r.rank === null ? null : 0.01,
 			totalModels: r.totalModels
 		}))
@@ -212,6 +216,8 @@ describe('latestRoundWithData - unit tests', () => {
 		rankings: rounds.map((r) => ({
 			roundNumber: r.roundNumber,
 			rank: r.totalModels > 0 ? 1 : null,
+			corr: null,
+			mmc: null,
 			customScore: null,
 			totalModels: r.totalModels
 		}))

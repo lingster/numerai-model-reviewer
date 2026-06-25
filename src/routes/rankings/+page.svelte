@@ -125,6 +125,27 @@
 		setRankingDisplayMode(mode);
 	}
 
+	// Rolling window for rank computation: 1 = per-round, 20/60 = trailing
+	// MMC20/CORR60-style averages (matches Numerai's leaderboard). The worker ranks
+	// the field on the windowed metric, so changing this re-fetches.
+	let rollingWindow = $state(1);
+	const ROLLING_WINDOWS: Array<{ label: string; value: number }> = [
+		{ label: 'Per round', value: 1 },
+		{ label: '20-round avg', value: 20 },
+		{ label: '60-round avg', value: 60 }
+	];
+
+	async function setRollingWindow(value: number) {
+		if (value === rollingWindow) return;
+		rollingWindow = value;
+		updateUrlParams();
+		// Re-rank with the new window if a chart is already loaded (or a user/models
+		// are selected so loadRankings has something to compute).
+		if (rankingHistories.length > 0 || modelsToRank.length > 0) {
+			await loadRankings();
+		}
+	}
+
 	// Rankings data
 	let rankingHistories = $state<ModelRankingHistory[]>([]);
 	let topModels = $state<RoundModelScore[]>([]);
@@ -302,7 +323,8 @@
 				selectedTournament,
 				(stage, loaded, total) => {
 					loadingProgress = { stage, loaded, total };
-				}
+				},
+				rollingWindow
 			);
 			rankingHistories = result.histories;
 			unrankedModels = result.unranked;
@@ -338,7 +360,7 @@
 	async function loadTopModelsForRound(round: number) {
 		// limit=0 → the worker returns the whole ranked field; we page it locally.
 		try {
-			topModels = await getTopModelsForRound(round, scoreFormula, selectedTournament, 0);
+			topModels = await getTopModelsForRound(round, scoreFormula, selectedTournament, 0, rollingWindow);
 		} catch (error) {
 			console.error('Error loading staked models:', error);
 			topModels = [];
@@ -485,6 +507,12 @@
 		url.searchParams.set('startRound', startRound.toString());
 		url.searchParams.set('endRound', endRound.toString());
 
+		if (rollingWindow > 1) {
+			url.searchParams.set('window', rollingWindow.toString());
+		} else {
+			url.searchParams.delete('window');
+		}
+
 		replaceState(url.toString(), {});
 	}
 
@@ -496,9 +524,11 @@
 		const modelsParam = url.searchParams.get('models');
 		const startParam = url.searchParams.get('startRound');
 		const endParam = url.searchParams.get('endRound');
+		const windowParam = url.searchParams.get('window');
 
 		if (startParam) startRound = parseInt(startParam, 10) || startRound;
 		if (endParam) endRound = parseInt(endParam, 10) || endRound;
+		if (windowParam) rollingWindow = Math.max(1, parseInt(windowParam, 10) || 1);
 		// endRound from a URL can point past the cache (empty tail) — clamp it.
 		clampRange();
 
@@ -782,6 +812,30 @@
 		</p>
 	</div>
 
+	<!-- Rolling Average Window -->
+	<div class="mb-6 rounded-lg retro-card p-6">
+		<div class="flex flex-wrap items-center gap-4">
+			<span class="text-sm font-medium retro-text-primary uppercase">Rolling Average:</span>
+			<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+				{#each ROLLING_WINDOWS as win (win.value)}
+					<button
+						onclick={() => setRollingWindow(win.value)}
+						class="px-3 py-1 text-sm font-medium transition-colors"
+						style={rollingWindow === win.value
+							? 'background-color: var(--retro-primary); color: white;'
+							: 'color: var(--retro-text-primary);'}
+					>
+						{win.label}
+					</button>
+				{/each}
+			</div>
+		</div>
+		<p class="mt-2 text-xs retro-text-secondary">
+			Ranks each round on the trailing N-round average of the {metric1Label}/{metric2Label} score,
+			like Numerai's {metric2Label}20 / {metric1Label}60 leaderboard columns. "Per round" uses each round's own score.
+		</p>
+	</div>
+
 	<!-- Round Range Configuration -->
 	<div class="mb-6 rounded-lg retro-card p-6">
 		<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Round Range</h2>
@@ -911,6 +965,9 @@
 				{startRound}
 				{endRound}
 				displayMode={rankingDisplayMode}
+				{metric1Label}
+				{metric2Label}
+				rollingWindow={rollingWindow}
 				onPointSelect={handleChartPointSelect}
 			/>
 		</div>

@@ -8,10 +8,14 @@
  *
  * The endpoint contract is pinned by worker/src/rankings-api.test.ts:
  *   GET /rankings/model-rank?modelName=&startRound=&endRound=&tournament=
- *                            &corrWeight=&mmcWeight=
+ *                            &corrWeight=&mmcWeight=&window=
  *   → { modelName, username, modelId, rounds: [{
  *       roundNumber, rank, corr, mmc, customScore, totalModels
  *     }] }
+ *
+ * `window` (default 1) ranks each round on the trailing N-round average of the
+ * metric (MMC20/CORR60-style) instead of the round's own value; the returned
+ * corr/mmc are then the windowed averages. window=1 is the per-round behaviour.
  *
  * For Signals, `corr` and `mmc` in the response are alpha and mpc respectively
  * — the frontend renders them under the same axes (the "New scoring" toggle
@@ -52,7 +56,7 @@ interface TopModelRow {
 	username: string;
 }
 
-interface RoundPerfRow {
+export interface RoundPerfRow {
 	model_name: string;
 	corr: number | null;
 	mmc: number | null;
@@ -72,6 +76,124 @@ function pickMetrics(row: RoundPerfRow, tournament: number): {
 		return { corrMetric: row.alpha, mmcMetric: row.mpc, tcMetric: null };
 	}
 	return { corrMetric: row.corr, mmcMetric: row.mmc, tcMetric: row.tc };
+}
+
+/** A corr/mmc/tc metric triple (already normalized for the tournament). */
+export interface MetricTriple {
+	corr: number | null;
+	mmc: number | null;
+	tc: number | null;
+}
+
+/** Custom score for a metric triple under the formula. null if no metric present. */
+function scoreFromMetrics(m: MetricTriple, formula: ScoreFormula): number | null {
+	if (m.corr === null && m.mmc === null && m.tc === null) return null;
+	const score =
+		formula.corrWeight * (m.corr ?? 0) +
+		formula.mmcWeight * (m.mmc ?? 0) +
+		(formula.tcWeight ?? 0) * (m.tc ?? 0);
+	return Number.isFinite(score) ? score : null;
+}
+
+/**
+ * Build, for every model, the trailing `window`-round average (by round number)
+ * of its corr/mmc/tc metrics at each round it has a row — i.e. the MMC20/CORR60
+ * style smoothing Numerai's leaderboard uses. Averages skip null values per
+ * metric (a metric with no non-null value in the window stays null), and the
+ * window is measured by round number so gaps (unstaked rounds) don't inflate it.
+ * Metrics are normalized per tournament first (Signals → alpha/mpc).
+ *
+ * Returns modelNameLower → (round → averaged MetricTriple). A model's entry for
+ * round r is the average over rounds in [r-window+1, r] that it actually has.
+ */
+export function buildWindowedMetrics(
+	fields: Map<number, RoundPerfRow[]>,
+	tournament: number,
+	window: number
+): Map<string, Map<number, MetricTriple>> {
+	// Group each model's per-round metrics together.
+	const perModel = new Map<string, Array<{ round: number } & MetricTriple>>();
+	for (const [round, rows] of fields) {
+		for (const row of rows) {
+			const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
+			const key = row.model_name.toLowerCase();
+			const entry = { round, corr: corrMetric, mmc: mmcMetric, tc: tcMetric };
+			const list = perModel.get(key);
+			if (list) list.push(entry);
+			else perModel.set(key, [entry]);
+		}
+	}
+
+	const result = new Map<string, Map<number, MetricTriple>>();
+	for (const [key, entries] of perModel) {
+		entries.sort((a, b) => a.round - b.round);
+
+		// Slide a width-`window` window (by round number) with running per-metric
+		// sums/counts so each round's average is O(1) amortized.
+		let lo = 0;
+		let sumCorr = 0, cntCorr = 0;
+		let sumMmc = 0, cntMmc = 0;
+		let sumTc = 0, cntTc = 0;
+		const apply = (e: { round: number } & MetricTriple, sign: 1 | -1) => {
+			if (e.corr !== null) { sumCorr += sign * e.corr; cntCorr += sign; }
+			if (e.mmc !== null) { sumMmc += sign * e.mmc; cntMmc += sign; }
+			if (e.tc !== null) { sumTc += sign * e.tc; cntTc += sign; }
+		};
+
+		const byRound = new Map<number, MetricTriple>();
+		for (let hi = 0; hi < entries.length; hi++) {
+			apply(entries[hi], 1);
+			while (entries[lo].round <= entries[hi].round - window) {
+				apply(entries[lo], -1);
+				lo++;
+			}
+			byRound.set(entries[hi].round, {
+				corr: cntCorr > 0 ? sumCorr / cntCorr : null,
+				mmc: cntMmc > 0 ? sumMmc / cntMmc : null,
+				tc: cntTc > 0 ? sumTc / cntTc : null
+			});
+		}
+		result.set(key, byRound);
+	}
+	return result;
+}
+
+/**
+ * Rank a single round's staked field using pre-averaged windowed metrics.
+ * `field` defines the ranked set (models staked at `round`); each model's score
+ * comes from its windowed average at that round.
+ */
+function rankRoundFromWindowed(
+	field: RoundPerfRow[],
+	round: number,
+	windowed: Map<string, Map<number, MetricTriple>>,
+	targetModelLower: string,
+	formula: ScoreFormula
+): ModelRankRoundResult {
+	const scored: Array<{ modelName: string; score: number; corr: number | null; mmc: number | null }> = [];
+	for (const row of field) {
+		const m = windowed.get(row.model_name.toLowerCase())?.get(round);
+		if (!m) continue;
+		const score = scoreFromMetrics(m, formula);
+		if (score === null) continue;
+		scored.push({ modelName: row.model_name, score, corr: m.corr, mmc: m.mmc });
+	}
+
+	scored.sort((a, b) => b.score - a.score);
+	const totalModels = scored.length;
+
+	const idx = scored.findIndex((s) => s.modelName.toLowerCase() === targetModelLower);
+	if (idx < 0) {
+		return { roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels };
+	}
+	return {
+		roundNumber: round,
+		rank: idx + 1,
+		corr: scored[idx].corr,
+		mmc: scored[idx].mmc,
+		customScore: scored[idx].score,
+		totalModels
+	};
 }
 
 /**
@@ -220,33 +342,52 @@ export async function getModelRank(
 		endRound: number;
 		tournament: number;
 		formula: ScoreFormula;
+		/**
+		 * Trailing round window for rank computation. 1 (default) ranks each round
+		 * on its own metrics. N>1 ranks each round on the trailing N-round average
+		 * of the metric (MMC20/CORR60-style), matching Numerai's leaderboard.
+		 */
+		window?: number;
 	}
 ): Promise<ModelRankResponse> {
 	const { modelName, startRound, endRound, tournament, formula } = params;
+	const window = Math.max(1, Math.floor(params.window ?? 1));
 	const targetLower = modelName.toLowerCase();
 
 	const meta = await lookupModel(env, modelName, tournament);
 
-	// Pull the whole range's field data in chunked queries up front (avoids a
-	// per-round N+1 that made "Last 500"/"All" take tens of seconds), then rank
-	// each round from the in-memory map.
-	const fields = await fetchRoundFields(env, startRound, endRound, tournament);
+	const empty = (r: number): ModelRankRoundResult => ({
+		roundNumber: r,
+		rank: null,
+		corr: null,
+		mmc: null,
+		customScore: null,
+		totalModels: 0
+	});
 
 	const rounds: ModelRankRoundResult[] = [];
-	for (let r = startRound; r <= endRound; r++) {
-		const field = fields.get(r) ?? [];
-		const ranked = rankRound(field, targetLower, tournament, formula);
-		if (ranked) {
-			rounds.push({ ...ranked, roundNumber: r });
-		} else {
-			rounds.push({
-				roundNumber: r,
-				rank: null,
-				corr: null,
-				mmc: null,
-				customScore: null,
-				totalModels: 0
-			});
+
+	if (window > 1) {
+		// Fetch back `window-1` extra rounds so the earliest target round still has
+		// a full trailing window, then average each model's metrics before ranking.
+		const fetchStart = Math.max(1, startRound - (window - 1));
+		const fields = await fetchRoundFields(env, fetchStart, endRound, tournament);
+		const windowed = buildWindowedMetrics(fields, tournament, window);
+		for (let r = startRound; r <= endRound; r++) {
+			const field = fields.get(r) ?? [];
+			rounds.push(
+				field.length === 0 ? empty(r) : rankRoundFromWindowed(field, r, windowed, targetLower, formula)
+			);
+		}
+	} else {
+		// Per-round ranking. Pull the whole range's field data in chunked queries up
+		// front (avoids a per-round N+1 that made "Last 500"/"All" take tens of
+		// seconds), then rank each round from the in-memory map.
+		const fields = await fetchRoundFields(env, startRound, endRound, tournament);
+		for (let r = startRound; r <= endRound; r++) {
+			const field = fields.get(r) ?? [];
+			const ranked = rankRound(field, targetLower, tournament, formula);
+			rounds.push(ranked ? { ...ranked, roundNumber: r } : empty(r));
 		}
 	}
 
@@ -330,13 +471,12 @@ export async function getTopModelsForRound(
 		tournament: number;
 		formula: ScoreFormula;
 		limit: number;
+		/** Trailing round window (see getModelRank). 1 = rank on this round alone. */
+		window?: number;
 	}
 ): Promise<TopModelEntry[]> {
 	const { round, tournament, formula, limit } = params;
-	const [field, usernames] = await Promise.all([
-		fetchRoundField(env, round, tournament),
-		fetchUsernameMap(env, tournament)
-	]);
+	const window = Math.max(1, Math.floor(params.window ?? 1));
 
 	const scored: Array<{
 		modelName: string;
@@ -344,15 +484,39 @@ export async function getTopModelsForRound(
 		corr: number | null;
 		mmc: number | null;
 	}> = [];
-	for (const row of field) {
-		const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
-		if (corrMetric === null && mmcMetric === null && tcMetric === null) continue;
-		const score =
-			formula.corrWeight * (corrMetric ?? 0) +
-			formula.mmcWeight * (mmcMetric ?? 0) +
-			(formula.tcWeight ?? 0) * (tcMetric ?? 0);
-		if (!Number.isFinite(score)) continue;
-		scored.push({ modelName: row.model_name, score, corr: corrMetric, mmc: mmcMetric });
+
+	let usernames: Map<string, string>;
+
+	if (window > 1) {
+		// Average each staked model's metrics over the trailing window before
+		// ranking, so the table matches the windowed chart (MMC20/CORR60).
+		const fetchStart = Math.max(1, round - (window - 1));
+		const [fields, userMap] = await Promise.all([
+			fetchRoundFields(env, fetchStart, round, tournament),
+			fetchUsernameMap(env, tournament)
+		]);
+		usernames = userMap;
+		const windowed = buildWindowedMetrics(fields, tournament, window);
+		const field = fields.get(round) ?? [];
+		for (const row of field) {
+			const m = windowed.get(row.model_name.toLowerCase())?.get(round);
+			if (!m) continue;
+			const score = scoreFromMetrics(m, formula);
+			if (score === null) continue;
+			scored.push({ modelName: row.model_name, score, corr: m.corr, mmc: m.mmc });
+		}
+	} else {
+		const [field, userMap] = await Promise.all([
+			fetchRoundField(env, round, tournament),
+			fetchUsernameMap(env, tournament)
+		]);
+		usernames = userMap;
+		for (const row of field) {
+			const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
+			const score = scoreFromMetrics({ corr: corrMetric, mmc: mmcMetric, tc: tcMetric }, formula);
+			if (score === null) continue;
+			scored.push({ modelName: row.model_name, score, corr: corrMetric, mmc: mmcMetric });
+		}
 	}
 
 	scored.sort((a, b) => b.score - a.score);

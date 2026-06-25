@@ -10,8 +10,8 @@ const histories: ModelRankingHistory[] = [
 		modelName: 'model_a',
 		username: 'alice',
 		rankings: [
-			{ roundNumber: 1179, rank: 5, customScore: 0.02, totalModels: 100 },
-			{ roundNumber: 1180, rank: 3, customScore: 0.03, totalModels: 100 }
+			{ roundNumber: 1179, rank: 5, corr: 0.02, mmc: 0.01, customScore: 0.02, totalModels: 100 },
+			{ roundNumber: 1180, rank: 3, corr: 0.03, mmc: 0.02, customScore: 0.03, totalModels: 100 }
 		]
 	},
 	{
@@ -19,8 +19,8 @@ const histories: ModelRankingHistory[] = [
 		modelName: 'model_b',
 		username: 'bob',
 		rankings: [
-			{ roundNumber: 1179, rank: 12, customScore: 0.01, totalModels: 100 },
-			{ roundNumber: 1180, rank: 9, customScore: 0.015, totalModels: 100 }
+			{ roundNumber: 1179, rank: 12, corr: 0.01, mmc: 0.005, customScore: 0.01, totalModels: 100 },
+			{ roundNumber: 1180, rank: 9, corr: 0.015, mmc: 0.008, customScore: 0.015, totalModels: 100 }
 		]
 	}
 ];

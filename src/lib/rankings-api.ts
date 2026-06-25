@@ -220,7 +220,9 @@ export async function calculateModelRankings(
 	endRound: number,
 	formula: ScoreFormula,
 	tournament: number = 8,
-	onProgress?: (stage: string, loaded: number, total: number) => void
+	onProgress?: (stage: string, loaded: number, total: number) => void,
+	/** Trailing round window (1 = per-round; 20/60 = MMC20/CORR60-style). */
+	window: number = 1
 ): Promise<ModelRankingsResult> {
 	if (selectedModels.length === 0) return { histories: [], unranked: [] };
 
@@ -233,7 +235,7 @@ export async function calculateModelRankings(
 		const batch = selectedModels.slice(i, i + BATCH_SIZE);
 		const batchResults = await Promise.all(
 			batch.map(async (ref) => {
-				const cacheKey = `model-rank:${ref.modelName.toLowerCase()}:t${tournament}:${startRound}-${endRound}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}`;
+				const cacheKey = `model-rank:${ref.modelName.toLowerCase()}:t${tournament}:${startRound}-${endRound}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}`;
 				const cached = swrCache.get<ModelRankingHistory>(cacheKey);
 				if (cached.data && !cached.isStale) return cached.data;
 
@@ -246,6 +248,7 @@ export async function calculateModelRankings(
 					url.searchParams.set('corrWeight', String(formula.corrWeight));
 					url.searchParams.set('mmcWeight', String(formula.mmcWeight));
 					url.searchParams.set('tcWeight', String(formula.tcWeight));
+					url.searchParams.set('window', String(window));
 
 					try {
 						const data = await getJson<ModelRankResponse>(url);
@@ -256,6 +259,8 @@ export async function calculateModelRankings(
 							rankings: data.rounds.map((r) => ({
 								roundNumber: r.roundNumber,
 								rank: r.rank,
+								corr: r.corr,
+								mmc: r.mmc,
 								customScore: r.customScore,
 								totalModels: r.totalModels
 							}))
@@ -305,9 +310,11 @@ export async function getTopModelsForRound(
 	roundNumber: number,
 	formula: ScoreFormula,
 	tournament: number = 8,
-	limit: number = 10
+	limit: number = 10,
+	/** Trailing round window (1 = per-round; 20/60 = MMC20/CORR60-style). */
+	window: number = 1
 ): Promise<RoundModelScore[]> {
-	const cacheKey = `top-models:r${roundNumber}:t${tournament}:l${limit}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}`;
+	const cacheKey = `top-models:r${roundNumber}:t${tournament}:l${limit}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}`;
 	const cached = swrCache.get<RoundModelScore[]>(cacheKey);
 	if (cached.data && !cached.isStale) return cached.data;
 
@@ -319,6 +326,7 @@ export async function getTopModelsForRound(
 		url.searchParams.set('corrWeight', String(formula.corrWeight));
 		url.searchParams.set('mmcWeight', String(formula.mmcWeight));
 		url.searchParams.set('tcWeight', String(formula.tcWeight));
+		url.searchParams.set('window', String(window));
 
 		try {
 			const top = await getJson<TopModelResponse[]>(url);

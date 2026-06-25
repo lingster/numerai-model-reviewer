@@ -167,7 +167,7 @@ export default {
         const status = await rankings.getCacheStatus(env, tournament);
         response = jsonResponse(status);
       }
-      // GET /rankings/top-models?round=&tournament=&limit=&corrWeight=&mmcWeight=
+      // GET /rankings/top-models?round=&tournament=&limit=&corrWeight=&mmcWeight=&window=
       else if (path === '/rankings/top-models' && request.method === 'GET') {
         const roundStr = url.searchParams.get('round');
         if (!roundStr) {
@@ -179,16 +179,17 @@ export default {
           const round = parseInt(roundStr);
           const tournament = parseInt(url.searchParams.get('tournament') || '8');
           const limit = parseInt(url.searchParams.get('limit') || '10');
+          const window = parseInt(url.searchParams.get('window') || '1');
           const formula: rankings.ScoreFormula = {
             corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
             mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
             tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
           };
-          const top = await rankings.getTopModelsForRound(env, { round, tournament, formula, limit });
+          const top = await rankings.getTopModelsForRound(env, { round, tournament, formula, limit, window });
           response = jsonResponse(top);
         }
       }
-      // GET /rankings/model-rank?modelName=&startRound=&endRound=&tournament=&corrWeight=&mmcWeight=
+      // GET /rankings/model-rank?modelName=&startRound=&endRound=&tournament=&corrWeight=&mmcWeight=&window=
       else if (path === '/rankings/model-rank' && request.method === 'GET') {
         const modelName = url.searchParams.get('modelName');
         const startRoundStr = url.searchParams.get('startRound');
@@ -208,6 +209,7 @@ export default {
             );
           } else {
             const tournament = parseInt(url.searchParams.get('tournament') || '8');
+            const window = parseInt(url.searchParams.get('window') || '1');
             const formula: rankings.ScoreFormula = {
               corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
               mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
@@ -218,7 +220,8 @@ export default {
               startRound,
               endRound,
               tournament,
-              formula
+              formula,
+              window
             });
             response = jsonResponse(result);
           }

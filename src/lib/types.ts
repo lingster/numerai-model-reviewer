@@ -155,6 +155,13 @@ export interface ModelRankingHistory {
 	rankings: Array<{
 		roundNumber: number;
 		rank: number | null;
+		/**
+		 * Per-round corr/mmc (alpha/mpc for Signals). When a rolling window is
+		 * active these are the windowed averages (e.g. MMC20/CORR60). Used to
+		 * overlay raw-metric lines on the rankings chart.
+		 */
+		corr: number | null;
+		mmc: number | null;
 		customScore: number | null;
 		totalModels: number;
 	}>;
