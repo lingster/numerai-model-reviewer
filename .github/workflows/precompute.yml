@@ -1,11 +1,16 @@
 name: Precompute Rankings
 
 # Refreshes the D1-backed rankings cache (top staked models + per-round
-# performance) for Classic and Signals. Runs the standalone precompute script
-# from worker/, which writes to the remote D1 via wrangler.
+# performance) for Classic, Signals and Crypto. Runs the standalone precompute
+# script from worker/, which writes to the remote D1 via wrangler.
 #
 # Runs in GitHub Actions rather than a worker cron because a full 5k-model
 # backfill exceeds a Cloudflare Worker's CPU budget.
+#
+# The precompute is incremental: it reads the last round already in D1 and only
+# fetches/writes newer rounds (plus a small overlap), so a daily run is small and
+# fast. The three tournament steps are decoupled via `!cancelled()` so a failure
+# in one no longer skips the others.
 
 on:
   schedule:
@@ -77,16 +82,19 @@ jobs:
       # Run Signals (tournament 11). Skipped if user picked 8 only.
       # Signals is per-model alpha/mpc fetch on top of profile — keep top-n
       # modest if you trigger this manually with a big N.
+      # `!cancelled()` decouples the tournaments: a failure in an earlier step no
+      # longer skips this one, while a manual cancel or timeout still stops it.
       - name: Precompute Signals
-        if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '11' }}
+        if: ${{ !cancelled() && (env.TOURNAMENT == 'all' || env.TOURNAMENT == '11') }}
         working-directory: worker
         run: npm run precompute:prod -- --tournament 11 --top-n "$TOP_N" --no-cache $RESET_FLAG
 
       # Run Crypto (tournament 12). Like Signals, performance is a per-model
       # v2RoundModelPerformances fetch (no profile query exists for crypto), so
       # it's slow on large fleets — keep top-n modest if triggered with a big N.
+      # `!cancelled()` so a Classic/Signals failure doesn't skip Crypto.
       - name: Precompute Crypto
-        if: ${{ env.TOURNAMENT == 'all' || env.TOURNAMENT == '12' }}
+        if: ${{ !cancelled() && (env.TOURNAMENT == 'all' || env.TOURNAMENT == '12') }}
         working-directory: worker
         run: npm run precompute:prod -- --tournament 12 --top-n "$TOP_N" --no-cache $RESET_FLAG
 

@@ -385,6 +385,41 @@ const CRYPTO_TOURNAMENT = 12;
 // all available history rather than truncating older rounds.
 const MAX_ROUNDS_HISTORY = 1000;
 
+// Incremental refresh re-fetches this many already-stored rounds below the last
+// round in D1, so a round that resolves (or is corrected by Numerai) slightly
+// late still gets picked up on the next run. Small: the overlap is pure re-work.
+const REFRESH_OVERLAP_ROUNDS = 2;
+
+/**
+ * The lowest round a run should fetch/store, given the highest round already in
+ * D1 for this tournament. Returns 0 (full backfill) when D1 is empty for the
+ * tournament (maxRoundInD1 === null) or on --reset; otherwise starts `overlap`
+ * rounds before the last stored round (never below 0). Pure — unit tested.
+ */
+export function computeMinRound(
+  maxRoundInD1: number | null,
+  reset: boolean,
+  overlap: number
+): number {
+  if (reset || maxRoundInD1 === null) return 0;
+  return Math.max(0, maxRoundInD1 - overlap + 1);
+}
+
+/**
+ * The `lastNRounds` window to request from v2RoundModelPerformances given the
+ * incremental floor. A full backfill (minRound === 0) requests the whole `cap`;
+ * otherwise just the current..minRound span, clamped to [1, cap]. Pure — unit
+ * tested.
+ */
+export function computeRoundsToFetch(
+  minRound: number,
+  currentRound: number,
+  cap: number
+): number {
+  if (minRound <= 0) return cap;
+  return Math.max(1, Math.min(cap, currentRound - minRound + 1));
+}
+
 type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
 
 // --- CSV cache ---
@@ -559,7 +594,8 @@ async function fetchBatchedPerformance(
   modelNames: string[],
   batchSize: number,
   rateLimitMs: number,
-  tournament: number
+  tournament: number,
+  minRound = 0
 ): Promise<Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>> {
   const results = new Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>();
   const isSignals = tournament === SIGNALS_TOURNAMENT;
@@ -615,6 +651,9 @@ async function fetchBatchedPerformance(
           // Signals: roundResolved is always false on this profile, so use
           // "has any score" as the resolved-proxy. Classic: trust the flag.
           .filter(r => {
+            // Incremental refresh: drop rounds already settled in D1 up front so
+            // they never enter memory or the D1 write path.
+            if (r.roundNumber < minRound) return false;
             if (isSignals) {
               return (
                 r.fncV4 !== null || r.corrV4 !== null ||
@@ -826,12 +865,42 @@ async function fetchCryptoPerformance(
 
 // --- D1 storage ---
 
+/**
+ * Highest round_number already stored in D1 for a tournament, or null when the
+ * tournament has no rows yet (first-ever backfill). Drives the incremental
+ * refresh: each run then only fetches/writes rounds at/after this (minus a small
+ * overlap) instead of rewriting the entire multi-million-row history every day.
+ * Best-effort: any read/parse failure returns null so the run falls back to a
+ * full backfill rather than aborting.
+ */
+async function getMaxRoundInD1(tournament: number, isLocal: boolean): Promise<number | null> {
+  const { execSync } = await import('child_process');
+  const flag = isLocal ? '--local' : '--remote';
+  try {
+    const out = execSync(
+      `wrangler d1 execute numerai-cache ${flag} --yes --json --command "SELECT MAX(round_number) AS maxRound FROM model_performances WHERE tournament = ${tournament}"`,
+      { cwd: process.cwd(), encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'] }
+    );
+    // wrangler --json emits an array of statement results: [{ results: [...] }].
+    const parsed = JSON.parse(out);
+    const results = Array.isArray(parsed) ? parsed[0]?.results : parsed?.results;
+    const maxRound = results?.[0]?.maxRound;
+    return typeof maxRound === 'number' ? maxRound : null;
+  } catch (error) {
+    console.warn(
+      `  Could not read max round from D1 (falling back to full backfill): ${(error as Error).message}`
+    );
+    return null;
+  }
+}
+
 async function storeInD1(
   topModels: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>,
   performanceData: Map<string, PerformanceRound[]>,
   tournament: number,
   isLocal: boolean,
-  reset: boolean
+  reset: boolean,
+  minRound = 0
 ): Promise<void> {
   const { execSync } = await import('child_process');
   const fs = await import('fs');
@@ -929,6 +998,9 @@ async function storeInD1(
     for (const [modelName, rounds] of performanceData) {
       const safeName = modelName.replace(/'/g, "''");
       for (const round of rounds) {
+        // Incremental refresh: skip rounds already settled in D1 (below the
+        // floor). The overlap window keeps the last few for late corrections.
+        if (round.roundNumber < minRound) continue;
         const corr = round.corr !== null ? round.corr : 'NULL';
         const mmc = round.mmc !== null ? round.mmc : 'NULL';
         const tc = round.tc !== null ? round.tc : 'NULL';
@@ -966,6 +1038,23 @@ async function main() {
 
   let allModels: TopModel[];
   let performanceData: Map<string, PerformanceRound[]>;
+
+  // Incremental refresh floor: only fetch/write rounds at/after the last round
+  // already in D1 (minus a small overlap). Full backfill (minRound 0) when D1 is
+  // empty for this tournament or on --reset. This keeps each daily run to a
+  // handful of new rounds instead of rewriting the entire history (which was
+  // OOMing/timing out and, being first in the job, blocking later tournaments).
+  const maxRoundInD1 = reset ? null : await getMaxRoundInD1(config.tournament, isLocal);
+  const minRound = computeMinRound(maxRoundInD1, reset, REFRESH_OVERLAP_ROUNDS);
+  if (reset) {
+    console.log('Refresh mode: --reset — full backfill.\n');
+  } else if (maxRoundInD1 === null) {
+    console.log('Refresh mode: full backfill (no existing rounds for this tournament).\n');
+  } else {
+    console.log(
+      `Refresh mode: incremental — D1 has rounds up to ${maxRoundInD1}; fetching from round ${minRound} (overlap ${REFRESH_OVERLAP_ROUNDS}).\n`
+    );
+  }
 
   const useCache = !noCache && cacheIsValid(config);
 
@@ -1031,15 +1120,18 @@ async function main() {
 
     // Step 4: Fetch performance data. Crypto has no profile query, so it reads
     // per-model v2RoundModelPerformances; Classic/Signals use batched profiles.
-    console.log(`Step 4: Fetching performance data for ${allModels.length} models...`);
+    // The incremental floor bounds how much history each path pulls.
+    const roundsToFetch = computeRoundsToFetch(minRound, currentRound, MAX_ROUNDS_HISTORY);
+    console.log(`Step 4: Fetching performance data for ${allModels.length} models (last ${roundsToFetch} rounds)...`);
     const modelNames = allModels.map(m => m.modelName);
     const fetched = config.tournament === CRYPTO_TOURNAMENT
-      ? await fetchCryptoPerformance(allModels, config.rateLimitMs)
+      ? await fetchCryptoPerformance(allModels, config.rateLimitMs, roundsToFetch)
       : await fetchBatchedPerformance(
           modelNames,
           config.batchSize,
           config.rateLimitMs,
-          config.tournament
+          config.tournament,
+          minRound
         );
 
     // Step 4b: For Signals, fetch alpha/mpc from submissionScores. This is a
@@ -1047,7 +1139,7 @@ async function main() {
     // Signals runs (config.topN drives it).
     if (config.tournament === SIGNALS_TOURNAMENT) {
       console.log(`Step 4b: Augmenting ${fetched.size} Signals models with alpha/mpc...`);
-      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.rateLimitMs);
+      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.rateLimitMs, roundsToFetch);
       console.log('  Alpha/mpc augmentation complete\n');
     }
 
@@ -1101,7 +1193,7 @@ async function main() {
 
   // Step 5: Store in D1
   console.log('Step 5: Storing in D1...');
-  await storeInD1(allModels, performanceData, config.tournament, isLocal, reset);
+  await storeInD1(allModels, performanceData, config.tournament, isLocal, reset, minRound);
   console.log('  Done!\n');
 
   console.log('=== Precomputation complete! ===');
