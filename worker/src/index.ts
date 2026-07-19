@@ -167,6 +167,19 @@ export default {
         const status = await rankings.getCacheStatus(env, tournament);
         response = jsonResponse(status);
       }
+      // GET /rankings/latest-resolved-round?tournament=8
+      // Boundary the frontend uses to shade "resolving" (not-yet-final) rounds.
+      // Best-effort: a Numerai hiccup returns null rather than failing the page.
+      else if (path === '/rankings/latest-resolved-round' && request.method === 'GET') {
+        const tournament = parseInt(url.searchParams.get('tournament') || '8');
+        let latestResolvedRound: number | null = null;
+        try {
+          latestResolvedRound = await rankings.getLatestResolvedRound(env, tournament);
+        } catch (e) {
+          console.error('latest-resolved-round fetch failed:', e instanceof Error ? e.message : e);
+        }
+        response = jsonResponse({ tournament, latestResolvedRound });
+      }
       // GET /rankings/top-models?round=&tournament=&limit=&corrWeight=&mmcWeight=&window=
       else if (path === '/rankings/top-models' && request.method === 'GET') {
         const roundStr = url.searchParams.get('round');

@@ -9,6 +9,7 @@
 		getTopModelsForRound,
 		getCurrentRound,
 		getCacheStatus,
+		getLatestResolvedRound,
 		DEFAULT_SCORE_FORMULA,
 		getDefaultFormulaForTournament,
 		latestRoundWithData,
@@ -83,10 +84,19 @@
 	let cacheLatestRound = $state<number | null>(null);
 	let cacheEarliestRound = $state<number | null>(null);
 
+	// Latest fully-resolved round for the tournament; rounds after it are still
+	// "resolving" (scored but not final) and get shaded in the chart. null =
+	// unknown / endpoint unavailable, in which case all rounds render as resolved.
+	let latestResolvedRound = $state<number | null>(null);
+
 	async function loadCacheStatus() {
 		const status = await getCacheStatus(selectedTournament);
 		cacheLatestRound = status?.latestRound ?? null;
 		cacheEarliestRound = status?.earliestRound ?? null;
+	}
+
+	async function loadLatestResolvedRound() {
+		latestResolvedRound = await getLatestResolvedRound(selectedTournament);
 	}
 
 	// Default round range: end at the last cached round (later rounds have no data
@@ -205,6 +215,8 @@
 
 		// Surface the cache's round coverage (non-blocking; safe if unavailable).
 		await loadCacheStatus();
+		// Resolution boundary for chart shading (fire-and-forget; chart reacts).
+		loadLatestResolvedRound();
 
 		// Default the range to the cache window: end at the last cached round (data
 		// past it is empty), start 30 rounds earlier. Falls back to currentRound-1
@@ -398,6 +410,7 @@
 			applyDefaultRange();
 			updateUrlParams();
 		});
+		loadLatestResolvedRound();
 
 		updateUrlParams();
 	}
@@ -968,6 +981,7 @@
 				{metric1Label}
 				{metric2Label}
 				rollingWindow={rollingWindow}
+				{latestResolvedRound}
 				onPointSelect={handleChartPointSelect}
 			/>
 		</div>

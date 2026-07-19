@@ -204,6 +204,30 @@ export async function getCacheStatus(tournament: number = 8): Promise<CacheStatu
 	}
 }
 
+/**
+ * Latest fully-resolved round for a tournament — the boundary above which rounds
+ * are still "resolving" (scored but not final). Returns null when unavailable
+ * (older worker or Numerai hiccup) so the chart simply treats all rounds as
+ * resolved.
+ */
+export async function getLatestResolvedRound(tournament: number = 8): Promise<number | null> {
+	const cacheKey = `latest-resolved-round:t${tournament}`;
+	const cached = swrCache.get<number | null>(cacheKey);
+	if (cached.data !== undefined && !cached.isStale) return cached.data;
+
+	try {
+		return await swrCache.fetch(cacheKey, async () => {
+			const url = new URL(`${config.apiUrl}/rankings/latest-resolved-round`);
+			url.searchParams.set('tournament', String(tournament));
+			const result = await getJson<{ tournament: number; latestResolvedRound: number | null }>(url);
+			return result.latestResolvedRound;
+		});
+	} catch (error) {
+		console.error('Error fetching latest resolved round:', error);
+		return null;
+	}
+}
+
 /** Compute the same custom score the worker uses — kept for UI display. */
 export function calculateCustomScore(
 	corr: number | null,

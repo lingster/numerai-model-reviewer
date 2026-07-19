@@ -9,6 +9,11 @@
 		rankDisplayValue,
 		type RankingDisplayMode
 	} from '$lib/utils/ranking-display.js';
+	import {
+		isRoundResolving,
+		passesResolutionFilter,
+		type ResolutionFilter
+	} from '$lib/utils/round-resolution.js';
 
 	// Props
 	let {
@@ -19,6 +24,7 @@
 		metric1Label = 'Corr',
 		metric2Label = 'MMC',
 		rollingWindow = 1,
+		latestResolvedRound = null,
 		onPointSelect
 	}: {
 		rankingHistories: ModelRankingHistory[];
@@ -33,9 +39,16 @@
 		/** Trailing round window the data was computed with (1 = per-round). Used to
 		 *  annotate the overlaid metric lines (e.g. "MMC (20r avg)"). */
 		rollingWindow?: number;
+		/** Latest fully-resolved round; rounds after it are "resolving" (scored but
+		 *  not final) and get shaded. null = boundary unknown, treat all as resolved. */
+		latestResolvedRound?: number | null;
 		/** Fired when a data point is clicked, with its round and model name. */
 		onPointSelect?: (round: number, modelName: string) => void;
 	} = $props();
+
+	// Resolved/resolving filter (chart-owned, mirrors the metric-overlay toggles).
+	// 'both' preserves the prior behaviour (all rounds shown, resolving shaded).
+	let resolutionFilter = $state<ResolutionFilter>('both');
 
 	const isPercentile = $derived(displayMode === 'percentile');
 
@@ -163,6 +176,41 @@
 			.curve(d3Shape.curveMonotoneX)
 	);
 
+	// ── Resolved vs resolving ───────────────────────────────────────────────────
+	// Filter each model's rounds ONCE per (filter, boundary, data) change, keyed by
+	// modelId, rather than re-filtering in the template for every line/point/overlay
+	// pass. Iterating visibleHistories (not copies) keeps object identity so the
+	// per-model colour lookup still works.
+	const displayedRankingsById = $derived.by(() => {
+		const byId = new Map<string, ModelRankingHistory['rankings']>();
+		for (const h of visibleHistories) {
+			byId.set(
+				h.modelId,
+				resolutionFilter === 'both'
+					? h.rankings
+					: h.rankings.filter(r =>
+							passesResolutionFilter(r.roundNumber, latestResolvedRound, resolutionFilter)
+						)
+			);
+		}
+		return byId;
+	});
+
+	// Whether any resolving round is on screen. Derived from the (clamped) visible
+	// domain so the toggle and the shaded band never disagree, and Classic — which
+	// stores resolved-only rounds — keeps the control hidden.
+	const resolvingOnScreen = $derived(isRoundResolving(roundRange[1], latestResolvedRound));
+	const showResolutionControls = $derived(resolvingOnScreen);
+
+	// x-region [latestResolvedRound, end] to shade, or null when nothing resolving
+	// is on screen (boundary unknown, filtered to resolved-only, or all resolved).
+	const resolvingBand = $derived.by((): { x: number; width: number } | null => {
+		if (latestResolvedRound === null || !resolvingOnScreen || resolutionFilter === 'resolved') return null;
+		const startX = Math.max(0, Math.min(width, xScale(latestResolvedRound + 0.5)));
+		const bandWidth = width - startX;
+		return bandWidth > 0 ? { x: startX, width: bandWidth } : null;
+	});
+
 	// ── Raw-metric overlay (secondary right axis) ───────────────────────────────
 	// Domain spans the enabled metrics across visible models, padded 10%. null
 	// when no overlay is active or there are no values to plot.
@@ -252,6 +300,7 @@
 		score: number | null;
 		corr: number | null;
 		mmc: number | null;
+		resolving: boolean;
 	}>({
 		visible: false,
 		x: 0,
@@ -262,7 +311,8 @@
 		totalModels: 0,
 		score: null,
 		corr: null,
-		mmc: null
+		mmc: null,
+		resolving: false
 	});
 
 	// Position the tooltip from the hovered/focused circle's own geometry. cx/cy
@@ -293,7 +343,8 @@
 			totalModels: dataPoint.totalModels,
 			score: dataPoint.customScore,
 			corr: dataPoint.corr,
-			mmc: dataPoint.mmc
+			mmc: dataPoint.mmc,
+			resolving: isRoundResolving(dataPoint.roundNumber, latestResolvedRound)
 		};
 	}
 
@@ -373,6 +424,28 @@
 			{/if}
 		</div>
 
+		<!-- Resolved / resolving toggle. Only shown when the data spans rounds that
+		     aren't final yet; those rounds are shaded so they read as provisional. -->
+		{#if showResolutionControls}
+			<div class="mb-4 flex flex-wrap items-center gap-3">
+				<span class="text-sm font-medium retro-text-secondary">Rounds:</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					{#each [{ v: 'both', label: 'Both' }, { v: 'resolved', label: 'Resolved' }, { v: 'resolving', label: 'Resolving' }] as opt}
+						<button
+							onclick={() => (resolutionFilter = opt.v as ResolutionFilter)}
+							class="px-3 py-1 text-sm font-medium transition-colors"
+							style={resolutionFilter === opt.v
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{opt.label}
+						</button>
+					{/each}
+				</div>
+				<span class="text-xs retro-text-secondary">Shaded region = resolving (scores not final yet).</span>
+			</div>
+		{/if}
+
 		<!-- SVG Chart -->
 		<div class="relative">
 			<svg
@@ -383,6 +456,27 @@
 				aria-label="Model rankings over time"
 			>
 				<g transform="translate({margin.left}, {margin.top})">
+					<!-- Resolving-rounds shading (drawn first, behind everything) -->
+					{#if resolvingBand}
+						<rect
+							x={resolvingBand.x}
+							y="0"
+							width={resolvingBand.width}
+							height={height}
+							fill="var(--retro-light-grey)"
+							opacity="0.18"
+						/>
+						<text
+							x={resolvingBand.x + 4}
+							y="12"
+							fill="var(--retro-text-dim)"
+							font-size="10"
+							font-style="italic"
+						>
+							resolving
+						</text>
+					{/if}
+
 					<!-- Grid lines -->
 					<g class="grid-lines">
 						<!-- Horizontal grid lines -->
@@ -512,8 +606,9 @@
 					{#if anyMetricOverlay}
 						{#each visibleHistories as history}
 							{@const color = getModelColor(rankingHistories.indexOf(history))}
+							{@const rankings = displayedRankingsById.get(history.modelId) ?? history.rankings}
 							{#if showMetric1}
-								{@const corrPath = corrLine(history.rankings)}
+								{@const corrPath = corrLine(rankings)}
 								{#if corrPath}
 									<path
 										d={corrPath}
@@ -526,7 +621,7 @@
 								{/if}
 							{/if}
 							{#if showMetric2}
-								{@const mmcPath = mmcLine(history.rankings)}
+								{@const mmcPath = mmcLine(rankings)}
 								{#if mmcPath}
 									<path
 										d={mmcPath}
@@ -543,7 +638,8 @@
 
 					<!-- Data lines -->
 					{#each visibleHistories as history, index}
-						{@const pathData = line(history.rankings)}
+						{@const rankings = displayedRankingsById.get(history.modelId) ?? history.rankings}
+						{@const pathData = line(rankings)}
 						{#if pathData}
 							<path
 								d={pathData}
@@ -556,12 +652,14 @@
 						{/if}
 
 						<!-- Data points -->
-						{#each history.rankings.filter(r => plotValue(r) !== null) as dataPoint}
+						{#each rankings.filter(r => plotValue(r) !== null) as dataPoint}
+							{@const resolving = isRoundResolving(dataPoint.roundNumber, latestResolvedRound)}
 							<circle
 								cx={xScale(dataPoint.roundNumber)}
 								cy={yScale(plotValue(dataPoint)!)}
 								r="4"
 								fill={getModelColor(rankingHistories.indexOf(history))}
+								fill-opacity={resolving ? 0.4 : 1}
 								stroke="var(--retro-bg-dark)"
 								stroke-width="1.5"
 								class="cursor-pointer hover:r-6 transition-all"
@@ -594,7 +692,12 @@
 					style="left: {tooltip.x + 10}px; top: {tooltip.y - 10}px; transform: translate(0, -100%);"
 				>
 					<div class="text-sm font-bold">{tooltip.modelName}</div>
-					<div class="text-xs mt-1">Round: {tooltip.round}</div>
+					<div class="text-xs mt-1">
+						Round: {tooltip.round}
+						{#if tooltip.resolving}
+							<span class="text-yellow-400">(resolving)</span>
+						{/if}
+					</div>
 					{#if tooltip.rank !== null}
 						{#if isPercentile}
 							<div class="text-xs">

@@ -552,29 +552,70 @@ export async function getTopModelsForRound(
  * since precompute may lag and the UI wants the freshest round to populate
  * its default range. Cached by the worker layer (KV) if desired.
  */
-export async function getCurrentRound(
+/** POST a `rounds(...)` GraphQL query to Numerai and return the parsed `rounds`
+ *  array. Shared by getCurrentRound / getLatestResolvedRound so the fetch,
+ *  error-handling, and typing live in one place. */
+async function fetchRounds<R>(
 	env: Env & { NUMERAI_API_URL: string },
+	query: string,
 	tournament: number
-): Promise<number> {
+): Promise<R[]> {
 	const response = await fetch(env.NUMERAI_API_URL, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			query: `query($tournament: Int!) { rounds(tournament: $tournament, limit: 1) { number } }`,
-			variables: { tournament }
-		})
+		body: JSON.stringify({ query, variables: { tournament } })
 	});
 	if (!response.ok) {
 		throw new Error(`Numerai API error: ${response.status}`);
 	}
 	const result = (await response.json()) as {
-		data?: { rounds?: Array<{ number: number }> };
+		data?: { rounds?: R[] };
 		errors?: Array<{ message: string }>;
 	};
 	if (result.errors?.length) {
 		throw new Error(result.errors.map((e) => e.message).join(', '));
 	}
-	const round = result.data?.rounds?.[0]?.number;
+	return result.data?.rounds ?? [];
+}
+
+export async function getCurrentRound(
+	env: Env & { NUMERAI_API_URL: string },
+	tournament: number
+): Promise<number> {
+	const rounds = await fetchRounds<{ number: number }>(
+		env,
+		`query($tournament: Int!) { rounds(tournament: $tournament, limit: 1) { number } }`,
+		tournament
+	);
+	const round = rounds[0]?.number;
 	if (!round) throw new Error('No rounds returned');
 	return round;
+}
+
+/** Highest round flagged resolved, or null if none. Pure — unit tested. */
+export function computeLatestResolvedRound(
+	rounds: Array<{ number: number; resolvedGeneral: boolean }>
+): number | null {
+	const resolved = rounds.filter((r) => r.resolvedGeneral).map((r) => r.number);
+	return resolved.length ? Math.max(...resolved) : null;
+}
+
+/**
+ * The latest fully-resolved round for a tournament, or null if none of the
+ * recent rounds are resolved. Crypto/Signals resolve with a lag (a run can be
+ * scored but not yet resolved), so the frontend uses this boundary to shade
+ * "resolving" rounds. Fetches the most recent rounds and takes the max resolved
+ * number (resolution is monotonic by round). Scans a generous window so the lag
+ * is always covered.
+ */
+export async function getLatestResolvedRound(
+	env: Env & { NUMERAI_API_URL: string },
+	tournament: number
+): Promise<number | null> {
+	const rounds = await fetchRounds<{ number: number; resolvedGeneral: boolean }>(
+		env,
+		`query($tournament: Int!) { rounds(tournament: $tournament, limit: 60) { number resolvedGeneral } }`,
+		tournament
+	);
+	return computeLatestResolvedRound(rounds);
 }

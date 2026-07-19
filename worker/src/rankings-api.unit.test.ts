@@ -7,7 +7,36 @@
  * — take tens of seconds), while still computing correct ranks.
  */
 import { describe, expect, it } from 'vitest';
-import { getCacheStatus, getModelRank } from './rankings-api';
+import { getCacheStatus, getModelRank, computeLatestResolvedRound } from './rankings-api';
+
+describe('computeLatestResolvedRound', () => {
+	it('returns the highest round with resolvedGeneral=true', () => {
+		const rounds = [
+			{ number: 1314, resolvedGeneral: false },
+			{ number: 1291, resolvedGeneral: false },
+			{ number: 1290, resolvedGeneral: true },
+			{ number: 1289, resolvedGeneral: true }
+		];
+		expect(computeLatestResolvedRound(rounds)).toBe(1290);
+	});
+
+	it('ignores order (picks the max, not the first)', () => {
+		const rounds = [
+			{ number: 1200, resolvedGeneral: true },
+			{ number: 1290, resolvedGeneral: true },
+			{ number: 1250, resolvedGeneral: true }
+		];
+		expect(computeLatestResolvedRound(rounds)).toBe(1290);
+	});
+
+	it('returns null when nothing is resolved', () => {
+		expect(computeLatestResolvedRound([{ number: 5, resolvedGeneral: false }])).toBeNull();
+	});
+
+	it('returns null for an empty list', () => {
+		expect(computeLatestResolvedRound([])).toBeNull();
+	});
+});
 
 type Row = {
 	round_number: number;
