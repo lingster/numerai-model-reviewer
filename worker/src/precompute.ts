@@ -176,33 +176,101 @@ interface GraphQLResponse<T> {
   errors?: Array<{ message: string }>;
 }
 
-async function graphqlQuery<T>(queryStr: string, variables?: Record<string, unknown>): Promise<T> {
-  const maxRetries = 5;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const response = await fetch(NUMERAI_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: queryStr, variables })
-    });
+// --- Retry / backoff ---
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      const isRateLimit = response.status === 429 || text.includes('rate limit');
-      if (isRateLimit && attempt < maxRetries) {
-        const delay = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s, 16s, 32s
-        console.log(`  Rate limited, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+const MAX_RETRIES = 5;
+/** Initial backoff when the server gives no Retry-After (then doubles). */
+export const RETRY_BASE_MS = 30_000;
+/** Ceiling for a single wait, so one request can't stall the run indefinitely. */
+export const RETRY_CAP_MS = 300_000;
+/** Upper bound of random jitter added to every backoff, to de-sync concurrent retries. */
+export const RETRY_JITTER_MS = 1_000;
+
+/**
+ * Parse an HTTP `Retry-After` value into milliseconds from now. Accepts both
+ * forms the spec allows: delta-seconds ("120") and an HTTP-date. Returns null
+ * when absent or unparseable (caller then falls back to exponential backoff).
+ */
+export function parseRetryAfterMs(
+  headerValue: string | null | undefined,
+  nowMs: number
+): number | null {
+  if (!headerValue) return null;
+  const trimmed = headerValue.trim();
+  if (/^\d+$/.test(trimmed)) return Math.max(0, parseInt(trimmed, 10) * 1000);
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - nowMs);
+  return null;
+}
+
+/**
+ * Backoff for a retry attempt, excluding jitter. When the server supplied a
+ * Retry-After (retryAfterMs != null) we respect it; otherwise back off
+ * exponentially from baseMs (30s, 60s, 120s, ...). Both are capped at capMs.
+ */
+export function computeBackoffMs(
+  attempt: number,
+  retryAfterMs: number | null,
+  baseMs = RETRY_BASE_MS,
+  capMs = RETRY_CAP_MS
+): number {
+  if (retryAfterMs !== null) return Math.min(capMs, retryAfterMs);
+  return Math.min(capMs, baseMs * Math.pow(2, attempt));
+}
+
+/** computeBackoffMs plus a small random jitter (0..RETRY_JITTER_MS). */
+function backoffWithJitter(attempt: number, retryAfterMs: number | null): number {
+  return computeBackoffMs(attempt, retryAfterMs) + Math.floor(Math.random() * RETRY_JITTER_MS);
+}
+
+async function graphqlQuery<T>(queryStr: string, variables?: Record<string, unknown>): Promise<T> {
+  let lastError: Error = new Error('Max retries exceeded');
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(NUMERAI_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: queryStr, variables })
+      });
+    } catch (networkError) {
+      // Transport failures (DNS, connection reset, TLS) are transient — retry.
+      lastError = networkError instanceof Error ? networkError : new Error(String(networkError));
+      if (attempt < MAX_RETRIES) {
+        const delay = backoffWithJitter(attempt, null);
+        console.log(`  Network error (${lastError.message}), retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(delay);
         continue;
       }
-      throw new Error(`API error: ${response.status} ${response.statusText}`);
+      throw lastError;
+    }
+
+    if (!response.ok) {
+      // 429 (rate limit) and 5xx (server) are transient; other 4xx are not.
+      const retryable = response.status === 429 || response.status >= 500;
+      if (retryable && attempt < MAX_RETRIES) {
+        const retryAfterMs =
+          response.status === 429 ? parseRetryAfterMs(response.headers.get('retry-after'), Date.now()) : null;
+        const delay = backoffWithJitter(attempt, retryAfterMs);
+        const reason = response.status === 429 ? 'Rate limited' : `Server error ${response.status}`;
+        const src = retryAfterMs !== null ? ' [Retry-After]' : '';
+        console.log(`  ${reason}, retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})${src}...`);
+        await sleep(delay);
+        continue;
+      }
+      const text = await response.text().catch(() => '');
+      throw new Error(`API error: ${response.status} ${response.statusText}${text ? ` — ${text.slice(0, 200)}` : ''}`);
     }
 
     const result: GraphQLResponse<T> = await response.json() as GraphQLResponse<T>;
     if (result.errors?.length) {
+      // Body-level rate limit (HTTP 200 + error message) — no header available,
+      // so fall back to exponential backoff.
       const isRateLimit = result.errors.some(e => e.message.toLowerCase().includes('rate limit'));
-      if (isRateLimit && attempt < maxRetries) {
-        const delay = Math.pow(2, attempt + 1) * 1000;
-        console.log(`  Rate limited, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+      if (isRateLimit && attempt < MAX_RETRIES) {
+        const delay = backoffWithJitter(attempt, null);
+        console.log(`  Rate limited (body), retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(delay);
         continue;
       }
@@ -213,7 +281,7 @@ async function graphqlQuery<T>(queryStr: string, variables?: Record<string, unkn
     }
     return result.data;
   }
-  throw new Error('Max retries exceeded');
+  throw lastError;
 }
 
 async function getCurrentRound(tournament: number): Promise<number> {
@@ -236,11 +304,14 @@ async function getCurrentRound(tournament: number): Promise<number> {
 async function fetchModelAccountMap(
   tournament: number,
   batchSize: number,
-  rateLimitMs: number
+  rateLimitMs: number,
+  concurrency: number
 ): Promise<Map<string, string>> {
   const map = new Map<string, string>();
 
-  // 1. Collect account usernames from the (account-level) leaderboard.
+  // 1. Collect account usernames from the (account-level) leaderboard. Paging is
+  // sequential (offset depends on the previous page) and short, so keep the
+  // rateLimitMs pacing here.
   const accounts: string[] = [];
   const pageSize = 500;
   let offset = 0;
@@ -260,8 +331,15 @@ async function fetchModelAccountMap(
   }
 
   // 2. Read each account's models for this tournament and invert to model→account.
+  // Fan the aliased-account-profile batches out concurrently (this pass was the
+  // fixed per-crypto-run cost; graphqlQuery handles 429 backoff).
+  const acctBatches: string[][] = [];
   for (let i = 0; i < accounts.length; i += batchSize) {
-    const batch = accounts.slice(i, i + batchSize);
+    acctBatches.push(accounts.slice(i, i + batchSize));
+  }
+  let processed = 0;
+  let lastLogged = 0;
+  await mapWithConcurrency(acctBatches, concurrency, async (batch, batchIdx) => {
     const aliases = batch.map(
       (username, idx) =>
         `a${idx}: accountProfile(username: ${JSON.stringify(username)}, tournament: ${tournament}) {
@@ -280,10 +358,14 @@ async function fetchModelAccountMap(
         }
       }
     } catch (error) {
-      console.error(`  Error building account map at index ${i}:`, error instanceof Error ? error.message : error);
+      console.error(`  Error building account map (batch ${batchIdx}):`, error instanceof Error ? error.message : error);
     }
-    if (i + batchSize < accounts.length) await sleep(rateLimitMs);
-  }
+    processed += batch.length;
+    if (processed - lastLogged >= 300 || processed >= accounts.length) {
+      lastLogged = processed;
+      console.log(`  Resolved account models for ${processed}/${accounts.length} accounts...`);
+    }
+  });
 
   return map;
 }
@@ -1204,7 +1286,7 @@ async function main() {
     let cryptoAccountMap = new Map<string, string>();
     if (config.tournament === CRYPTO_TOURNAMENT) {
       console.log('Step 4c: Resolving owning accounts for Crypto models...');
-      cryptoAccountMap = await fetchModelAccountMap(config.tournament, config.batchSize, config.rateLimitMs);
+      cryptoAccountMap = await fetchModelAccountMap(config.tournament, config.batchSize, config.rateLimitMs, config.concurrency);
       console.log(`  Resolved ${cryptoAccountMap.size} model→account mappings\n`);
     }
 

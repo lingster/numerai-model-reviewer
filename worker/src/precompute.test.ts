@@ -5,7 +5,15 @@
  * check), so only the pure functions run here — no API calls.
  */
 import { describe, it, expect } from 'vitest';
-import { extractCryptoMetrics, computeMinRound, computeRoundsToFetch } from './precompute';
+import {
+  extractCryptoMetrics,
+  computeMinRound,
+  computeRoundsToFetch,
+  parseRetryAfterMs,
+  computeBackoffMs,
+  RETRY_BASE_MS,
+  RETRY_CAP_MS
+} from './precompute';
 
 describe('extractCryptoMetrics', () => {
   it('pulls corr and mmc out of crypto submissionScores', () => {
@@ -79,5 +87,62 @@ describe('computeRoundsToFetch (lastNRounds bound)', () => {
   it('always fetches at least one round', () => {
     // Defensive: minRound ahead of current round should not yield 0/negative.
     expect(computeRoundsToFetch(1300, 1290, 1000)).toBe(1);
+  });
+});
+
+describe('parseRetryAfterMs (429 Retry-After)', () => {
+  const NOW = 1_000_000_000_000; // fixed clock
+
+  it('returns null for missing/empty values', () => {
+    expect(parseRetryAfterMs(null, NOW)).toBeNull();
+    expect(parseRetryAfterMs(undefined, NOW)).toBeNull();
+    expect(parseRetryAfterMs('', NOW)).toBeNull();
+  });
+
+  it('parses delta-seconds into milliseconds', () => {
+    expect(parseRetryAfterMs('5', NOW)).toBe(5000);
+    expect(parseRetryAfterMs('0', NOW)).toBe(0);
+    expect(parseRetryAfterMs('120', NOW)).toBe(120000);
+  });
+
+  it('parses an HTTP-date relative to now', () => {
+    const when = new Date(NOW + 8000).toUTCString(); // whole-second precision
+    expect(parseRetryAfterMs(when, NOW)).toBe(8000);
+  });
+
+  it('clamps a past HTTP-date to 0', () => {
+    const past = new Date(NOW - 60000).toUTCString();
+    expect(parseRetryAfterMs(past, NOW)).toBe(0);
+  });
+
+  it('returns null for unparseable values', () => {
+    expect(parseRetryAfterMs('soon', NOW)).toBeNull();
+  });
+});
+
+describe('computeBackoffMs (exponential from 30s, respects Retry-After)', () => {
+  it('uses 30s as the initial backoff when no Retry-After is given', () => {
+    expect(computeBackoffMs(0, null)).toBe(RETRY_BASE_MS);
+    expect(RETRY_BASE_MS).toBe(30_000);
+  });
+
+  it('doubles per attempt', () => {
+    expect(computeBackoffMs(1, null)).toBe(60_000);
+    expect(computeBackoffMs(2, null)).toBe(120_000);
+    expect(computeBackoffMs(3, null)).toBe(240_000);
+  });
+
+  it('caps the exponential growth', () => {
+    expect(computeBackoffMs(4, null)).toBe(RETRY_CAP_MS); // 30s*16=480s -> capped
+    expect(computeBackoffMs(10, null)).toBe(RETRY_CAP_MS);
+  });
+
+  it('respects a server Retry-After over the exponential schedule', () => {
+    expect(computeBackoffMs(0, 5000)).toBe(5000);
+    expect(computeBackoffMs(3, 2000)).toBe(2000);
+  });
+
+  it('caps an oversized Retry-After', () => {
+    expect(computeBackoffMs(0, 999_999_999)).toBe(RETRY_CAP_MS);
   });
 });
