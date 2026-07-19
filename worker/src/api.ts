@@ -20,6 +20,7 @@ import {
   type RawRoundModelPerformance
 } from './mappers';
 import { ModelPerformance, NumeraiModel, NumeraiUser, RoundPerformance } from './types';
+import { d1Retry } from './d1-retry';
 
 export interface Env {
   NUMERAI_PUBLIC_KEY: string;
@@ -83,14 +84,16 @@ async function searchStakedUsernames(
 ): Promise<string[]> {
   if (!env.DB) return [];
   const like = `%${searchLower}%`;
-  const result = await env.DB.prepare(
-    `SELECT DISTINCT username FROM top_staked_models
-      WHERE username != '' AND (LOWER(username) LIKE ? OR LOWER(model_name) LIKE ?)
-      ORDER BY username
-      LIMIT ?`
-  )
-    .bind(like, like, limit)
-    .all<{ username: string }>();
+  const result = await d1Retry(() =>
+    env.DB.prepare(
+      `SELECT DISTINCT username FROM top_staked_models
+        WHERE username != '' AND (LOWER(username) LIKE ? OR LOWER(model_name) LIKE ?)
+        ORDER BY username
+        LIMIT ?`
+    )
+      .bind(like, like, limit)
+      .all<{ username: string }>()
+  );
   return (result.results ?? []).map((r) => r.username).filter(Boolean);
 }
 
@@ -537,12 +540,14 @@ async function findStakedModelInD1(
 ): Promise<NumeraiModel | null> {
   if (!env.DB) return null;
   try {
-    const row = await env.DB.prepare(
-      `SELECT model_id, model_name, username, tournament
-         FROM top_staked_models WHERE model_name = ? AND tournament = ?`
-    )
-      .bind(modelName, tournament)
-      .first<{ model_id: string; model_name: string; username: string; tournament: number }>();
+    const row = await d1Retry(() =>
+      env.DB.prepare(
+        `SELECT model_id, model_name, username, tournament
+           FROM top_staked_models WHERE model_name = ? AND tournament = ?`
+      )
+        .bind(modelName, tournament)
+        .first<{ model_id: string; model_name: string; username: string; tournament: number }>()
+    );
     if (!row) return null;
     return { id: row.model_id, name: row.model_name, username: row.username, tournament: row.tournament };
   } catch (e) {

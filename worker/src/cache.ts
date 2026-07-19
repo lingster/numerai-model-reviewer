@@ -3,22 +3,28 @@
  * Provides get/set operations with TTL support for the graphql_cache table
  */
 
+import { d1Retry } from './d1-retry';
+
 /**
  * Get a cached response from D1
  * Returns null if not found or expired
  */
 export async function getCached(db: D1Database, key: string): Promise<string | null> {
 	const now = Math.floor(Date.now() / 1000);
-	const row = await db.prepare(
-		'SELECT response_data, created_at, ttl_seconds FROM graphql_cache WHERE cache_key = ?'
-	).bind(key).first<{ response_data: string; created_at: number; ttl_seconds: number }>();
+	const row = await d1Retry(() =>
+		db.prepare(
+			'SELECT response_data, created_at, ttl_seconds FROM graphql_cache WHERE cache_key = ?'
+		).bind(key).first<{ response_data: string; created_at: number; ttl_seconds: number }>()
+	);
 
 	if (!row) return null;
 
 	// Check if expired
 	if (now - row.created_at > row.ttl_seconds) {
 		// Clean up expired entry asynchronously (best-effort)
-		await db.prepare('DELETE FROM graphql_cache WHERE cache_key = ?').bind(key).run().catch(() => {});
+		await d1Retry(() =>
+			db.prepare('DELETE FROM graphql_cache WHERE cache_key = ?').bind(key).run()
+		).catch(() => {});
 		return null;
 	}
 
@@ -35,9 +41,11 @@ export async function setCached(
 	ttlSeconds: number = 86400
 ): Promise<void> {
 	const now = Math.floor(Date.now() / 1000);
-	await db.prepare(
-		'INSERT OR REPLACE INTO graphql_cache (cache_key, response_data, created_at, ttl_seconds) VALUES (?, ?, ?, ?)'
-	).bind(key, data, now, ttlSeconds).run();
+	await d1Retry(() =>
+		db.prepare(
+			'INSERT OR REPLACE INTO graphql_cache (cache_key, response_data, created_at, ttl_seconds) VALUES (?, ?, ?, ?)'
+		).bind(key, data, now, ttlSeconds).run()
+	);
 }
 
 /**
@@ -80,9 +88,11 @@ export async function generateCacheKey(query: string, variables?: Record<string,
  */
 export async function cleanExpiredCache(db: D1Database): Promise<number> {
 	const now = Math.floor(Date.now() / 1000);
-	const result = await db.prepare(
-		'DELETE FROM graphql_cache WHERE (created_at + ttl_seconds) < ?'
-	).bind(now).run();
+	const result = await d1Retry(() =>
+		db.prepare(
+			'DELETE FROM graphql_cache WHERE (created_at + ttl_seconds) < ?'
+		).bind(now).run()
+	);
 	return result.meta.changes ?? 0;
 }
 
@@ -98,10 +108,10 @@ export async function getCacheStats(db: D1Database): Promise<{
 	const now = Math.floor(Date.now() / 1000);
 
 	const [cacheCount, expiredCount, modelCount, perfCount] = await Promise.all([
-		db.prepare('SELECT COUNT(*) as cnt FROM graphql_cache').first<{ cnt: number }>(),
-		db.prepare('SELECT COUNT(*) as cnt FROM graphql_cache WHERE (created_at + ttl_seconds) < ?').bind(now).first<{ cnt: number }>(),
-		db.prepare('SELECT COUNT(*) as cnt FROM top_staked_models').first<{ cnt: number }>(),
-		db.prepare('SELECT COUNT(*) as cnt FROM model_performances').first<{ cnt: number }>()
+		d1Retry(() => db.prepare('SELECT COUNT(*) as cnt FROM graphql_cache').first<{ cnt: number }>()),
+		d1Retry(() => db.prepare('SELECT COUNT(*) as cnt FROM graphql_cache WHERE (created_at + ttl_seconds) < ?').bind(now).first<{ cnt: number }>()),
+		d1Retry(() => db.prepare('SELECT COUNT(*) as cnt FROM top_staked_models').first<{ cnt: number }>()),
+		d1Retry(() => db.prepare('SELECT COUNT(*) as cnt FROM model_performances').first<{ cnt: number }>())
 	]);
 
 	return {

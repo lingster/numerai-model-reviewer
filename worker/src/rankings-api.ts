@@ -22,6 +22,7 @@
  * in the signals tab uses this same alias).
  */
 import { SIGNALS_TOURNAMENT } from './mappers';
+import { d1Retry } from './d1-retry';
 
 export interface Env {
 	DB: D1Database;
@@ -205,13 +206,15 @@ async function lookupModel(
 	modelName: string,
 	tournament: number
 ): Promise<TopModelRow | null> {
-	const row = await env.DB.prepare(
-		`SELECT model_id, model_name, username
-		   FROM top_staked_models
-		  WHERE LOWER(model_name) = LOWER(?) AND tournament = ?`
-	)
-		.bind(modelName, tournament)
-		.first<TopModelRow>();
+	const row = await d1Retry(() =>
+		env.DB.prepare(
+			`SELECT model_id, model_name, username
+			   FROM top_staked_models
+			  WHERE LOWER(model_name) = LOWER(?) AND tournament = ?`
+		)
+			.bind(modelName, tournament)
+			.first<TopModelRow>()
+	);
 	return row ?? null;
 }
 
@@ -234,9 +237,11 @@ async function fetchRoundField(
 			     FROM model_performances
 			    WHERE round_number = ? AND tournament = ?
 			      AND stake_value IS NOT NULL AND stake_value > 0`;
-	const result = await env.DB.prepare(sql)
-		.bind(round, tournament)
-		.all<RoundPerfRow>();
+	const result = await d1Retry(() =>
+		env.DB.prepare(sql)
+			.bind(round, tournament)
+			.all<RoundPerfRow>()
+	);
 	return result.results ?? [];
 }
 
@@ -266,9 +271,11 @@ async function fetchRoundFields(
 	const byRound = new Map<number, RoundPerfRow[]>();
 	for (let lo = startRound; lo <= endRound; lo += RANGE_CHUNK_ROUNDS) {
 		const hi = Math.min(lo + RANGE_CHUNK_ROUNDS - 1, endRound);
-		const result = await env.DB.prepare(sql)
-			.bind(lo, hi, tournament)
-			.all<RoundPerfRow & { round_number: number }>();
+		const result = await d1Retry(() =>
+			env.DB.prepare(sql)
+				.bind(lo, hi, tournament)
+				.all<RoundPerfRow & { round_number: number }>()
+		);
 		for (const r of result.results ?? []) {
 			const list = byRound.get(r.round_number);
 			if (list) list.push(r);
@@ -414,13 +421,15 @@ export interface CacheStatus {
  * Returns nulls when the cache holds no rows for the tournament.
  */
 export async function getCacheStatus(env: Env, tournament: number): Promise<CacheStatus> {
-	const row = await env.DB.prepare(
-		`SELECT MAX(round_number) AS latestRound, MIN(round_number) AS earliestRound
-		   FROM model_performances
-		  WHERE tournament = ?`
-	)
-		.bind(tournament)
-		.first<{ latestRound: number | null; earliestRound: number | null }>();
+	const row = await d1Retry(() =>
+		env.DB.prepare(
+			`SELECT MAX(round_number) AS latestRound, MIN(round_number) AS earliestRound
+			   FROM model_performances
+			  WHERE tournament = ?`
+		)
+			.bind(tournament)
+			.first<{ latestRound: number | null; earliestRound: number | null }>()
+	);
 	return {
 		tournament,
 		latestRound: row?.latestRound ?? null,
@@ -448,11 +457,13 @@ async function fetchUsernameMap(
 	env: Env,
 	tournament: number
 ): Promise<Map<string, string>> {
-	const result = await env.DB.prepare(
-		`SELECT model_name, username FROM top_staked_models WHERE tournament = ?`
-	)
-		.bind(tournament)
-		.all<{ model_name: string; username: string }>();
+	const result = await d1Retry(() =>
+		env.DB.prepare(
+			`SELECT model_name, username FROM top_staked_models WHERE tournament = ?`
+		)
+			.bind(tournament)
+			.all<{ model_name: string; username: string }>()
+	);
 	const map = new Map<string, string>();
 	for (const row of result.results ?? []) {
 		map.set(row.model_name.toLowerCase(), row.username);
