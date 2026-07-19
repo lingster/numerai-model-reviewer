@@ -1023,7 +1023,27 @@ async function storeInD1(
 
 // --- Main ---
 
+/**
+ * Prefix every console.log/warn/error with a UTC wall-clock time and seconds
+ * elapsed since the run started, so the CI log reveals which phase is slow
+ * (e.g. how long the per-model fetch loop takes vs. the D1 write). Installed
+ * from main() only — importing the module for unit tests leaves console alone.
+ */
+function installTimestampedLogging(): void {
+  const start = Date.now();
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  const stamp = (): string => {
+    const clock = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm (UTC)
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1).padStart(7, ' ');
+    return `[${clock} +${elapsed}s]`;
+  };
+  console.log = (...args: unknown[]) => orig.log(stamp(), ...args);
+  console.warn = (...args: unknown[]) => orig.warn(stamp(), ...args);
+  console.error = (...args: unknown[]) => orig.error(stamp(), ...args);
+}
+
 async function main() {
+  installTimestampedLogging();
   const { config, isLocal, noCache, reset } = buildConfig();
 
   console.log('\n=== Numerai Rankings Precompute ===');
