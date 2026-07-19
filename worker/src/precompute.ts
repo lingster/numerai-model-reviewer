@@ -48,7 +48,13 @@ const DEFAULT_CONFIG: PrecomputeConfig = {
   // trade throughput against rate-limit pushback. Replaces the old sequential
   // rateLimitMs sleep for those loops (rateLimitMs still paces the paged
   // leaderboard/account scans).
-  concurrency: 8,
+  //
+  // Tuned empirically against the live API (Jul 2026): both the crypto
+  // single-model query and the heavier 3-alias profile query saturate at ~20
+  // (a latency floor, not rate limiting — 0×429 observed up to 24). 16 keeps
+  // ~80% of peak with headroom for sustained runs; raise via --concurrency if
+  // the logs show no "Rate limited, retrying" lines.
+  concurrency: 16,
   users: [],
   models: []
 };
