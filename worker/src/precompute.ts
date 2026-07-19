@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
+import { mapWithConcurrency } from './concurrency';
 
 const NUMERAI_API_URL = 'https://api-tournament.numer.ai/graphql';
 
@@ -31,6 +32,7 @@ interface PrecomputeConfig {
   topN: number;
   batchSize: number;
   rateLimitMs: number;
+  concurrency: number;
   users: string[];
   models: string[];
 }
@@ -41,6 +43,12 @@ const DEFAULT_CONFIG: PrecomputeConfig = {
   // Max batchSize is 3 — higher values exceed the Numerai API rate limit
   batchSize: 3,
   rateLimitMs: 1000,
+  // Number of Numerai API requests in flight at once for the per-model/per-batch
+  // performance fetches. graphqlQuery backs off on 429, so this can be raised to
+  // trade throughput against rate-limit pushback. Replaces the old sequential
+  // rateLimitMs sleep for those loops (rateLimitMs still paces the paged
+  // leaderboard/account scans).
+  concurrency: 8,
   users: [],
   models: []
 };
@@ -63,6 +71,7 @@ function loadYamlConfig(): Partial<PrecomputeConfig> {
         topN: parsed.topN,
         batchSize: parsed.batchSize,
         rateLimitMs: parsed.rateLimitMs,
+        concurrency: parsed.concurrency,
         users: Array.isArray(parsed.users) ? parsed.users.filter(Boolean) : [],
         models: Array.isArray(parsed.models) ? parsed.models.filter(Boolean) : []
       };
@@ -109,10 +118,22 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
       case '--rate-limit':
         if (next) { overrides.rateLimitMs = parseInt(next, 10); i++; }
         break;
+      case '--concurrency':
+        if (next) { overrides.concurrency = parseInt(next, 10); i++; }
+        break;
     }
   }
 
   return { isLocal, noCache, reset, overrides };
+}
+
+/** Drop keys whose value is undefined so a missing yaml/cli field can't clobber
+ * a default when spread (loadYamlConfig lists every key, so an omitted one comes
+ * through as `undefined`). */
+function stripUndefined<T extends object>(obj: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v !== undefined)
+  ) as Partial<T>;
 }
 
 function buildConfig(): { config: PrecomputeConfig; isLocal: boolean; noCache: boolean; reset: boolean } {
@@ -122,8 +143,8 @@ function buildConfig(): { config: PrecomputeConfig; isLocal: boolean; noCache: b
   // Merge: defaults < yaml < cli args
   const config: PrecomputeConfig = {
     ...DEFAULT_CONFIG,
-    ...yamlConfig,
-    ...overrides,
+    ...stripUndefined(yamlConfig),
+    ...stripUndefined(overrides),
     // Merge arrays: yaml users + cli users (deduplicated)
     users: [...new Set([
       ...(yamlConfig.users ?? []),
@@ -593,7 +614,7 @@ function loadCache(): { allModels: TopModel[]; performanceData: Map<string, Perf
 async function fetchBatchedPerformance(
   modelNames: string[],
   batchSize: number,
-  rateLimitMs: number,
+  concurrency: number,
   tournament: number,
   minRound = 0
 ): Promise<Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>> {
@@ -601,9 +622,16 @@ async function fetchBatchedPerformance(
   const isSignals = tournament === SIGNALS_TOURNAMENT;
   const profileQuery = isSignals ? 'v2SignalsProfile' : 'v3UserProfile';
 
+  // Chunk into aliased batches, then fetch batches concurrently (graphqlQuery
+  // handles 429 backoff). Replaces the old one-request-then-sleep loop.
+  const batches: string[][] = [];
   for (let i = 0; i < modelNames.length; i += batchSize) {
-    const batch = modelNames.slice(i, i + batchSize);
+    batches.push(modelNames.slice(i, i + batchSize));
+  }
 
+  let completed = 0;
+  let lastLogged = 0;
+  await mapWithConcurrency(batches, concurrency, async (batch, batchIdx) => {
     const aliases = batch.map((name, idx) => {
       // Both profiles share the same selection set; the field names below are
       // present on both (nulls for whichever tournament doesn't populate them).
@@ -684,7 +712,7 @@ async function fetchBatchedPerformance(
         });
       }
     } catch (error) {
-      console.error(`  Error fetching batch at index ${i}:`, error);
+      console.error(`  Error fetching batch ${batchIdx}:`, error);
       for (const name of batch) {
         if (!results.has(name.toLowerCase())) {
           results.set(name.toLowerCase(), { modelId: '', accountName: '', rounds: [] });
@@ -692,18 +720,14 @@ async function fetchBatchedPerformance(
       }
     }
 
-    const completed = Math.min(i + batchSize, modelNames.length);
-    // batchSize is tiny (≈3, Numerai rate limit) so this loop runs thousands of
-    // times — throttle progress to keep CI logs readable.
-    const batchNum = Math.floor(i / batchSize) + 1;
-    if (batchNum % 50 === 0 || completed >= modelNames.length) {
+    // Concurrent workers finish out of order; throttle progress to ~every 150
+    // models so CI logs stay readable.
+    completed += batch.length;
+    if (completed - lastLogged >= 150 || completed >= modelNames.length) {
+      lastLogged = completed;
       console.log(`  Fetched performance for ${completed}/${modelNames.length} models...`);
     }
-
-    if (i + batchSize < modelNames.length) {
-      await sleep(rateLimitMs);
-    }
-  }
+  });
 
   return results;
 }
@@ -717,16 +741,20 @@ async function fetchBatchedPerformance(
 async function augmentWithAlphaMpc(
   byModel: Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>,
   tournament: number,
-  rateLimitMs: number,
+  concurrency: number,
   lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<void> {
+  // Option C: alpha/mpc are only needed for rounds we actually (re)fetched, so
+  // skip models with no new rounds. With the incremental round filter upstream,
+  // that's every model idle since the last run — a big cut on steady-state days.
+  const active = [...byModel.entries()].filter(([, e]) => e.modelId && e.rounds.length > 0);
+  const skipped = byModel.size - active.length;
+  if (skipped > 0) {
+    console.log(`  Skipping ${skipped}/${byModel.size} models with no new rounds (alpha/mpc)`);
+  }
   let processed = 0;
-  const total = byModel.size;
-  for (const [modelKey, entry] of byModel) {
-    if (!entry.modelId || entry.rounds.length === 0) {
-      processed++;
-      continue;
-    }
+  let lastLogged = 0;
+  await mapWithConcurrency(active, concurrency, async ([modelKey, entry]) => {
     try {
       const result = await graphqlQuery<{
         v2RoundModelPerformances: Array<{
@@ -766,11 +794,11 @@ async function augmentWithAlphaMpc(
     }
 
     processed++;
-    if (processed % 25 === 0) {
-      console.log(`  Augmented alpha/mpc for ${processed}/${total} models...`);
+    if (processed - lastLogged >= 50 || processed === active.length) {
+      lastLogged = processed;
+      console.log(`  Augmented alpha/mpc for ${processed}/${active.length} models...`);
     }
-    await sleep(rateLimitMs);
-  }
+  });
 }
 
 /**
@@ -801,21 +829,22 @@ export function extractCryptoMetrics(
  */
 async function fetchCryptoPerformance(
   models: TopModel[],
-  rateLimitMs: number,
+  concurrency: number,
   lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>> {
   const results = new Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>();
-  let processed = 0;
   const total = models.length;
+  let processed = 0;
+  let lastLogged = 0;
 
-  for (const m of models) {
+  await mapWithConcurrency(models, concurrency, async (m) => {
     const key = m.modelName.toLowerCase();
     // Crypto's owner column keeps the model name (cryptosignalsLeaderboard is
     // model-level), so accountName is left empty here.
     if (!m.modelId) {
       results.set(key, { modelId: '', accountName: '', rounds: [] });
       processed++;
-      continue;
+      return;
     }
     try {
       const data = await graphqlQuery<{
@@ -854,11 +883,11 @@ async function fetchCryptoPerformance(
     }
 
     processed++;
-    if (processed % 50 === 0 || processed === total) {
+    if (processed - lastLogged >= 250 || processed === total) {
+      lastLogged = processed;
       console.log(`  Fetched crypto performance for ${processed}/${total} models...`);
     }
-    await sleep(rateLimitMs);
-  }
+  });
 
   return results;
 }
@@ -1050,7 +1079,8 @@ async function main() {
   console.log(`Tournament:  ${config.tournament}`);
   console.log(`Top N:       ${config.topN}`);
   console.log(`Batch size:  ${config.batchSize}`);
-  console.log(`Rate limit:  ${config.rateLimitMs}ms`);
+  console.log(`Rate limit:  ${config.rateLimitMs}ms (paged scans only)`);
+  console.log(`Concurrency: ${config.concurrency} (performance fetches)`);
   console.log(`Users:       ${config.users.length > 0 ? config.users.join(', ') : '(none)'}`);
   console.log(`Models:      ${config.models.length > 0 ? config.models.join(', ') : '(none)'}`);
   console.log(`Cache:       ${noCache ? 'disabled (--no-cache)' : 'enabled'}`);
@@ -1142,14 +1172,14 @@ async function main() {
     // per-model v2RoundModelPerformances; Classic/Signals use batched profiles.
     // The incremental floor bounds how much history each path pulls.
     const roundsToFetch = computeRoundsToFetch(minRound, currentRound, MAX_ROUNDS_HISTORY);
-    console.log(`Step 4: Fetching performance data for ${allModels.length} models (last ${roundsToFetch} rounds)...`);
+    console.log(`Step 4: Fetching performance data for ${allModels.length} models (last ${roundsToFetch} rounds, concurrency ${config.concurrency})...`);
     const modelNames = allModels.map(m => m.modelName);
     const fetched = config.tournament === CRYPTO_TOURNAMENT
-      ? await fetchCryptoPerformance(allModels, config.rateLimitMs, roundsToFetch)
+      ? await fetchCryptoPerformance(allModels, config.concurrency, roundsToFetch)
       : await fetchBatchedPerformance(
           modelNames,
           config.batchSize,
-          config.rateLimitMs,
+          config.concurrency,
           config.tournament,
           minRound
         );
@@ -1159,7 +1189,7 @@ async function main() {
     // Signals runs (config.topN drives it).
     if (config.tournament === SIGNALS_TOURNAMENT) {
       console.log(`Step 4b: Augmenting ${fetched.size} Signals models with alpha/mpc...`);
-      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.rateLimitMs, roundsToFetch);
+      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.concurrency, roundsToFetch);
       console.log('  Alpha/mpc augmentation complete\n');
     }
 

@@ -12,8 +12,16 @@ topN: 10000
 # Max is 3 — higher values exceed the Numerai API rate limit
 batchSize: 3
 
-# Delay between API requests in milliseconds
+# Delay between API requests in milliseconds.
+# Only paces the paged leaderboard/account scans now; the per-model performance
+# fetches are governed by `concurrency` below instead.
 rateLimitMs: 1000
+
+# Number of Numerai API requests in flight at once for the per-model/per-batch
+# performance fetches (the main bottleneck). graphqlQuery retries with backoff on
+# HTTP 429, so this can be raised to trade speed against rate-limit pushback.
+# Lower it if you see frequent "Rate limited, retrying" lines in the logs.
+concurrency: 8
 
 # Specific user accounts to always include (their models will be fetched
 # even if they're not in the top N staked models)
