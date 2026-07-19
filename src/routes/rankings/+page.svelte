@@ -576,20 +576,22 @@
 		}
 	}
 
-	// Handle round selection for the staked-models table
-	async function onSelectRoundForTop10() {
-		if (selectedRoundForTop10 > 0) {
-			await loadTopModelsForRound(selectedRoundForTop10);
-		}
+	// Single entry point for changing the staked-models round: the number input,
+	// the up/down spinners, and chart-point selection all route through it so the
+	// [1, maxRound] bound lives in one place. Clamps, then refreshes the table.
+	// Works uniformly for all three tournaments (they share this table).
+	async function setRoundForTop10(round: number) {
+		const clamped = Math.min(maxRound, Math.max(1, Math.round(round)));
+		selectedRoundForTop10 = clamped;
+		await loadTopModelsForRound(clamped);
 	}
 
 	// Clicking a point in the ranking history jumps the table to that round and
 	// pages/scrolls so the clicked model sits in the middle of the view.
 	async function handleChartPointSelect(round: number, modelName: string) {
 		if (round <= 0) return;
-		selectedRoundForTop10 = round;
 		modelTableQuery = ''; // clear any filter so the model is in the full list
-		await loadTopModelsForRound(round);
+		await setRoundForTop10(round);
 
 		const idx = topModels.findIndex(
 			(m) => m.modelName.toLowerCase() === modelName.toLowerCase()
@@ -997,15 +999,37 @@
 					</h2>
 					<div class="flex items-center gap-2">
 						<label for="roundSelect" class="text-sm retro-text-secondary">Round:</label>
-						<input
-							id="roundSelect"
-							type="number"
-							bind:value={selectedRoundForTop10}
-							min="1"
-							max={maxRound}
-							onchange={onSelectRoundForTop10}
-							class="retro-input w-24 rounded-md px-2 py-1 text-sm"
-						/>
+						<div class="inline-flex items-center">
+							<button
+								type="button"
+								onclick={() => setRoundForTop10(selectedRoundForTop10 - 1)}
+								disabled={selectedRoundForTop10 <= 1}
+								aria-label="Previous round"
+								title="Previous round"
+								class="retro-input flex h-8 w-8 items-center justify-center rounded-l-md px-0 py-1 text-lg leading-none font-bold hover:retro-bg-primary disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								−
+							</button>
+							<input
+								id="roundSelect"
+								type="number"
+								bind:value={selectedRoundForTop10}
+								min="1"
+								max={maxRound}
+								onchange={() => setRoundForTop10(selectedRoundForTop10)}
+								class="retro-input w-20 rounded-none border-x-0 px-2 py-1 text-center text-sm"
+							/>
+							<button
+								type="button"
+								onclick={() => setRoundForTop10(selectedRoundForTop10 + 1)}
+								disabled={selectedRoundForTop10 >= maxRound}
+								aria-label="Next round"
+								title="Next round"
+								class="retro-input flex h-8 w-8 items-center justify-center rounded-r-md px-0 py-1 text-lg leading-none font-bold hover:retro-bg-primary disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								+
+							</button>
+						</div>
 					</div>
 				</div>
 				<p class="text-sm retro-text-secondary mt-1">
