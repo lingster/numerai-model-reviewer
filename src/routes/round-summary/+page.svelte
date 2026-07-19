@@ -479,7 +479,7 @@
 	}
 </script>
 
-<div class="mx-auto max-w-5xl px-4 py-8 {themeClass}">
+<div class="mx-auto max-w-5xl px-2 py-6 sm:px-6 sm:py-8 {themeClass}">
 	<h1 class="mb-2 text-3xl font-bold retro-text-accent uppercase tracking-wider">Round Summary</h1>
 	<p class="mb-6 text-sm retro-text-secondary">
 		Distribution of a metric across all staked models for one round, with your models marked.
@@ -499,7 +499,7 @@
 	</div>
 
 	<!-- Selection card -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="grid gap-4 md:grid-cols-2">
 			<div>
 				<label for="userSearch" class="block text-sm font-medium retro-text-primary">User</label>
@@ -537,7 +537,7 @@
 	</div>
 
 	<!-- Controls: round, metric, payout formula -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="grid gap-4 md:grid-cols-3">
 			<div>
 				<label for="round" class="block text-sm font-medium retro-text-primary">Round</label>
@@ -591,7 +591,7 @@
 
 	<!-- Chart -->
 	{#if field.length > 0}
-		<div class="mb-6 rounded-lg retro-card p-6">
+		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<h2 class="mb-1 text-lg font-medium retro-text-primary uppercase">Round {round} — {metricLabel(metric, selectedTournament)} distribution</h2>
 			<p class="mb-1 text-xs retro-text-secondary">{field.length} staked models. Hover a ◆ to see which model it is.</p>
 			{#if latestRoundSettling}

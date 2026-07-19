@@ -55,11 +55,22 @@
 	}
 
 	// Chart dimensions
-	const margin = { top: 40, right: 120, bottom: 60, left: 70 };
 	const BASE_HEIGHT = 400;
 	let containerWidth = $state(800);
 	let viewportHeight = $state(BASE_HEIGHT);
 	let screenHeight = $state(BASE_HEIGHT);
+
+	// Full-bleed on small screens: shrink the fixed plot margins so the drawable
+	// area fills the (narrow) mobile viewport instead of being lost to axis
+	// gutters. The wide right gutter is only needed when the secondary metric
+	// axis is overlaid.
+	const isNarrow = $derived(containerWidth < 640);
+	const margin = $derived({
+		top: isNarrow ? 28 : 40,
+		right: anyMetricOverlay ? (isNarrow ? 54 : 120) : isNarrow ? 16 : 40,
+		bottom: isNarrow ? 48 : 60,
+		left: isNarrow ? 46 : 70
+	});
 
 	// Cap at the smaller of BASE_HEIGHT, the visible browser viewport, and the
 	// device screen so the chart can never extend past what the user can see.
@@ -445,17 +456,19 @@
 								</text>
 							</g>
 						{/each}
-						<text
-							transform="rotate(-90)"
-							x={-height / 2}
-							y="-50"
-							text-anchor="middle"
-							fill="var(--retro-text)"
-							font-size="14"
-							font-weight="bold"
-						>
-							{isPercentile ? 'Percentile (higher is better)' : 'Rank (lower is better)'}
-						</text>
+						{#if !isNarrow}
+							<text
+								transform="rotate(-90)"
+								x={-height / 2}
+								y="-50"
+								text-anchor="middle"
+								fill="var(--retro-text)"
+								font-size="14"
+								font-weight="bold"
+							>
+								{isPercentile ? 'Percentile (higher is better)' : 'Rank (lower is better)'}
+							</text>
+						{/if}
 					</g>
 
 					<!-- Right (secondary) Axis: raw metric values when an overlay is on -->
@@ -476,19 +489,21 @@
 									</text>
 								</g>
 							{/each}
-							<text
-								transform="rotate(-90)"
-								x={-height / 2}
-								y="56"
-								text-anchor="middle"
-								fill="var(--retro-text)"
-								font-size="14"
-								font-weight="bold"
-							>
-								{[showMetric1 ? metric1Label : null, showMetric2 ? metric2Label : null]
-									.filter(Boolean)
-									.join(' / ')}{metricSuffix}
-							</text>
+							{#if !isNarrow}
+								<text
+									transform="rotate(-90)"
+									x={-height / 2}
+									y="56"
+									text-anchor="middle"
+									fill="var(--retro-text)"
+									font-size="14"
+									font-weight="bold"
+								>
+									{[showMetric1 ? metric1Label : null, showMetric2 ? metric2Label : null]
+										.filter(Boolean)
+										.join(' / ')}{metricSuffix}
+								</text>
+							{/if}
 						</g>
 					{/if}
 

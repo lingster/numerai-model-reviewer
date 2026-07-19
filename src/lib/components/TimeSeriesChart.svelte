@@ -693,12 +693,16 @@
 	// Chart dimensions
 	const chartHeight = 450;
 	const marginTop = 30;
-	const marginRight = 70;
 	const marginBottom = 70;
-	const marginLeft = 70;
 
 	let chartContainer: HTMLDivElement | null = $state(null);
 	let chartWidth = $state(800);
+
+	// Shrink the side gutters on narrow (mobile) viewports so the plot uses the
+	// full width instead of losing 140px to the fixed 70px axis margins.
+	const isNarrow = $derived(chartWidth < 640);
+	const marginRight = $derived(isNarrow ? 44 : 70);
+	const marginLeft = $derived(isNarrow ? 44 : 70);
 
 	// Brush scale for the overview area (must be after chartWidth/margin definitions)
 	const brushScale = $derived(
@@ -932,7 +936,7 @@
 		{@const xScale = scaleTime().domain(xDomainDates).range([marginLeft, chartWidth - marginRight])}
 
 		<div
-			class="chart-container relative p-8"
+			class="chart-container relative p-2 md:p-8"
 			style="height: {chartHeight}px;"
 			bind:this={chartContainer}
 		>

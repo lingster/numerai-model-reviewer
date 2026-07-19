@@ -28,12 +28,21 @@
 		endRound: number;
 	} = $props();
 
-	const margin = { top: 40, right: 120, bottom: 60, left: 70 };
 	const CHART_HEIGHT = 400;
 	let containerWidth = $state(800);
 
+	// Tighter side/top gutters on narrow (mobile) viewports so the plot uses the
+	// full available width instead of losing it to fixed axis margins.
+	const isNarrow = $derived(containerWidth < 640);
+	const margin = $derived({
+		top: isNarrow ? 28 : 40,
+		right: isNarrow ? 16 : 40,
+		bottom: isNarrow ? 48 : 60,
+		left: isNarrow ? 46 : 70
+	});
+
 	const width = $derived(Math.max(containerWidth - margin.left - margin.right, 100));
-	const height = CHART_HEIGHT - margin.top - margin.bottom;
+	const height = $derived(CHART_HEIGHT - margin.top - margin.bottom);
 
 	const visibleSeries = $derived(series.filter(s => s.visible));
 
@@ -239,17 +248,19 @@
 								</text>
 							</g>
 						{/each}
-						<text
-							transform="rotate(-90)"
-							x={-height / 2}
-							y="-50"
-							text-anchor="middle"
-							fill="var(--retro-text)"
-							font-size="14"
-							font-weight="bold"
-						>
-							Rank (lower is better)
-						</text>
+						{#if !isNarrow}
+							<text
+								transform="rotate(-90)"
+								x={-height / 2}
+								y="-50"
+								text-anchor="middle"
+								fill="var(--retro-text)"
+								font-size="14"
+								font-weight="bold"
+							>
+								Rank (lower is better)
+							</text>
+						{/if}
 					</g>
 
 					<!-- Data lines -->

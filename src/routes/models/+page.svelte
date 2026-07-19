@@ -765,7 +765,7 @@
 
 <svelte:window onclick={handleClickOutside} />
 
-<div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 {themeClass}">
+<div class="mx-auto max-w-7xl px-2 py-6 sm:px-6 sm:py-8 lg:px-8 {themeClass}">
 	<div class="mb-8">
 		<h1 class="text-3xl font-bold retro-text-accent uppercase tracking-wider">NMR - NUMERAI MODEL REVIEWER</h1>
 		<p class="mt-2 retro-text-secondary">Compare {TOURNAMENT_INFO[selectedTournament].name} tournament model performance</p>
@@ -803,7 +803,7 @@
 	</div>
 
 	<!-- Model Selection -->
-	<div id="section-model-selection" class="mb-6 rounded-lg retro-card p-6">
+	<div id="section-model-selection" class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="mb-4 flex items-center justify-between">
 			<h2 id="heading-select-models" class="text-lg font-medium retro-text-primary uppercase">Select Models</h2>
 			<div class="flex gap-2">
@@ -995,7 +995,7 @@
 	</div>
 
 	<!-- Date Range and Chart Controls -->
-	<div id="section-chart-config" class="mb-6 rounded-lg retro-card p-6">
+	<div id="section-chart-config" class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<h2 id="heading-chart-config" class="mb-4 text-lg font-medium retro-text-primary uppercase">Chart Configuration</h2>
 
 		<div class="grid gap-4 md:grid-cols-3">
@@ -1105,7 +1105,7 @@
 
 	<!-- Performance Chart -->
 	{#if modelPerformance.length > 0}
-		<div class="mb-6 rounded-lg retro-card p-6">
+		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<button
 				type="button"
 				class="flex w-full items-center justify-between text-left"
@@ -1164,7 +1164,7 @@
 
 	<!-- Time Series Performance Chart -->
 	{#if modelPerformance.length > 0}
-		<div class="mb-6 rounded-lg retro-card p-6">
+		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<div class="mb-4">
 				<h3 class="text-lg font-medium retro-text-primary uppercase">Performance Over Time</h3>
 				<p class="text-sm retro-text-secondary mt-1">
@@ -1268,7 +1268,7 @@
 
 	<!-- Saved Charts -->
 	{#if savedCharts.length > 0}
-		<div class="mt-6 rounded-lg retro-card p-6">
+		<div class="mt-6 rounded-lg retro-card p-3 sm:p-6">
 			<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Saved Charts</h2>
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				{#each savedCharts as chart}

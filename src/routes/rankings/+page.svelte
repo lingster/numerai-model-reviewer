@@ -596,7 +596,7 @@
 	<title>NMR Rankings - {TOURNAMENT_INFO[selectedTournament].name} | Numerai Model Reviewer</title>
 </svelte:head>
 
-<div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 {themeClass}">
+<div class="mx-auto max-w-7xl px-2 py-6 sm:px-6 sm:py-8 lg:px-8 {themeClass}">
 	<div class="mb-8">
 		<h1 class="text-3xl font-bold retro-text-accent uppercase tracking-wider">MODEL RANKINGS</h1>
 		<p class="mt-2 retro-text-secondary">Track model rank performance over time using custom scoring</p>
@@ -634,7 +634,7 @@
 	</div>
 
 	<!-- Model Selection -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Select Models to Track</h2>
 
 		<div class="grid gap-4 md:grid-cols-2">
@@ -737,7 +737,7 @@
 	</div>
 
 	<!-- Score Formula Configuration -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="flex items-center justify-between mb-4">
 			<h2 class="text-lg font-medium retro-text-primary uppercase">Score Formula</h2>
 			<button
@@ -783,7 +783,7 @@
 	</div>
 
 	<!-- Ranking Display Mode -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="flex flex-wrap items-center gap-4">
 			<span class="text-sm font-medium retro-text-primary uppercase">Display:</span>
 			<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
@@ -813,7 +813,7 @@
 	</div>
 
 	<!-- Rolling Average Window -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="flex flex-wrap items-center gap-4">
 			<span class="text-sm font-medium retro-text-primary uppercase">Rolling Average:</span>
 			<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
@@ -837,7 +837,7 @@
 	</div>
 
 	<!-- Round Range Configuration -->
-	<div class="mb-6 rounded-lg retro-card p-6">
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Round Range</h2>
 
 		<div class="grid gap-4 md:grid-cols-3">
@@ -957,7 +957,7 @@
 
 	<!-- Rankings Chart -->
 	{#if rankingHistories.length > 0}
-		<div class="mb-6 rounded-lg retro-card p-6">
+		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Ranking History</h2>
 			<p class="mb-2 text-xs retro-text-secondary">Click a point to jump the table below to that round and model.</p>
 			<RankingsChart

@@ -1,11 +1,11 @@
-<div class="mx-auto max-w-4xl px-4 py-8">
+<div class="mx-auto max-w-4xl px-2 py-6 sm:px-6 sm:py-8">
 	<h1 class="mb-6 text-4xl font-bold retro-text-accent uppercase tracking-wider">NMR - NUMERAI MODEL REVIEWER</h1>
 	<p class="mb-8 text-lg retro-text-secondary">
 		► Compare and analyze the performance of Numerai tournament models over time.
 	</p>
 	
 	<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-		<div class="retro-card rounded-lg p-6">
+		<div class="retro-card rounded-lg p-4 sm:p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Model Comparison</h2>
 			<p class="mb-4 retro-text-secondary">
 				Search for users and their models, compare performance metrics, and visualize results over custom date ranges.
@@ -21,7 +21,7 @@
 			</a>
 		</div>
 
-		<div class="retro-card rounded-lg p-6">
+		<div class="retro-card rounded-lg p-4 sm:p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Model Rankings</h2>
 			<p class="mb-4 retro-text-secondary">
 				Track model rank performance over time. Compare against top staked models using custom scoring formulas.
@@ -37,7 +37,7 @@
 			</a>
 		</div>
 
-		<div class="retro-card rounded-lg p-6">
+		<div class="retro-card rounded-lg p-4 sm:p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Round Summary</h2>
 			<p class="mb-4 retro-text-secondary">
 				See the distribution of a metric across all staked models for a single round, with your models marked on the curve.
@@ -53,7 +53,7 @@
 			</a>
 		</div>
 
-		<div class="retro-card rounded-lg p-6">
+		<div class="retro-card rounded-lg p-4 sm:p-6">
 			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase">Features</h2>
 			<ul class="space-y-2 retro-text-secondary">
 				<li class="flex items-center">

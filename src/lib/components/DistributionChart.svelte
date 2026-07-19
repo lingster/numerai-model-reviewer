@@ -61,10 +61,18 @@
 		return (b.x0 + b.x1) / 2 >= 0 ? 'var(--retro-success)' : 'var(--retro-error)';
 	}
 
-	const margin = { top: 30, right: 24, bottom: 50, left: 56 };
 	const BASE_HEIGHT = 360;
 	let containerWidth = $state(800);
 	const containerHeight = BASE_HEIGHT;
+
+	// Tighter margins on narrow (mobile) screens so the histogram fills the width.
+	const isNarrow = $derived(containerWidth < 640);
+	const margin = $derived({
+		top: isNarrow ? 24 : 30,
+		right: isNarrow ? 16 : 24,
+		bottom: isNarrow ? 46 : 50,
+		left: isNarrow ? 40 : 56
+	});
 
 	const width = $derived(Math.max(containerWidth - margin.left - margin.right, 100));
 	const height = $derived(Math.max(containerHeight - margin.top - margin.bottom, 100));
@@ -274,7 +282,9 @@
 
 				<!-- Y axis line + label -->
 				<line x1="0" y1="0" x2="0" y2={height} stroke="var(--retro-text-dim)" />
-				<text transform="rotate(-90)" x={-height / 2} y="-42" text-anchor="middle" font-size="13" font-weight="bold" fill="var(--retro-text)">Models</text>
+				{#if !isNarrow}
+					<text transform="rotate(-90)" x={-height / 2} y="-42" text-anchor="middle" font-size="13" font-weight="bold" fill="var(--retro-text)">Models</text>
+				{/if}
 
 				<!-- Highlight diamonds (your models) -->
 				{#each placedDiamonds as d}
