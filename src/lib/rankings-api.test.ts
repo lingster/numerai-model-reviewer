@@ -12,7 +12,16 @@
  *   Round 1171: rank=7, corr=0.0402, mmc=0.0356, totalModels=4093
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { calculateCustomScore, classifyRankingHistory, DEFAULT_SCORE_FORMULA, hasRankableData, latestRoundWithData } from './rankings-api.js';
+import {
+	calculateCustomScore,
+	classifyRankingHistory,
+	DEFAULT_SCORE_FORMULA,
+	DEFAULT_SIGNALS_SCORE_FORMULA,
+	DEFAULT_CRYPTO_SCORE_FORMULA,
+	getDefaultFormulaForTournament,
+	hasRankableData,
+	latestRoundWithData
+} from './rankings-api.js';
 import type { ModelRankingHistory, ScoreFormula } from './types.js';
 
 // Worker API URL for integration tests. Overridable so CI can point at a
@@ -131,6 +140,27 @@ describe('calculateCustomScore - unit tests', () => {
 		const score = calculateCustomScore(-0.05, -0.03, null, DEFAULT_SCORE_FORMULA);
 		// 0.75 * (-0.05) + 2.25 * (-0.03) = -0.0375 + -0.0675 = -0.105
 		expect(score).toBeCloseTo(-0.105, 4);
+	});
+});
+
+describe('getDefaultFormulaForTournament - unit tests', () => {
+	it('should return Classic default (0.75*corr + 2.25*mmc) for tournament 8', () => {
+		expect(getDefaultFormulaForTournament(8)).toEqual(DEFAULT_SCORE_FORMULA);
+	});
+
+	it('should return Signals default (0.3*alpha + 0.8*mpc) for tournament 11', () => {
+		expect(getDefaultFormulaForTournament(11)).toEqual(DEFAULT_SIGNALS_SCORE_FORMULA);
+	});
+
+	it('should return Crypto default (0.1*corr + 1*mmc) for tournament 12', () => {
+		expect(getDefaultFormulaForTournament(12)).toEqual(DEFAULT_CRYPTO_SCORE_FORMULA);
+		expect(DEFAULT_CRYPTO_SCORE_FORMULA).toEqual({ corrWeight: 0.1, mmcWeight: 1.0, tcWeight: 0 });
+	});
+
+	it('should return a fresh copy each call (not shared references)', () => {
+		const a = getDefaultFormulaForTournament(12);
+		const b = getDefaultFormulaForTournament(12);
+		expect(a).not.toBe(b);
 	});
 });
 

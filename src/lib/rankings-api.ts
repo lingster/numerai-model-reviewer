@@ -7,8 +7,9 @@
  * comparison pool over GraphQL; that's gone.
  *
  * Tournament-specific defaults are exposed via DEFAULT_FORMULA_FOR_TOURNAMENT
- * because Signals (11) uses a different scoring regime (alpha + mpc) from
- * Classic (8) and Crypto (12) (corr + mmc).
+ * because each tournament has its own payout weighting: Classic (8) uses
+ * 0.75*corr + 2.25*mmc, Signals (11) uses 0.3*alpha + 0.8*mpc, and Crypto (12)
+ * uses 0.1*corr + 1*mmc.
  */
 import type { ModelRankingHistory, RoundModelScore, ScoreFormula } from '$lib/types.js';
 import { config } from '$lib/config.js';
@@ -17,10 +18,21 @@ import { swrCache } from '$lib/utils/swr-cache.svelte.js';
 const SIGNALS_TOURNAMENT = 11;
 const CRYPTO_TOURNAMENT = 12;
 
-/** Default formula for Classic/Crypto (corr + mmc): 0.75*corr + 2.25*mmc. */
+/** Default formula for Classic (corr + mmc): 0.75*corr + 2.25*mmc. */
 export const DEFAULT_SCORE_FORMULA: ScoreFormula = {
 	corrWeight: 0.75,
 	mmcWeight: 2.25,
+	tcWeight: 0
+};
+
+/**
+ * Default formula for Crypto: 0.1*corr + 1*mmc (the current Crypto payout
+ * weighting). Crypto has its own regime distinct from Classic's corr-heavy
+ * default.
+ */
+export const DEFAULT_CRYPTO_SCORE_FORMULA: ScoreFormula = {
+	corrWeight: 0.1,
+	mmcWeight: 1.0,
 	tcWeight: 0
 };
 
@@ -36,9 +48,9 @@ export const DEFAULT_SIGNALS_SCORE_FORMULA: ScoreFormula = {
 };
 
 export function getDefaultFormulaForTournament(tournament: number): ScoreFormula {
-	return tournament === SIGNALS_TOURNAMENT
-		? { ...DEFAULT_SIGNALS_SCORE_FORMULA }
-		: { ...DEFAULT_SCORE_FORMULA };
+	if (tournament === SIGNALS_TOURNAMENT) return { ...DEFAULT_SIGNALS_SCORE_FORMULA };
+	if (tournament === CRYPTO_TOURNAMENT) return { ...DEFAULT_CRYPTO_SCORE_FORMULA };
+	return { ...DEFAULT_SCORE_FORMULA };
 }
 
 export interface ModelRef {
