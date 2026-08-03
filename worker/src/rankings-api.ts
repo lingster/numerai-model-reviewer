@@ -21,12 +21,17 @@
  * — the frontend renders them under the same axes (the "New scoring" toggle
  * in the signals tab uses this same alias).
  */
-import { SIGNALS_TOURNAMENT } from './mappers';
+import { CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 import { d1Retry } from './d1-retry';
+import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
 	DB: D1Database;
 	NUMERAI_API_URL: string;
+	// Present at runtime (set via wrangler secrets) and used only by the
+	// unstaked-model fallback, which fetches a single model's own scores live.
+	NUMERAI_PUBLIC_KEY?: string;
+	NUMERAI_SECRET_KEY?: string;
 }
 
 export interface ScoreFormula {
@@ -338,8 +343,110 @@ function rankRound(
 }
 
 /**
- * Compute ranks for a model over [startRound, endRound]. Reads everything
- * from D1 — no live API calls in the request path.
+ * Fetches a target model's OWN per-round metric rows, keyed by round number.
+ * Used to rank a model that isn't in the precomputed staked field (e.g. an
+ * unstaked model): its scores are injected into each round's field so it can be
+ * placed against the staked competitors. Injected as a dependency so the ranking
+ * logic stays pure and unit-testable without live API calls.
+ */
+export type OwnPerformanceFetcher = (
+	env: Env,
+	params: { modelName: string; username?: string; modelId?: string; tournament: number }
+) => Promise<Map<number, RoundPerfRow>>;
+
+/**
+ * Default {@link OwnPerformanceFetcher}: fetches a single model's own per-round
+ * performance live from the Numerai API and maps it into the ranking row shape.
+ * Crypto needs a model id, so resolve one (via the D1/owner fast paths in
+ * findCryptoModelByName) when the caller didn't supply it.
+ *
+ * Metric mapping mirrors precompute's storage so an injected model's score is
+ * comparable to the field: correlation→corr, mmc→mmc, tc→tc, alpha/mpc as-is.
+ */
+async function fetchOwnPerformanceLive(
+	env: Env,
+	params: { modelName: string; username?: string; modelId?: string; tournament: number }
+): Promise<Map<number, RoundPerfRow>> {
+	const { modelName, username, tournament } = params;
+	const apiEnv = env as unknown as ApiEnv;
+	const byRound = new Map<number, RoundPerfRow>();
+
+	let modelId = params.modelId;
+	if (tournament === CRYPTO_TOURNAMENT && !modelId) {
+		const found = await findCryptoModelByName(modelName, tournament, apiEnv, username);
+		modelId = found?.id;
+		if (!modelId) return byRound; // can't fetch crypto performance without an id
+	}
+
+	const perf = await getModelPerformance(modelName, apiEnv, username, modelId, tournament);
+	if (!perf) return byRound;
+
+	for (const r of perf.rounds) {
+		byRound.set(r.roundNumber, {
+			model_name: perf.modelName,
+			corr: r.correlation,
+			mmc: r.mmc,
+			tc: r.tc ?? null,
+			alpha: r.alpha ?? null,
+			mpc: r.mpc ?? null,
+			stake_value: r.selectedStakeValue
+		});
+	}
+	return byRound;
+}
+
+/**
+ * Unstaked-model support. If the target is absent from at least one round's
+ * staked field (it isn't in the precomputed set), fetch its own scores once and
+ * inject them — as an extra field member — into every round that already has a
+ * staked field. Mutates `fields` in place.
+ *
+ * Only injects where a staked field already exists, so a round the cache doesn't
+ * cover stays empty (no fabricated 1-of-1 rank). Fully-staked models are present
+ * in every field, so no live fetch happens for them (the D1-only fast path).
+ */
+async function injectOwnScores(
+	env: Env,
+	fields: Map<number, RoundPerfRow[]>,
+	params: { modelName: string; username?: string; modelId?: string; tournament: number },
+	fetchOwnPerformance: OwnPerformanceFetcher
+): Promise<void> {
+	const targetLower = params.modelName.toLowerCase();
+	const has = (rows: RoundPerfRow[]) =>
+		rows.some((r) => r.model_name.toLowerCase() === targetLower);
+
+	let missingSomewhere = false;
+	for (const rows of fields.values()) {
+		if (rows.length > 0 && !has(rows)) {
+			missingSomewhere = true;
+			break;
+		}
+	}
+	if (!missingSomewhere) return;
+
+	let ownScores = new Map<number, RoundPerfRow>();
+	try {
+		ownScores = await fetchOwnPerformance(env, params);
+	} catch (e) {
+		console.error(`Live own-performance fetch failed for ${params.modelName}:`, e);
+		return;
+	}
+	if (ownScores.size === 0) return;
+
+	for (const [round, rows] of fields) {
+		if (rows.length === 0 || has(rows)) continue;
+		const own = ownScores.get(round);
+		if (own) rows.push({ ...own, model_name: params.modelName });
+	}
+}
+
+/**
+ * Compute ranks for a model over [startRound, endRound].
+ *
+ * Staked models are ranked purely from D1 (no live API calls). A model absent
+ * from the precomputed staked field — an unstaked model, or one not captured by
+ * precompute — has its own scores fetched once and injected into each round's
+ * field (see injectOwnScores) so it's ranked against the staked competitors.
  */
 export async function getModelRank(
 	env: Env,
@@ -355,9 +462,13 @@ export async function getModelRank(
 		 * of the metric (MMC20/CORR60-style), matching Numerai's leaderboard.
 		 */
 		window?: number;
-	}
+		/** Owner/id hints so the unstaked-model fallback can fetch scores directly. */
+		username?: string;
+		modelId?: string;
+	},
+	fetchOwnPerformance: OwnPerformanceFetcher = fetchOwnPerformanceLive
 ): Promise<ModelRankResponse> {
-	const { modelName, startRound, endRound, tournament, formula } = params;
+	const { modelName, startRound, endRound, tournament, formula, username, modelId } = params;
 	const window = Math.max(1, Math.floor(params.window ?? 1));
 	const targetLower = modelName.toLowerCase();
 
@@ -372,13 +483,19 @@ export async function getModelRank(
 		totalModels: 0
 	});
 
+	// Fetch the staked field once over the (window-extended) range, then augment it
+	// with the target's own scores if it's unstaked/absent. Both ranking paths below
+	// consume `fields`, so the injection benefits per-round and windowed alike.
+	const fetchStart = window > 1 ? Math.max(1, startRound - (window - 1)) : startRound;
+	const fields = await fetchRoundFields(env, fetchStart, endRound, tournament);
+	await injectOwnScores(env, fields, { modelName, username, modelId, tournament }, fetchOwnPerformance);
+
 	const rounds: ModelRankRoundResult[] = [];
 
 	if (window > 1) {
 		// Fetch back `window-1` extra rounds so the earliest target round still has
-		// a full trailing window, then average each model's metrics before ranking.
-		const fetchStart = Math.max(1, startRound - (window - 1));
-		const fields = await fetchRoundFields(env, fetchStart, endRound, tournament);
+		// a full trailing window; average each model's (already-fetched) metrics
+		// before ranking.
 		const windowed = buildWindowedMetrics(fields, tournament, window);
 		for (let r = startRound; r <= endRound; r++) {
 			const field = fields.get(r) ?? [];
@@ -387,10 +504,8 @@ export async function getModelRank(
 			);
 		}
 	} else {
-		// Per-round ranking. Pull the whole range's field data in chunked queries up
-		// front (avoids a per-round N+1 that made "Last 500"/"All" take tens of
-		// seconds), then rank each round from the in-memory map.
-		const fields = await fetchRoundFields(env, startRound, endRound, tournament);
+		// Per-round ranking over the same in-memory field map (chunked queries up
+		// front avoid a per-round N+1 that made "Last 500"/"All" take tens of seconds).
 		for (let r = startRound; r <= endRound; r++) {
 			const field = fields.get(r) ?? [];
 			const ranked = rankRound(field, targetLower, tournament, formula);
@@ -400,8 +515,8 @@ export async function getModelRank(
 
 	return {
 		modelName: meta?.model_name ?? modelName,
-		username: meta?.username ?? '',
-		modelId: meta?.model_id ?? '',
+		username: meta?.username ?? username ?? '',
+		modelId: meta?.model_id ?? modelId ?? '',
 		rounds
 	};
 }

@@ -80,8 +80,10 @@ export type ModelRankStatus = 'ranked' | 'unstaked' | 'no-data';
  * Classify a model's ranking history over the requested range:
  *  - 'ranked'   — at least one round has a non-null rank.
  *  - 'unstaked' — never ranked, but at least one round had a populated staked
- *                 field (totalModels > 0). The round data exists; the model just
- *                 wasn't in the staked set (not staked / not a top staked model).
+ *                 field (totalModels > 0). The field exists and the Worker tried
+ *                 to rank the model against it (fetching an unstaked model's own
+ *                 scores), but it had no resolved scores to place in the range —
+ *                 e.g. it never submitted / the rounds are unresolved.
  *  - 'no-data'  — never ranked and no round had a field (totalModels === 0 for
  *                 every round). The cache doesn't cover this range yet.
  */
@@ -285,6 +287,10 @@ export async function calculateModelRankings(
 					url.searchParams.set('mmcWeight', String(formula.mmcWeight));
 					url.searchParams.set('tcWeight', String(formula.tcWeight));
 					url.searchParams.set('window', String(window));
+					// Owner/id hints so the Worker can rank an unstaked model (absent from
+					// the precomputed staked field) by fetching its own scores directly.
+					if (ref.username) url.searchParams.set('username', ref.username);
+					if (ref.modelId) url.searchParams.set('modelId', ref.modelId);
 
 					try {
 						const data = await getJson<ModelRankResponse>(url);

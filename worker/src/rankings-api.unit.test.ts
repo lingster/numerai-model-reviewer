@@ -6,8 +6,18 @@
  * model_performances queries (the N+1 that made wide ranges — "Last 500"/"All"
  * — take tens of seconds), while still computing correct ranks.
  */
-import { describe, expect, it } from 'vitest';
-import { getCacheStatus, getModelRank, computeLatestResolvedRound } from './rankings-api';
+import { describe, expect, it, vi } from 'vitest';
+import {
+	getCacheStatus,
+	getModelRank,
+	computeLatestResolvedRound,
+	type OwnPerformanceFetcher
+} from './rankings-api';
+
+/** Build an own-scores row for the injection fetcher. */
+function ownRow(corr: number, mmc: number) {
+	return { model_name: 'target', corr, mmc, tc: null, alpha: null, mpc: null, stake_value: null };
+}
 
 describe('computeLatestResolvedRound', () => {
 	it('returns the highest round with resolvedGeneral=true', () => {
@@ -136,6 +146,127 @@ describe('getModelRank D1 access pattern', () => {
 		// And every requested round must still be covered by the fetched ranges.
 		const covered = perfQueries.every((q) => q.length === 2);
 		expect(covered).toBe(true);
+	});
+});
+
+describe('getModelRank unstaked-model support', () => {
+	// A staked field of two other models; the target is NOT staked (absent from D1).
+	const stakedField = [row(100, 'b', 0.3, 0.3), row(100, 'c', 0.1, 0.1)];
+
+	it('ranks an unstaked model by injecting its own scores into the field', async () => {
+		const { env } = mockEnv(stakedField);
+		// Own score 0.25+0.25 = 0.5 places target between c (0.2) and b (0.6): 2nd of 3.
+		const fetchOwn: OwnPerformanceFetcher = async () => new Map([[100, ownRow(0.25, 0.25)]]);
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 100, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		const r100 = res.rounds.find((r) => r.roundNumber === 100);
+		expect(r100?.rank).toBe(2);
+		expect(r100?.totalModels).toBe(3); // two staked + the injected target
+		expect(r100?.customScore).toBeCloseTo(0.5);
+	});
+
+	it('does NOT fetch own scores when the model is already in the staked field', async () => {
+		const { env } = mockEnv([row(100, 'target', 0.5, 0.5), row(100, 'b', 0.1, 0.1)]);
+		const fetchOwn = vi.fn<OwnPerformanceFetcher>(async () => new Map());
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 100, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		expect(res.rounds.find((r) => r.roundNumber === 100)?.rank).toBe(1);
+		expect(fetchOwn).not.toHaveBeenCalled(); // pure-D1 fast path preserved
+	});
+
+	it('does not fabricate a rank for rounds with no staked field (no-data)', async () => {
+		const { env } = mockEnv(stakedField); // only round 100 has a field
+		const fetchOwn: OwnPerformanceFetcher = async () =>
+			new Map([
+				[100, ownRow(0.25, 0.25)],
+				[101, ownRow(0.9, 0.9)]
+			]);
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 101, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		expect(res.rounds.find((r) => r.roundNumber === 100)?.rank).toBe(2);
+		// Round 101 has no staked field to rank against — must stay unranked, not 1/1.
+		const r101 = res.rounds.find((r) => r.roundNumber === 101);
+		expect(r101?.rank).toBeNull();
+		expect(r101?.totalModels).toBe(0);
+	});
+
+	it('handles a model staked in some rounds and unstaked in others', async () => {
+		// Round 100: target staked (in field). Round 101: target absent, own scores inject it.
+		const rows = [
+			row(100, 'target', 0.5, 0.5),
+			row(100, 'b', 0.1, 0.1),
+			row(101, 'b', 0.3, 0.3),
+			row(101, 'c', 0.1, 0.1)
+		];
+		const { env } = mockEnv(rows);
+		const fetchOwn: OwnPerformanceFetcher = async () => new Map([[101, ownRow(0.25, 0.25)]]);
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 101, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		expect(res.rounds.find((r) => r.roundNumber === 100)?.rank).toBe(1);
+		expect(res.rounds.find((r) => r.roundNumber === 101)?.rank).toBe(2);
+	});
+
+	it('ranks an injected unstaked model under windowed averaging', async () => {
+		// window=2 averages each model's trailing two rounds, then scores corr+mmc.
+		// @r101: c avg=0.5/0.5 → score 1.0; target avg=0.15/0.15 → score 0.3;
+		// b avg=0.1/0.1 → score 0.2. Ranking c > target > b: target is 2nd of 3.
+		const rows = [
+			row(100, 'b', 0.1, 0.1),
+			row(100, 'c', 0.5, 0.5),
+			row(101, 'b', 0.1, 0.1),
+			row(101, 'c', 0.5, 0.5)
+		];
+		const { env } = mockEnv(rows);
+		const fetchOwn: OwnPerformanceFetcher = async () =>
+			new Map([
+				[100, ownRow(0.1, 0.1)],
+				[101, ownRow(0.2, 0.2)]
+			]);
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 101, endRound: 101, tournament: 8, formula: FORMULA, window: 2 },
+			fetchOwn
+		);
+
+		const r101 = res.rounds.find((r) => r.roundNumber === 101);
+		expect(r101?.rank).toBe(2);
+		expect(r101?.totalModels).toBe(3);
+	});
+
+	it('leaves the model unranked when its own scores cannot be fetched', async () => {
+		const { env } = mockEnv(stakedField);
+		const fetchOwn: OwnPerformanceFetcher = async () => new Map(); // e.g. never submitted
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 100, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		const r100 = res.rounds.find((r) => r.roundNumber === 100);
+		expect(r100?.rank).toBeNull();
+		expect(r100?.totalModels).toBe(2); // field still reported so the UI can explain "not staked"
 	});
 });
 

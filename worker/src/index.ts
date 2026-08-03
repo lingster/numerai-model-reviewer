@@ -234,7 +234,12 @@ export default {
               endRound,
               tournament,
               formula,
-              window
+              window,
+              // Owner/id hints let the unstaked-model fallback fetch a model's own
+              // scores directly (skipping a Crypto leaderboard scan) when it's not
+              // in the precomputed staked field.
+              username: url.searchParams.get('username') ?? undefined,
+              modelId: url.searchParams.get('modelId') ?? undefined
             });
             response = jsonResponse(result);
           }

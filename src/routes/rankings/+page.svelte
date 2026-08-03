@@ -959,7 +959,7 @@
 						<li>
 							<span class="font-medium">{m.modelName}</span>
 							{#if m.reason === 'unstaked'}
-								— not staked in this round range (no ranking).
+								— no resolved scores in this round range (nothing to rank).
 							{:else}
 								— no cached data for this range{cacheLatestRound !== null ? ` (cache covers rounds ${cacheEarliestRound ?? 1}–${cacheLatestRound})` : ''}.
 							{/if}
