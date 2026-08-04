@@ -717,11 +717,15 @@ export function computeLatestResolvedRound(
 
 /**
  * The latest fully-resolved round for a tournament, or null if none of the
- * recent rounds are resolved. Crypto/Signals resolve with a lag (a run can be
- * scored but not yet resolved), so the frontend uses this boundary to shade
- * "resolving" rounds. Fetches the most recent rounds and takes the max resolved
- * number (resolution is monotonic by round). Scans a generous window so the lag
- * is always covered.
+ * recent rounds are resolved. Rounds resolve with a lag (scored but not yet
+ * final), so the frontend uses this boundary to shade "resolving" rounds.
+ * Fetches the most recent rounds and takes the max resolved number (resolution
+ * is monotonic by round).
+ *
+ * The window must exceed the resolution lag or the boundary falls outside it and
+ * we wrongly return null. Observed lags (Aug 2026): Classic/Crypto ~24 rounds,
+ * Signals ~64 (it resolves ~3 months out). 200 leaves generous headroom; the
+ * payload is just two scalar fields per round.
  */
 export async function getLatestResolvedRound(
 	env: Env & { NUMERAI_API_URL: string },
@@ -729,7 +733,7 @@ export async function getLatestResolvedRound(
 ): Promise<number | null> {
 	const rounds = await fetchRounds<{ number: number; resolvedGeneral: boolean }>(
 		env,
-		`query($tournament: Int!) { rounds(tournament: $tournament, limit: 60) { number resolvedGeneral } }`,
+		`query($tournament: Int!) { rounds(tournament: $tournament, limit: 200) { number resolvedGeneral } }`,
 		tournament
 	);
 	return computeLatestResolvedRound(rounds);
