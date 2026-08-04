@@ -495,9 +495,13 @@ const CRYPTO_TOURNAMENT = 12;
 const MAX_ROUNDS_HISTORY = 1000;
 
 // Incremental refresh re-fetches this many already-stored rounds below the last
-// round in D1, so a round that resolves (or is corrected by Numerai) slightly
-// late still gets picked up on the next run. Small: the overlap is pure re-work.
-const REFRESH_OVERLAP_ROUNDS = 2;
+// round in D1. 0 = write only strictly-new rounds (minimum D1 writes). We keep
+// it at 0 rather than re-writing recent rounds every run because rounds are
+// scored for all models together (no late stragglers to backfill), and re-
+// writing to chase a round's final resolved score would need a window as wide
+// as the resolution lag (~24 rounds crypto, ~64 signals) — far more D1 writes
+// than a small overlap buys. See getLatestResolvedRound for that boundary.
+const REFRESH_OVERLAP_ROUNDS = 0;
 
 /**
  * The lowest round a run should fetch/store, given the highest round already in
@@ -1177,11 +1181,12 @@ async function main() {
   let allModels: TopModel[];
   let performanceData: Map<string, PerformanceRound[]>;
 
-  // Incremental refresh floor: only fetch/write rounds at/after the last round
-  // already in D1 (minus a small overlap). Full backfill (minRound 0) when D1 is
-  // empty for this tournament or on --reset. This keeps each daily run to a
-  // handful of new rounds instead of rewriting the entire history (which was
-  // OOMing/timing out and, being first in the job, blocking later tournaments).
+  // Incremental refresh floor: only fetch/write rounds newer than the last round
+  // already in D1 (REFRESH_OVERLAP_ROUNDS re-writes that many recent rounds too;
+  // currently 0 = strictly-new). Full backfill (minRound 0) when D1 is empty for
+  // this tournament or on --reset. This keeps each daily run to a handful of new
+  // rounds instead of rewriting the entire history (which was OOMing/timing out
+  // and, being first in the job, blocking later tournaments).
   const maxRoundInD1 = reset ? null : await getMaxRoundInD1(config.tournament, isLocal);
   const minRound = computeMinRound(maxRoundInD1, reset, REFRESH_OVERLAP_ROUNDS);
   if (reset) {

@@ -60,6 +60,11 @@ describe('computeMinRound (incremental refresh floor)', () => {
     expect(computeMinRound(1275, false, 2)).toBe(1274);
   });
 
+  it('writes only strictly-new rounds when overlap is 0 (minimum writes)', () => {
+    // D1 has up to 1290, overlap 0 -> next run starts at 1291 (nothing re-written).
+    expect(computeMinRound(1290, false, 0)).toBe(1291);
+  });
+
   it('never returns a negative round when history is shorter than the overlap', () => {
     expect(computeMinRound(1, false, 2)).toBe(0);
     expect(computeMinRound(0, false, 2)).toBe(0);

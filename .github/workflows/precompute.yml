@@ -98,9 +98,14 @@ jobs:
         working-directory: worker
         run: npm run precompute:prod -- --tournament 12 --top-n "$TOP_N" --no-cache $RESET_FLAG
 
-      - name: Verify D1 row counts
+      # Sanity log of how far each tournament's data now reaches. Per-tournament
+      # MAX(round_number) is an index-backed reverse scan (idx_perf_round) that
+      # reads only near the top rounds — unlike a COUNT(*) over the whole table,
+      # which scanned every row (millions) each run and could exhaust D1's free
+      # daily read budget.
+      - name: Verify D1 latest rounds
         if: always()
         working-directory: worker
         run: |
           npx wrangler d1 execute numerai-cache --remote --command \
-            "SELECT tournament, COUNT(DISTINCT model_name) AS models, COUNT(*) AS rows FROM model_performances GROUP BY tournament;"
+            "SELECT 8 AS tournament, MAX(round_number) AS latest_round FROM model_performances WHERE tournament=8 UNION ALL SELECT 11, MAX(round_number) FROM model_performances WHERE tournament=11 UNION ALL SELECT 12, MAX(round_number) FROM model_performances WHERE tournament=12;"
