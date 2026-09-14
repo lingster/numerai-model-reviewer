@@ -47,8 +47,11 @@ export async function readMaxRound(read: D1Query, tournament: number): Promise<n
 		throw new MaxRoundReadError(tournament, `unexpected result ${JSON.stringify(rows)}`);
 	}
 
+	// "null" as well as null: `wrangler d1 execute --json` renders SQL NULL as the
+	// string "null". That is ambiguous for a text column, but not here — MAX over
+	// an integer column can only produce a number or NULL.
 	const { maxRound } = row;
-	if (maxRound === null) return null;
+	if (maxRound === null || maxRound === 'null') return null;
 	if (typeof maxRound === 'number' && Number.isSafeInteger(maxRound)) return maxRound;
 
 	throw new MaxRoundReadError(tournament, `maxRound is not a round number: ${JSON.stringify(maxRound)}`);

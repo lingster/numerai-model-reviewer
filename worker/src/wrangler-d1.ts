@@ -2,17 +2,21 @@
  * Helpers for driving D1 through the wrangler CLI, which is how precompute
  * reaches the remote database from GitHub Actions.
  *
- * The shell is injected (CommandRunner) rather than imported, so this module
- * has no Node dependency and every path is unit-testable.
+ * The process runner is injected (CommandRunner) rather than imported, so this
+ * module has no Node dependency and every path is unit-testable.
  */
 
 import type { D1Query } from './d1-query';
 
 /**
- * Runs a shell command and returns its stdout, throwing on a non-zero exit the
- * way execSync does (with the output attached as `stderr`/`stdout`).
+ * Runs `file` with `args` — no shell — and returns its stdout, throwing on a
+ * non-zero exit the way execFileSync does (output attached as stderr/stdout).
+ *
+ * An argument list rather than a command string, so SQL reaches wrangler
+ * byte-for-byte: quoting multi-line SQL for a shell is where the literal "\n"
+ * that broke precompute's coverage query came from.
  */
-export type CommandRunner = (command: string) => string;
+export type CommandRunner = (file: string, args: string[]) => string;
 
 /** Child-process output: a string, or a Buffer when no encoding was requested. */
 type ProcessOutput = string | { toString(): string } | null | undefined;
@@ -71,9 +75,7 @@ export function createWranglerQuery(
 	return async (sql) => {
 		let output: string;
 		try {
-			output = run(
-				`wrangler d1 execute ${database} ${location} --yes --json --command ${JSON.stringify(sql)}`
-			);
+			output = run('wrangler', ['d1', 'execute', database, location, '--yes', '--json', '--command', sql]);
 		} catch (error) {
 			throw new Error(execErrorDetail(error), { cause: error });
 		}

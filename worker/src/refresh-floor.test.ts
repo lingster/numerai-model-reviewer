@@ -29,6 +29,13 @@ describe('readMaxRound', () => {
 		await expect(readMaxRound(answering([{ maxRound: null }]), 12)).resolves.toBeNull();
 	});
 
+	it('treats wrangler\'s "null" as no rows: its --json output renders SQL NULL as a string', async () => {
+		// Exact `wrangler d1 execute --json` output for MAX over zero rows. Found by an
+		// end-to-end precompute run against an empty D1, which failed instead of
+		// starting the first backfill.
+		await expect(readMaxRound(answering([{ maxRound: 'null' }]), 12)).resolves.toBeNull();
+	});
+
 	it('throws instead of returning null when the read fails', async () => {
 		const quota = "Your account has exceeded D1's free tier daily row read limit";
 		await expect(readMaxRound(failing(quota), 11)).rejects.toBeInstanceOf(MaxRoundReadError);

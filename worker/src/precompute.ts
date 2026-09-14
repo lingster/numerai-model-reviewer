@@ -15,7 +15,7 @@
 
 import { readMaxRound } from './refresh-floor';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
@@ -506,9 +506,9 @@ const MAX_ROUNDS_HISTORY = 1000;
 // than a small overlap buys. See getLatestResolvedRound for that boundary.
 const REFRESH_OVERLAP_ROUNDS = 0;
 
-/** The real shell for wrangler D1 commands: stdout as text, output kept on failure. */
-const runCommand: CommandRunner = (command) =>
-  execSync(command, { encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'] });
+/** Runs wrangler without a shell: stdout as text, output kept on failure. */
+const runCommand: CommandRunner = (file, args) =>
+  execFileSync(file, args, { encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'] });
 
 /**
  * The lowest round a run should fetch/store, given the highest round already in
