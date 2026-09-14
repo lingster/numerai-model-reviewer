@@ -2,6 +2,7 @@ import {
   QUERY_ACCOUNT_LEADERBOARD_SEARCH,
   QUERY_ACCOUNT_LEADERBOARD_SEARCH_WITH_TOURNAMENT,
   QUERY_GET_CRYPTO_MODEL_PERFORMANCE,
+  QUERY_GET_CRYPTO_ROUND_METADATA,
   QUERY_GET_MODEL_BY_NAME,
   QUERY_GET_MODEL_PERFORMANCE,
   QUERY_GET_SIGNALS_MODEL_BY_NAME,
@@ -14,6 +15,7 @@ import {
 import {
   mapRoundPerformances,
   toNumber,
+  CLASSIC_TOURNAMENT,
   SIGNALS_TOURNAMENT,
   CRYPTO_TOURNAMENT,
   MAX_ROUNDS_HISTORY,
@@ -21,6 +23,14 @@ import {
 } from './mappers';
 import { ModelPerformance, NumeraiModel, NumeraiUser, RoundPerformance } from './types';
 import { d1Retry } from './d1-retry';
+import {
+  readCachedRoundScores,
+  writeRoundScores,
+  computeFetchWindow,
+  diffRoundScores,
+  SCORE_FIELDS,
+  type RoundScores
+} from './round-scores-cache';
 
 export interface Env {
   NUMERAI_PUBLIC_KEY: string;
@@ -355,11 +365,17 @@ export async function getModelPerformance(
 
     const rounds = mapRoundPerformances(profile.roundModelPerformances, tournament);
 
-    // Signals exposes the new scoring (alpha/mpc) only via submissionScores on
+    // Both Signals (alpha/mpc) and Classic (mmc60) keep metrics that
+    // roundModelPerformances does not expose in submissionScores on
     // v2RoundModelPerformances, keyed by modelId — merge them in by round.
-    if (isSignals && modelId) {
-      await augmentWithAlphaMpc(rounds, modelId, SIGNALS_TOURNAMENT, env);
-    }
+    // profile.id is the model UUID the score query needs, and is always present
+    // here — unlike the caller's optional modelId.
+    await augmentWithSubmissionScores(
+      rounds,
+      profile.id,
+      isSignals ? SIGNALS_TOURNAMENT : (tournament ?? CLASSIC_TOURNAMENT),
+      env
+    );
 
     return {
       modelId: profile.id,
@@ -379,9 +395,21 @@ export async function getModelPerformance(
   }
 }
 
+interface RoundSubmissionScores {
+  v2RoundModelPerformances: Array<{
+    roundNumber: number;
+    submissionScores: Array<{ displayName: string; value: number | null }> | null;
+  }> | null;
+}
+
 /**
  * Fetch per-round submission scores (keyed displayName -> value) for a model.
- * Used by both the Crypto path and the Signals alpha/mpc augmentation (DRY).
+ * This is the only source of alpha/mpc (Signals), mmc60 (Classic) and the whole
+ * score set (Crypto) — `roundModelPerformances` exposes none of them.
+ *
+ * `lastNRounds` is a round-number window, not a count: passing 3 when the newest
+ * rounds are still unscored returns nothing, which is why callers size it from
+ * the latest round rather than from how many rounds they want.
  */
 async function fetchSubmissionScoresByRound(
   modelId: string,
@@ -389,12 +417,11 @@ async function fetchSubmissionScoresByRound(
   env: Env,
   lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<Map<number, Map<string, number | null>>> {
-  const result = await query<{
-    v2RoundModelPerformances: Array<{
-      roundNumber: number;
-      submissionScores: Array<{ displayName: string; value: number | null }> | null;
-    }> | null;
-  }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds });
+  const result = await query<RoundSubmissionScores>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, {
+    modelId,
+    tournament,
+    lastNRounds
+  });
 
   const byRound = new Map<number, Map<string, number | null>>();
   for (const r of result.v2RoundModelPerformances ?? []) {
@@ -407,24 +434,120 @@ async function fetchSubmissionScoresByRound(
   return byRound;
 }
 
-/** Merge alpha/mpc submission scores into already-mapped rounds, by round number. */
-async function augmentWithAlphaMpc(
+/**
+ * Which submissionScores keys each tournament is scored on. Anything outside
+ * this set is absent upstream anyway — Crypto's score list has no fnc, tc,
+ * mmc60, alpha or mpc at all — so reading or storing it would be dead weight.
+ */
+const SCORED_FIELDS_BY_TOURNAMENT: Record<number, readonly (keyof RoundScores)[]> = {
+  [CLASSIC_TOURNAMENT]: ['mmc60'],
+  [SIGNALS_TOURNAMENT]: ['alpha', 'mpc'],
+  [CRYPTO_TOURNAMENT]: ['corr', 'mmc']
+};
+
+/** An all-null RoundScores, to be filled with just the tournament's own fields. */
+function emptyScores(): RoundScores {
+  return { corr: null, mmc: null, mmc60: null, alpha: null, mpc: null };
+}
+
+/**
+ * The submission-sourced metrics for every round of a model, served from D1 and
+ * topped up from the API.
+ *
+ * The upstream call has no per-round granularity — it returns a model's entire
+ * scored history (~420KB) however little we need — so the persistent cache is
+ * what keeps this cheap: a model's history is downloaded once, and subsequent
+ * requests fetch only the rounds added since, plus the ~70-round tail whose
+ * scores can still change.
+ */
+async function getAugmentationScores(
+  modelId: string,
+  tournament: number,
+  roundNumbers: number[],
+  env: Env
+): Promise<Map<number, RoundScores>> {
+  const latestRound = Math.max(...roundNumbers);
+  const now = Math.floor(Date.now() / 1000);
+
+  let cached = new Map<number, RoundScores>();
+  let coverage = null;
+  try {
+    if (env.DB) {
+      const stored = await readCachedRoundScores(env.DB, modelId, tournament);
+      cached = stored.scores;
+      coverage = stored.coverage;
+    }
+  } catch (e) {
+    // Cache miss by another name: fall through to a full fetch.
+    console.error('round-scores cache read failed:', e);
+  }
+
+  const window = computeFetchWindow(coverage, latestRound, MAX_ROUNDS_HISTORY, now);
+  if (window === null) return cached;
+
+  const fetched = await fetchSubmissionScoresByRound(modelId, tournament, env, window);
+
+  // Read only the fields this tournament is scored on; the rest stay null and
+  // are dropped from the write by diffRoundScores.
+  const wanted = SCORED_FIELDS_BY_TOURNAMENT[tournament] ?? SCORE_FIELDS;
+  const fresh = new Map<number, RoundScores>();
+  for (const [round, scores] of fetched) {
+    const next = emptyScores();
+    for (const field of wanted) {
+      next[field] = scores.get(field) ?? null;
+    }
+    fresh.set(round, next);
+  }
+
+  try {
+    if (env.DB) {
+      // Only rounds whose values actually moved are written; the watermark
+      // records the rest of the window as looked-at.
+      const changed = diffRoundScores(cached, fresh);
+      await writeRoundScores(env.DB, modelId, tournament, changed, {
+        fromRound: Math.min(coverage?.fromRound ?? Infinity, latestRound - window + 1),
+        toRound: Math.max(coverage?.toRound ?? -Infinity, latestRound),
+        updatedAt: now
+      });
+    }
+  } catch (e) {
+    // Best-effort: a failed write just means we fetch again next time.
+    console.error('round-scores cache write failed:', e);
+  }
+
+  // Freshly fetched rounds win over cached ones — that is the point of the tail.
+  return new Map([...cached, ...fresh]);
+}
+
+/**
+ * Merge the per-round metrics that only submissionScores carries into
+ * already-mapped rounds, by round number.
+ *
+ * `roundModelPerformances` exposes corr/corr60/mmc/tc but neither the new
+ * Signals scoring (alpha/mpc) nor Classic's 60-day MMC, so both are read from
+ * the score set here. A metric absent for a tournament simply stays null.
+ */
+async function augmentWithSubmissionScores(
   rounds: RoundPerformance[],
   modelId: string,
   tournament: number,
   env: Env
 ): Promise<void> {
+  if (rounds.length === 0) return;
+
   try {
-    const byRound = await fetchSubmissionScoresByRound(modelId, tournament, env);
+    const roundNumbers = rounds.map((r) => r.roundNumber);
+    const byRound = await getAugmentationScores(modelId, tournament, roundNumbers, env);
     for (const round of rounds) {
       const scores = byRound.get(round.roundNumber);
       if (!scores) continue;
-      round.alpha = scores.get('alpha') ?? null;
-      round.mpc = scores.get('mpc') ?? null;
+      round.alpha = scores.alpha;
+      round.mpc = scores.mpc;
+      round.mmc60 = scores.mmc60;
     }
   } catch (e) {
-    // Non-fatal: alpha/mpc just stay null if the augmentation query fails.
-    console.error('Error augmenting alpha/mpc:', e);
+    // Non-fatal: these metrics just stay null if the augmentation query fails.
+    console.error('Error augmenting submission scores:', e);
   }
 }
 
@@ -450,7 +573,7 @@ async function fetchCryptoModelPerformance(
   env: Env
 ): Promise<ModelPerformance | null> {
   try {
-    const result = await query<{
+    type CryptoRoundMetadata = {
       v2RoundModelPerformances: Array<{
         roundNumber: number;
         roundOpenTime: string | null;
@@ -458,34 +581,56 @@ async function fetchCryptoModelPerformance(
         roundResolved: boolean | null;
         corrMultiplier: number | null;
         mmcMultiplier: number | null;
-        submissionScores: Array<{ displayName: string; value: number | null }> | null;
+        payoutMultipliers: Array<{
+          name: string;
+          displayName: string;
+          multiplier: number;
+        }> | null;
       }> | null;
-    }>(env, QUERY_GET_CRYPTO_MODEL_PERFORMANCE, { modelId, tournament, lastNRounds: MAX_ROUNDS_HISTORY });
-
-    if (!result.v2RoundModelPerformances) return null;
+    };
 
     // Crypto's round performances carry no stake — source the current stake from
     // the account's ModelProfile.stake (matched by model id). Non-fatal on error.
-    const stakeValue = await fetchCryptoStake(username, modelId, tournament, env);
+    // The two calls are independent, so they run together rather than in series.
+    const [result, stakeValue] = await Promise.all([
+      query<CryptoRoundMetadata>(env, QUERY_GET_CRYPTO_ROUND_METADATA, {
+        modelId,
+        tournament,
+        lastNRounds: MAX_ROUNDS_HISTORY
+      }),
+      fetchCryptoStake(username, modelId, tournament, env)
+    ]);
+
+    if (!result.v2RoundModelPerformances) return null;
+
+    // Crypto is scored purely on corr and mmc, and only submissionScores carries
+    // them — fetched through the same incremental cache as the other
+    // tournaments, so the history is downloaded once rather than per request.
+    const roundNumbers = result.v2RoundModelPerformances.map(r => r.roundNumber);
+    const scoresByRound = roundNumbers.length
+      ? await getAugmentationScores(modelId, tournament, roundNumbers, env)
+      : new Map<number, RoundScores>();
 
     const rounds: RoundPerformance[] = result.v2RoundModelPerformances.map(r => {
-      const scores = new Map((r.submissionScores ?? []).map(s => [s.displayName, toNumber(s.value)]));
-      const getScore = (name: string) => scores.get(name) ?? null;
+      const scores = scoresByRound.get(r.roundNumber);
 
       return {
         roundNumber: r.roundNumber,
         roundOpenTime: r.roundOpenTime ?? undefined,
         roundResolveTime: r.roundResolveTime ?? undefined,
         roundResolved: r.roundResolved ?? false,
-        correlation: getScore('corr'),
+        correlation: scores?.corr ?? null,
+        mmc: scores?.mmc ?? null,
+        // Crypto publishes none of these: its score list is corr/mmc only.
         corr60: null,
-        mmc: getScore('mmc'),
-        fnc: getScore('fnc'),
-        tc: getScore('tc'),
-        alpha: getScore('alpha'),
-        mpc: getScore('mpc'),
+        mmc60: null,
+        fnc: null,
+        tc: null,
+        alpha: null,
+        mpc: null,
         corrMultiplier: toNumber(r.corrMultiplier),
         mmcMultiplier: toNumber(r.mmcMultiplier),
+        payoutMultipliers: r.payoutMultipliers ?? null,
         selectedStakeValue: null,
         payout: null
       };

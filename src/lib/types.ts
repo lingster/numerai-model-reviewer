@@ -27,6 +27,15 @@ export interface NumeraiModel {
 /**
  * Performance data for a single round
  */
+/** One metric's weight in a round's payout formula. */
+export interface PayoutMultiplier {
+	/** API metric key, e.g. `correlation_60`. */
+	name: string;
+	/** Short label, matching our metric ids where possible, e.g. `corr60`. */
+	displayName: string;
+	multiplier: number;
+}
+
 export interface RoundPerformance {
 	roundNumber: number;
 	roundOpenTime?: string;
@@ -35,6 +44,13 @@ export interface RoundPerformance {
 	correlation: number | null;
 	corr60?: number | null;
 	mmc: number | null;
+	/** 60-day MMC. Classic only — Signals and Crypto do not publish it. */
+	mmc60?: number | null;
+	/**
+	 * Payout weighting in force for this round, from the API. Classic since
+	 * 28 Aug 2026 is 3xCORR60 + 15xMMC60; earlier rounds keep their own weights.
+	 */
+	payoutMultipliers?: PayoutMultiplier[] | null;
 	fnc: number | null;
 	tc?: number | null;
 	// New Numerai scoring (Signals): alpha + mpc
@@ -56,8 +72,8 @@ export interface ChartDataPoint {
 	corr20: number | null;
 	corr60: number | null;
 	mmc: number | null;
+	mmc60: number | null;
 	fnc: number | null;
-	tc: number | null;
 	payout: number | null;
 	// New Numerai scoring (Signals)
 	alpha: number | null;
@@ -81,7 +97,7 @@ export interface ModelSeries {
 /**
  * Available metrics for the time series chart
  */
-export type ChartMetric = 'corr20' | 'corr60' | 'mmc' | 'fnc' | 'tc' | 'payout' | 'alpha' | 'mpc' | 'score';
+export type ChartMetric = 'corr20' | 'corr60' | 'mmc' | 'mmc60' | 'fnc' | 'payout' | 'alpha' | 'mpc' | 'score';
 
 /**
  * Stake information for a model

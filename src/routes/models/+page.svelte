@@ -67,6 +67,10 @@
 	// and Crypto have no such scores (they would render as N/A), so hide them.
 	const isSignals = $derived(selectedTournament === TOURNAMENTS.SIGNALS);
 
+	// MMC60 is published for Classic only — Numerai returns null for it on both
+	// Signals and Crypto, so the column is hidden rather than shown as all-N/A.
+	const isClassic = $derived(selectedTournament === TOURNAMENTS.CLASSIC);
+
 	// Recent items
 	let recentUserModels = $state<RecentUserModel[]>([]);
 	let recentCharts = $state<RecentChart[]>([]);
@@ -530,27 +534,44 @@
 		return (Math.round(value * 10000) / 10000).toString();
 	}
 
-	// Stake multipliers shown as "0.75×CORR20v2 2.25×MMC". Account-level stakeInfo
-	// (Classic/Signals) takes precedence; Crypto carries them per round instead.
-	function getMultipliers(model: ModelPerformance, round?: RoundPerformance) {
+	// The round's payout formula, e.g. "3×CORR60 + 15×MMC60". Both the weights
+	// and which metric each applies to come from the round's own
+	// payoutMultipliers, so a scoring change (Classic moved to 3×CORR60 +
+	// 15×MMC60 on 28 Aug 2026) needs no code change, and historical rounds keep
+	// the weights they were actually paid under.
+	//
+	// The legacy scalar corrMultiplier/mmcMultiplier are the fallback for rounds
+	// predating payoutMultipliers; the API stopped populating them at the
+	// switchover, so they are no longer enough on their own.
+	function getPayoutFormula(model: ModelPerformance, round?: RoundPerformance): string | null {
+		const multipliers = round?.payoutMultipliers;
+		if (multipliers && multipliers.length > 0) {
+			return multipliers
+				.map((m) => `${formatMultiplier(m.multiplier)}×${m.displayName.toUpperCase()}`)
+				.join(' + ');
+		}
+
 		const corr = model.stakeInfo?.corrMultiplier ?? round?.corrMultiplier ?? null;
 		const mmc = model.stakeInfo?.mmcMultiplier ?? round?.mmcMultiplier ?? null;
-		return { corr, mmc };
+		if (corr === null && mmc === null) return null;
+
+		const parts: string[] = [];
+		if (corr !== null) parts.push(`${formatMultiplier(corr)}×${legacyCorrLabel}`);
+		if (mmc !== null) parts.push(`${formatMultiplier(mmc)}×${legacyMmcLabel}`);
+		return parts.join(' + ');
 	}
 
-	// Metric labels for the two stake multipliers. The API only returns the
-	// multiplier *values* (stakeInfo.corrMultiplier / mmcMultiplier — never
-	// hard-coded here); which metric each applies to is a per-tournament
-	// convention the API does not expose (payoutSelection is empty):
-	//   Classic → CORR20v2 / MMC, Signals → ALPHA / MPC, Crypto → CORR / MMC.
-	const corrMultiplierLabel = $derived(
+	// Labels for the legacy scalar multipliers only. Which metric each applied to
+	// was a per-tournament convention the old API did not expose; rounds carrying
+	// payoutMultipliers name their own metrics and never reach these.
+	const legacyCorrLabel = $derived(
 		selectedTournament === TOURNAMENTS.CLASSIC
 			? 'CORR20v2'
 			: selectedTournament === TOURNAMENTS.SIGNALS
 				? 'ALPHA'
 				: 'CORR'
 	);
-	const mmcMultiplierLabel = $derived(
+	const legacyMmcLabel = $derived(
 		selectedTournament === TOURNAMENTS.SIGNALS ? 'MPC' : 'MMC'
 	);
 
@@ -1157,6 +1178,14 @@
 						positiveClass="bg-[var(--retro-primary)]"
 						negativeClass="bg-[var(--retro-accent)]"
 					/>
+					{#if isClassic}
+						<MetricBarComparison
+							label="MMC60 Comparison"
+							entries={metricEntries((r) => r?.mmc60)}
+							positiveClass="bg-[var(--retro-primary)]"
+							negativeClass="bg-[var(--retro-accent)]"
+						/>
+					{/if}
 				</div>
 			{/if}
 		</div>
@@ -1168,7 +1197,7 @@
 			<div class="mb-4">
 				<h3 class="text-lg font-medium retro-text-primary uppercase">Performance Over Time</h3>
 				<p class="text-sm retro-text-secondary mt-1">
-					Historical performance metrics for selected models (dual-axis: left for Corr/MMC/FNC, right for TC/Payout)
+					Historical performance metrics for selected models (dual-axis: left for Corr/MMC/FNC, right for Payout)
 				</p>
 			</div>
 
@@ -1216,15 +1245,18 @@
 							{/if}
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">Corr20 {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">MMC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
+							{#if isClassic}
+								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="60-day MMC — Classic's scoring target since 28 Aug">MMC60</th>
+							{/if}
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">FNC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Stake Value</th>
-							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="Stake payout multipliers">Multiplier</th>
+							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="Payout formula for the latest round, as returned by the API">Payout Formula</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--retro-light-grey)] retro-bg-primary">
 						{#each sortedModelPerformance as model}
 							{@const latestRound = getLatestRoundWithData(model, startDate, endDate)}
-							{@const mult = getMultipliers(model, latestRound)}
+							{@const payoutFormula = getPayoutFormula(model, latestRound)}
 							<tr>
 								<td class="whitespace-nowrap px-6 py-4 text-sm font-medium retro-text-primary">{model.modelName}</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">{model.username}</td>
@@ -1239,6 +1271,9 @@
 								{/if}
 								{@render metricCell(latestRound?.correlation)}
 								{@render metricCell(latestRound?.mmc)}
+								{#if isClassic}
+									{@render metricCell(latestRound?.mmc60)}
+								{/if}
 								{@render metricCell(latestRound?.fnc)}
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
 									{#if model.stakeValue !== null && model.stakeValue !== undefined && typeof model.stakeValue === 'number'}
@@ -1250,10 +1285,8 @@
 									{/if}
 								</td>
 								<td class="whitespace-nowrap px-6 py-4 text-sm retro-text-primary">
-									{#if mult.corr !== null || mult.mmc !== null}
-										{#if mult.corr !== null}{formatMultiplier(mult.corr)}×{corrMultiplierLabel}{/if}
-										{#if mult.corr !== null && mult.mmc !== null}{' '}{/if}
-										{#if mult.mmc !== null}{formatMultiplier(mult.mmc)}×{mmcMultiplierLabel}{/if}
+									{#if payoutFormula}
+										{payoutFormula}
 									{:else}
 										<span class="retro-text-secondary">N/A</span>
 									{/if}

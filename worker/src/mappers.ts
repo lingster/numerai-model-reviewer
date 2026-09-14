@@ -14,6 +14,7 @@
 import type { RoundPerformance } from './types';
 
 /** Numerai tournament ids. */
+export const CLASSIC_TOURNAMENT = 8;
 export const SIGNALS_TOURNAMENT = 11;
 export const CRYPTO_TOURNAMENT = 12;
 
@@ -44,6 +45,7 @@ export interface RawRoundModelPerformance {
 	fncV3?: number | null;
 	fncV4?: number | null;
 	tc?: number | null;
+	payoutMultipliers?: Array<{ name: string; displayName: string; multiplier: number }> | null;
 	corrMultiplier?: number | null;
 	mmcMultiplier?: number | null;
 	selectedStakeValue?: number | string | null;
@@ -86,10 +88,13 @@ export function mapRoundPerformance(
 		mmc,
 		fnc: toNumber(r.fncV4 ?? r.fncV3 ?? r.fnc),
 		tc: toNumber(r.tc),
-		// alpha/mpc are sourced separately from submissionScores (see api.ts);
-		// default to null so the shape is consistent for all tournaments.
+		// alpha/mpc (Signals) and mmc60 (Classic) are sourced separately from
+		// submissionScores (see api.ts); default to null so the shape is
+		// consistent for all tournaments and rounds.
+		mmc60: null,
 		alpha: null,
 		mpc: null,
+		payoutMultipliers: r.payoutMultipliers ?? null,
 		corrMultiplier: toNumber(r.corrMultiplier),
 		mmcMultiplier: toNumber(r.mmcMultiplier),
 		selectedStakeValue: toNumber(r.selectedStakeValue),

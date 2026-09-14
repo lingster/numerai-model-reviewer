@@ -6,19 +6,34 @@
  * this module is a thin client. The previous version fan-out fetched a
  * comparison pool over GraphQL; that's gone.
  *
- * Tournament-specific defaults are exposed via DEFAULT_FORMULA_FOR_TOURNAMENT
- * because each tournament has its own payout weighting: Classic (8) uses
- * 0.75*corr + 2.25*mmc, Signals (11) uses 0.3*alpha + 0.8*mpc, and Crypto (12)
- * uses 0.1*corr + 1*mmc.
+ * Tournament-specific defaults are exposed via getDefaultFormulaForTournament
+ * because each tournament has its own payout weighting. These are the seed
+ * values for the user-adjustable weight inputs on the rankings and round-summary
+ * pages — the authoritative per-round weighting is
+ * RoundPerformance.payoutMultipliers, which the API returns and the models page
+ * renders directly.
  */
 import type { ModelRankingHistory, RoundModelScore, ScoreFormula } from '$lib/types.js';
 import { config } from '$lib/config.js';
+import { SCORE_ALPHA_WEIGHT, SCORE_MPC_WEIGHT } from '$lib/utils/scoring.js';
 import { swrCache } from '$lib/utils/swr-cache.svelte.js';
 
 const SIGNALS_TOURNAMENT = 11;
 const CRYPTO_TOURNAMENT = 12;
 
-/** Default formula for Classic (corr + mmc): 0.75*corr + 2.25*mmc. */
+/**
+ * Default formula for Classic: 0.75*corr20 + 2.25*mmc.
+ *
+ * KNOWN STALE. Classic's payout moved to 3*CORR60 + 15*MMC60 on 28 Aug 2026
+ * (the API reports it per round in payoutMultipliers). These weights are NOT
+ * simply updated to 3/15, because the rankings pipeline has no 60-day metrics
+ * to apply them to: the D1 `model_performances` table stores corr/mmc/tc only,
+ * and precompute fetches corr/corr20V2/corrV4/mmc/mmc20d/tc/fncV4 — no corr60,
+ * no mmc60. Changing the weights alone would keep scoring 20-day metrics while
+ * claiming to be the 60-day formula. Correcting this means adding corr60/mmc60
+ * to precompute and pickMetrics first; until then these stay self-consistent
+ * with the 20-day metrics they are applied to.
+ */
 export const DEFAULT_SCORE_FORMULA: ScoreFormula = {
 	corrWeight: 0.75,
 	mmcWeight: 2.25,
@@ -26,9 +41,8 @@ export const DEFAULT_SCORE_FORMULA: ScoreFormula = {
 };
 
 /**
- * Default formula for Crypto: 0.1*corr + 1*mmc (the current Crypto payout
- * weighting). Crypto has its own regime distinct from Classic's corr-heavy
- * default.
+ * Default formula for Crypto: 0.1*corr + 1*mmc, matching what the API reports in
+ * payoutMultipliers. Crypto has its own regime distinct from Classic's.
  */
 export const DEFAULT_CRYPTO_SCORE_FORMULA: ScoreFormula = {
 	corrWeight: 0.1,
@@ -37,13 +51,15 @@ export const DEFAULT_CRYPTO_SCORE_FORMULA: ScoreFormula = {
 };
 
 /**
- * Default formula for Signals: 0.3*alpha + 0.8*mpc (the current Signals payout
- * weighting). The Worker reads alpha/mpc into the corr/mmc fields for tournament
- * 11, so corrWeight drives alpha and mmcWeight drives mpc.
+ * Default formula for Signals: 0.3*alpha + 0.8*mpc, matching what the API
+ * reports in payoutMultipliers. Weights are shared with the chart's alpha+mpc
+ * score rather than restated, so the two can never drift apart. The Worker reads
+ * alpha/mpc into the corr/mmc fields for tournament 11, so corrWeight drives
+ * alpha and mmcWeight drives mpc.
  */
 export const DEFAULT_SIGNALS_SCORE_FORMULA: ScoreFormula = {
-	corrWeight: 0.3,
-	mmcWeight: 0.8,
+	corrWeight: SCORE_ALPHA_WEIGHT,
+	mmcWeight: SCORE_MPC_WEIGHT,
 	tcWeight: 0
 };
 

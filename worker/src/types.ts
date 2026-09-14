@@ -20,6 +20,15 @@ export interface StakeInfo {
   tcMultiplier: number | null;
 }
 
+/** One metric's weight in a round's payout formula. */
+export interface PayoutMultiplier {
+  /** API metric key, e.g. `correlation_60`. */
+  name: string;
+  /** Short label matching our metric ids where possible, e.g. `corr60`. */
+  displayName: string;
+  multiplier: number;
+}
+
 export interface RoundPerformance {
   roundNumber: number;
   roundOpenTime?: string;
@@ -28,6 +37,15 @@ export interface RoundPerformance {
   correlation: number | null;
   corr60?: number | null;
   mmc: number | null;
+  // 60-day MMC. Classic only: sourced from submissionScores (roundModelPerformances
+  // has no mmc60 field), and null for Signals and Crypto, which do not publish it.
+  mmc60?: number | null;
+  /**
+   * The payout weighting in force for this round, straight from the API — e.g.
+   * Classic since 28 Aug 2026 returns corr60 x3 and mmc60 x15. Per round rather
+   * than per model, so historical rounds keep the weights they were paid under.
+   */
+  payoutMultipliers?: PayoutMultiplier[] | null;
   fnc: number | null;
   tc?: number | null;
   // New Numerai scoring (Signals): alpha + mpc. Null for tournaments/rounds

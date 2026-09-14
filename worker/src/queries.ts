@@ -112,6 +112,11 @@ export const QUERY_GET_MODEL_PERFORMANCE = `
         selectedStakeValue
         payout
         roundPayoutFactor
+        payoutMultipliers {
+          name
+          displayName
+          multiplier
+        }
       }
     }
   }
@@ -161,13 +166,43 @@ export const QUERY_GET_SIGNALS_MODEL_PERFORMANCE = `
         selectedStakeValue
         payout
         roundPayoutFactor
+        payoutMultipliers {
+          name
+          displayName
+          multiplier
+        }
       }
     }
   }
 `;
 
+/**
+ * Per-round submission scores. This is the only source of alpha/mpc (Signals),
+ * mmc60 (Classic) and every score Crypto has. The response carries a model's
+ * whole scored history, so callers cache it (see round-scores-cache.ts).
+ *
+ * `lastNRounds` is a round-number window, not a count.
+ */
 export const QUERY_GET_CRYPTO_MODEL_PERFORMANCE = `
   query getCryptoModelPerformance($modelId: String!, $tournament: Int!, $lastNRounds: Int!) {
+    v2RoundModelPerformances(modelId: $modelId, tournament: $tournament, lastNRounds: $lastNRounds) {
+      roundNumber
+      submissionScores {
+        displayName
+        value
+      }
+    }
+  }
+`;
+
+/**
+ * Crypto round metadata without the scores. Crypto has no
+ * `roundModelPerformances` of its own, so this supplies the round shape
+ * (timings, resolution, multipliers) while the scores come from the cached
+ * query above — splitting them keeps ~65% of the payload off every request.
+ */
+export const QUERY_GET_CRYPTO_ROUND_METADATA = `
+  query getCryptoRoundMetadata($modelId: String!, $tournament: Int!, $lastNRounds: Int!) {
     v2RoundModelPerformances(modelId: $modelId, tournament: $tournament, lastNRounds: $lastNRounds) {
       roundNumber
       roundOpenTime
@@ -175,9 +210,10 @@ export const QUERY_GET_CRYPTO_MODEL_PERFORMANCE = `
       roundResolved
       corrMultiplier
       mmcMultiplier
-      submissionScores {
+      payoutMultipliers {
+        name
         displayName
-        value
+        multiplier
       }
     }
   }
