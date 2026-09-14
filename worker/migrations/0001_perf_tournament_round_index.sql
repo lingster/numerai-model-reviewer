@@ -1,0 +1,44 @@
+-- Replace idx_perf_round (round_number, tournament) with
+-- idx_perf_tournament_round (tournament, round_number).
+--
+-- WHY
+--   Every model_performances query filters on tournament. With round_number
+--   leading, MIN/MAX(round_number) WHERE tournament = ? scans the whole table on
+--   every /rankings and /round-summary page load, and range queries read every
+--   tournament's rows. Measured on a local D1 (Miniflare) with 116,750 rows:
+--
+--     query                       before    after
+--     getCacheStatus (any)        116,750        2
+--     rolling window, 60 rounds    21,001    9,001
+--     precompute max round            201        1
+--     rows written per insert           4        4   (swapped, not added)
+--
+-- COST — READ BEFORE RUNNING
+--   Building an index on an existing table reads ~2 rows and writes ~1 row per
+--   table row. Measured: CREATE INDEX read 234,226 and wrote 116,752 rows on a
+--   116,750-row table. DROP INDEX read 11 and wrote 0.
+--
+--   Production holds ~5M rows, so expect roughly 10M rows read and 5M written.
+--   D1's free plan allows 5M read and 100k written per day: this will not fit.
+--   Run it on a paid plan (check https://developers.cloudflare.com/d1/platform/pricing/
+--   for current included usage), with the precompute workflow disabled so the
+--   two don't compete for quota.
+--
+-- WHY THIS IS NOT IN schema.sql
+--   deploy-worker.yml re-applies schema.sql to production on every deploy. Put
+--   this there and every deploy would attempt the ~5M-row build (or, after the
+--   swap, rebuild whichever index was left out). schema-safety.test.ts enforces
+--   that schema.sql stays cheap to re-run.
+--
+-- ORDER
+--   Create first, then drop. If the build fails part-way, the old index is still
+--   there and queries keep working as before.
+--
+-- RUN
+--   npx wrangler d1 execute numerai-cache --remote --file=migrations/0001_perf_tournament_round_index.sql
+--
+-- VERIFY (each should report a handful of rows read, not millions)
+--   npx wrangler d1 execute numerai-cache --remote --command "SELECT (SELECT MAX(round_number) FROM model_performances WHERE tournament = 12) AS latest, (SELECT MIN(round_number) FROM model_performances WHERE tournament = 12) AS earliest"
+
+CREATE INDEX IF NOT EXISTS idx_perf_tournament_round ON model_performances(tournament, round_number);
+DROP INDEX IF EXISTS idx_perf_round;

@@ -58,5 +58,7 @@ const getFeatureFlags = () => {
 export const config = {
 	apiUrl: getApiUrl(),
 	search: getSearchConfig(),
-	features: getFeatureFlags()
+	features: getFeatureFlags(),
+	/** Public source repository, linked from the home page. */
+	repoUrl: 'https://github.com/lingster/numerai-model-reviewer'
 };

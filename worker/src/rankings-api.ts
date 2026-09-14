@@ -23,6 +23,15 @@
  */
 import { CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 import { d1Retry } from './d1-retry';
+import {
+	selectRoundField,
+	selectRoundFieldsInRange,
+	selectRoundRange,
+	selectTopModelByName,
+	type RoundPerfRow,
+	type TopModelRow
+} from './perf-queries';
+import { computeTrailingAverages } from './windowed-metrics';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -56,21 +65,7 @@ export interface ModelRankResponse {
 	rounds: ModelRankRoundResult[];
 }
 
-interface TopModelRow {
-	model_id: string;
-	model_name: string;
-	username: string;
-}
-
-export interface RoundPerfRow {
-	model_name: string;
-	corr: number | null;
-	mmc: number | null;
-	tc: number | null;
-	alpha: number | null;
-	mpc: number | null;
-	stake_value: number | null;
-}
+export type { RoundPerfRow } from './perf-queries';
 
 /** Pick the (corr-like, mmc-like) metric pair for the given tournament. */
 function pickMetrics(row: RoundPerfRow, tournament: number): {
@@ -90,6 +85,9 @@ export interface MetricTriple {
 	mmc: number | null;
 	tc: number | null;
 }
+
+/** The MetricTriple members, as the key list the windowed averager takes. */
+const TRIPLE_KEYS = ['corr', 'mmc', 'tc'] as const satisfies readonly (keyof MetricTriple)[];
 
 /** Custom score for a metric triple under the formula. null if no metric present. */
 function scoreFromMetrics(m: MetricTriple, formula: ScoreFormula): number | null {
@@ -132,34 +130,14 @@ export function buildWindowedMetrics(
 
 	const result = new Map<string, Map<number, MetricTriple>>();
 	for (const [key, entries] of perModel) {
-		entries.sort((a, b) => a.round - b.round);
-
-		// Slide a width-`window` window (by round number) with running per-metric
-		// sums/counts so each round's average is O(1) amortized.
-		let lo = 0;
-		let sumCorr = 0, cntCorr = 0;
-		let sumMmc = 0, cntMmc = 0;
-		let sumTc = 0, cntTc = 0;
-		const apply = (e: { round: number } & MetricTriple, sign: 1 | -1) => {
-			if (e.corr !== null) { sumCorr += sign * e.corr; cntCorr += sign; }
-			if (e.mmc !== null) { sumMmc += sign * e.mmc; cntMmc += sign; }
-			if (e.tc !== null) { sumTc += sign * e.tc; cntTc += sign; }
-		};
-
-		const byRound = new Map<number, MetricTriple>();
-		for (let hi = 0; hi < entries.length; hi++) {
-			apply(entries[hi], 1);
-			while (entries[lo].round <= entries[hi].round - window) {
-				apply(entries[lo], -1);
-				lo++;
-			}
-			byRound.set(entries[hi].round, {
-				corr: cntCorr > 0 ? sumCorr / cntCorr : null,
-				mmc: cntMmc > 0 ? sumMmc / cntMmc : null,
-				tc: cntTc > 0 ? sumTc / cntTc : null
-			});
-		}
-		result.set(key, byRound);
+		result.set(
+			key,
+			computeTrailingAverages(
+				entries.map((e) => ({ round: e.round, values: e })),
+				TRIPLE_KEYS,
+				window
+			)
+		);
 	}
 	return result;
 }
@@ -211,16 +189,7 @@ async function lookupModel(
 	modelName: string,
 	tournament: number
 ): Promise<TopModelRow | null> {
-	const row = await d1Retry(() =>
-		env.DB.prepare(
-			`SELECT model_id, model_name, username
-			   FROM top_staked_models
-			  WHERE LOWER(model_name) = LOWER(?) AND tournament = ?`
-		)
-			.bind(modelName, tournament)
-			.first<TopModelRow>()
-	);
-	return row ?? null;
+	return selectTopModelByName(env.DB, modelName, tournament);
 }
 
 /**
@@ -233,21 +202,7 @@ async function fetchRoundField(
 	round: number,
 	tournament: number
 ): Promise<RoundPerfRow[]> {
-	const sql =
-		tournament === 12
-			? `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
-			     FROM model_performances
-			    WHERE round_number = ? AND tournament = ?`
-			: `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
-			     FROM model_performances
-			    WHERE round_number = ? AND tournament = ?
-			      AND stake_value IS NOT NULL AND stake_value > 0`;
-	const result = await d1Retry(() =>
-		env.DB.prepare(sql)
-			.bind(round, tournament)
-			.all<RoundPerfRow>()
-	);
-	return result.results ?? [];
+	return selectRoundField(env.DB, round, tournament);
 }
 
 // Rounds per batched range query. Ranking needs every staked model's row for
@@ -267,21 +222,11 @@ async function fetchRoundFields(
 	endRound: number,
 	tournament: number
 ): Promise<Map<number, RoundPerfRow[]>> {
-	const stakeFilter =
-		tournament === 12 ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
-	const sql = `SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, stake_value
-		     FROM model_performances
-		    WHERE round_number BETWEEN ? AND ? AND tournament = ?${stakeFilter}`;
-
 	const byRound = new Map<number, RoundPerfRow[]>();
 	for (let lo = startRound; lo <= endRound; lo += RANGE_CHUNK_ROUNDS) {
 		const hi = Math.min(lo + RANGE_CHUNK_ROUNDS - 1, endRound);
-		const result = await d1Retry(() =>
-			env.DB.prepare(sql)
-				.bind(lo, hi, tournament)
-				.all<RoundPerfRow & { round_number: number }>()
-		);
-		for (const r of result.results ?? []) {
+		const rows = await selectRoundFieldsInRange(env.DB, lo, hi, tournament);
+		for (const r of rows) {
 			const list = byRound.get(r.round_number);
 			if (list) list.push(r);
 			else byRound.set(r.round_number, [r]);
@@ -536,20 +481,7 @@ export interface CacheStatus {
  * Returns nulls when the cache holds no rows for the tournament.
  */
 export async function getCacheStatus(env: Env, tournament: number): Promise<CacheStatus> {
-	const row = await d1Retry(() =>
-		env.DB.prepare(
-			`SELECT MAX(round_number) AS latestRound, MIN(round_number) AS earliestRound
-			   FROM model_performances
-			  WHERE tournament = ?`
-		)
-			.bind(tournament)
-			.first<{ latestRound: number | null; earliestRound: number | null }>()
-	);
-	return {
-		tournament,
-		latestRound: row?.latestRound ?? null,
-		earliestRound: row?.earliestRound ?? null
-	};
+	return { tournament, ...(await selectRoundRange(env.DB, tournament)) };
 }
 
 /** Top-N entry returned by /rankings/top-models. */

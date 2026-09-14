@@ -1,8 +1,32 @@
+<script lang="ts">
+	import GitHubIcon from '$lib/components/GitHubIcon.svelte';
+	import { config } from '$lib/config.js';
+</script>
+
 <div class="mx-auto max-w-4xl px-2 py-6 sm:px-6 sm:py-8">
-	<h1 class="mb-6 text-4xl font-bold retro-text-accent uppercase tracking-wider">NMR - NUMERAI MODEL REVIEWER</h1>
-	<p class="mb-8 text-lg retro-text-secondary">
-		► Compare and analyze the performance of Numerai tournament models over time.
-	</p>
+	<div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<h1 class="text-4xl font-bold retro-text-accent uppercase tracking-wider">NMR - NUMERAI MODEL REVIEWER</h1>
+			<p class="mt-2 text-lg retro-text-secondary">
+				► Compare and analyze the performance of Numerai tournament models over time.
+			</p>
+		</div>
+		<a
+			href={config.repoUrl}
+			target="_blank"
+			rel="noopener noreferrer"
+			class="retro-button inline-flex items-center gap-2 self-start rounded-md px-3 py-2 text-sm font-medium transition-colors sm:self-auto"
+			title="View source on GitHub - PRs welcome!"
+		>
+			<GitHubIcon />
+			<span>GitHub</span>
+			<!-- Dark text: --retro-success is a bright green that white text cannot
+			     meet contrast requirements against. -->
+			<span class="rounded px-1.5 py-0.5 text-xs font-semibold uppercase text-black" style="background-color: var(--retro-success);">
+				PRs welcome!
+			</span>
+		</a>
+	</div>
 	
 	<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
 		<div class="retro-card rounded-lg p-4 sm:p-6">
@@ -81,6 +105,27 @@
 					URL-based sharing
 				</li>
 			</ul>
+		</div>
+
+		<div class="retro-card rounded-lg p-4 sm:p-6">
+			<h2 class="mb-3 text-xl font-semibold retro-text-primary uppercase flex items-center gap-2">
+				<GitHubIcon />
+				Open Source
+			</h2>
+			<p class="mb-4 retro-text-secondary">
+				Built with SvelteKit & Cloudflare. Fork, inspect, or contribute: Pull Requests are warmly welcome!
+			</p>
+			<a
+				href={config.repoUrl}
+				target="_blank"
+				rel="noopener noreferrer"
+				class="retro-button inline-flex items-center rounded-md px-4 py-2 text-sm font-medium"
+			>
+				Contribute on GitHub
+				<svg class="ml-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+				</svg>
+			</a>
 		</div>
 	</div>
 </div>
