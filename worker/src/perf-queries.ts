@@ -62,7 +62,15 @@ const stakedFilter = (tournament: number): string =>
 
 const ROUND_PERF_COLUMNS = 'model_name, corr, mmc, tc, alpha, mpc, stake_value';
 
-/** Look up a model's id and owner, case-insensitively by name. */
+/**
+ * Look up a model's id and owner, case-insensitively by name.
+ *
+ * Lowercases the *input* only. Numerai model names are always lowercase (none
+ * of 17,381 across Classic, Signals and Crypto has an uppercase letter), so this
+ * matches exactly what LOWER(model_name) = LOWER(?) did — but seeks the primary
+ * key for one row instead of scanning every staked model, since wrapping the
+ * column in LOWER() made it unindexable.
+ */
 export async function selectTopModelByName(
 	db: D1Database,
 	modelName: string,
@@ -73,7 +81,7 @@ export async function selectTopModelByName(
 			.prepare(
 				`SELECT model_id, model_name, username
 				   FROM top_staked_models
-				  WHERE LOWER(model_name) = LOWER(?) AND tournament = ?`
+				  WHERE model_name = LOWER(?) AND tournament = ?`
 			)
 			.bind(modelName, tournament)
 			.first<TopModelRow>()
@@ -120,14 +128,19 @@ export async function selectRoundFieldsInRange(
 	return result.results ?? [];
 }
 
-/** The earliest and latest round stored for a tournament. */
+/**
+ * The earliest and latest round stored for a tournament.
+ *
+ * MIN and MAX are separate subqueries on purpose: SQLite answers a lone MIN or
+ * MAX with a single index seek, but a SELECT holding both scans every matching
+ * row — all of a tournament's history, on every rankings page load.
+ */
 export async function selectRoundRange(db: D1Database, tournament: number): Promise<RoundRange> {
 	const row = await d1Retry(() =>
 		db
 			.prepare(
-				`SELECT MAX(round_number) AS latestRound, MIN(round_number) AS earliestRound
-				   FROM model_performances
-				  WHERE tournament = ?`
+				`SELECT (SELECT MAX(round_number) FROM model_performances WHERE tournament = ?1) AS latestRound,
+				        (SELECT MIN(round_number) FROM model_performances WHERE tournament = ?1) AS earliestRound`
 			)
 			.bind(tournament)
 			.first<RoundRange>()
