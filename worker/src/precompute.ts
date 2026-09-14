@@ -14,7 +14,7 @@
  */
 
 import { readMaxRound } from './refresh-floor';
-import { createWranglerReader, execErrorDetail, type CommandRunner } from './wrangler-d1';
+import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
 import { execSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -1170,7 +1170,7 @@ async function main() {
   // an empty tournament — see refresh-floor.ts for the incidents that caused.
   const maxRoundInD1 = reset
     ? null
-    : await readMaxRound(createWranglerReader(runCommand, isLocal), config.tournament);
+    : await readMaxRound(createWranglerQuery(runCommand, isLocal), config.tournament);
   const minRound = computeMinRound(maxRoundInD1, reset, REFRESH_OVERLAP_ROUNDS);
   if (reset) {
     console.log('Refresh mode: --reset — full backfill.\n');

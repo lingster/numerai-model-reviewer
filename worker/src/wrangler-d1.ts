@@ -6,7 +6,7 @@
  * has no Node dependency and every path is unit-testable.
  */
 
-import type { D1Reader } from './refresh-floor';
+import type { D1Query } from './d1-query';
 
 /**
  * Runs a shell command and returns its stdout, throwing on a non-zero exit the
@@ -58,14 +58,14 @@ export function parseWranglerJsonRows(output: string): Array<Record<string, unkn
 }
 
 /**
- * A D1Reader backed by `wrangler d1 execute`, against the local or remote DB.
+ * A D1Query backed by `wrangler d1 execute`, against the local or remote DB.
  * Failures reject with wrangler's own explanation, not execSync's generic one.
  */
-export function createWranglerReader(
+export function createWranglerQuery(
 	run: CommandRunner,
 	isLocal: boolean,
 	database = 'numerai-cache'
-): D1Reader {
+): D1Query {
 	const location = isLocal ? '--local' : '--remote';
 
 	return async (sql) => {

@@ -8,13 +8,14 @@
  * run; only a read that succeeds and finds no rows may start a backfill.
  */
 import { describe, it, expect } from 'vitest';
-import { readMaxRound, MaxRoundReadError, type D1Reader } from './refresh-floor';
+import type { D1Query } from './d1-query';
+import { readMaxRound, MaxRoundReadError } from './refresh-floor';
 
 /** A reader that answers every query with the given rows. */
-const answering = (rows: ReadonlyArray<Record<string, unknown>>): D1Reader => async () => rows;
+const answering = (rows: ReadonlyArray<Record<string, unknown>>): D1Query => async () => rows;
 
 /** A reader whose query fails, like wrangler hitting the read quota. */
-const failing = (message: string): D1Reader => async () => {
+const failing = (message: string): D1Query => async () => {
 	throw new Error(message);
 };
 
@@ -53,7 +54,7 @@ describe('readMaxRound', () => {
 
 	it('asks for the requested tournament only', async () => {
 		let seen = '';
-		const spy: D1Reader = async (sql) => {
+		const spy: D1Query = async (sql) => {
 			seen = sql;
 			return [{ maxRound: 1 }];
 		};

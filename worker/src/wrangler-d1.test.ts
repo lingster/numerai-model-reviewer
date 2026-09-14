@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-	createWranglerReader,
+	createWranglerQuery,
 	execErrorDetail,
 	parseWranglerJsonRows,
 	type CommandRunner
@@ -67,7 +67,7 @@ describe('parseWranglerJsonRows', () => {
 	});
 });
 
-describe('createWranglerReader', () => {
+describe('createWranglerQuery', () => {
 	const ok = (rows: unknown[]): CommandRunner => () => JSON.stringify([{ results: rows }]);
 
 	it('targets the remote database unless told otherwise', async () => {
@@ -76,11 +76,11 @@ describe('createWranglerReader', () => {
 			command = cmd;
 			return JSON.stringify([{ results: [] }]);
 		};
-		await createWranglerReader(run, false)('SELECT 1');
+		await createWranglerQuery(run, false)('SELECT 1');
 		expect(command).toContain('d1 execute numerai-cache --remote');
 		expect(command).toContain('--json');
 
-		await createWranglerReader(run, true)('SELECT 1');
+		await createWranglerQuery(run, true)('SELECT 1');
 		expect(command).toContain('--local');
 	});
 
@@ -90,12 +90,12 @@ describe('createWranglerReader', () => {
 			command = cmd;
 			return JSON.stringify([{ results: [] }]);
 		};
-		await createWranglerReader(run, false)('SELECT "a" FROM t WHERE x = 1');
+		await createWranglerQuery(run, false)('SELECT "a" FROM t WHERE x = 1');
 		expect(command).toContain('--command "SELECT \\"a\\" FROM t WHERE x = 1"');
 	});
 
 	it('resolves with the parsed result rows', async () => {
-		await expect(createWranglerReader(ok([{ maxRound: 9 }]), false)('SELECT 1')).resolves.toEqual([
+		await expect(createWranglerQuery(ok([{ maxRound: 9 }]), false)('SELECT 1')).resolves.toEqual([
 			{ maxRound: 9 }
 		]);
 	});
@@ -106,6 +106,6 @@ describe('createWranglerReader', () => {
 				stderr: "exceeded D1's free tier daily row read limit"
 			});
 		};
-		await expect(createWranglerReader(run, false)('SELECT 1')).rejects.toThrow(/read limit/);
+		await expect(createWranglerQuery(run, false)('SELECT 1')).rejects.toThrow(/read limit/);
 	});
 });
