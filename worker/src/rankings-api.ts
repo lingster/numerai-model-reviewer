@@ -23,6 +23,14 @@
  */
 import { CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 import { d1Retry } from './d1-retry';
+import {
+	selectRoundField,
+	selectRoundFieldsInRange,
+	selectRoundRange,
+	selectTopModelByName,
+	type RoundPerfRow,
+	type TopModelRow
+} from './perf-queries';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -56,21 +64,7 @@ export interface ModelRankResponse {
 	rounds: ModelRankRoundResult[];
 }
 
-interface TopModelRow {
-	model_id: string;
-	model_name: string;
-	username: string;
-}
-
-export interface RoundPerfRow {
-	model_name: string;
-	corr: number | null;
-	mmc: number | null;
-	tc: number | null;
-	alpha: number | null;
-	mpc: number | null;
-	stake_value: number | null;
-}
+export type { RoundPerfRow } from './perf-queries';
 
 /** Pick the (corr-like, mmc-like) metric pair for the given tournament. */
 function pickMetrics(row: RoundPerfRow, tournament: number): {
@@ -211,16 +205,7 @@ async function lookupModel(
 	modelName: string,
 	tournament: number
 ): Promise<TopModelRow | null> {
-	const row = await d1Retry(() =>
-		env.DB.prepare(
-			`SELECT model_id, model_name, username
-			   FROM top_staked_models
-			  WHERE LOWER(model_name) = LOWER(?) AND tournament = ?`
-		)
-			.bind(modelName, tournament)
-			.first<TopModelRow>()
-	);
-	return row ?? null;
+	return selectTopModelByName(env.DB, modelName, tournament);
 }
 
 /**
@@ -233,21 +218,7 @@ async function fetchRoundField(
 	round: number,
 	tournament: number
 ): Promise<RoundPerfRow[]> {
-	const sql =
-		tournament === 12
-			? `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
-			     FROM model_performances
-			    WHERE round_number = ? AND tournament = ?`
-			: `SELECT model_name, corr, mmc, tc, alpha, mpc, stake_value
-			     FROM model_performances
-			    WHERE round_number = ? AND tournament = ?
-			      AND stake_value IS NOT NULL AND stake_value > 0`;
-	const result = await d1Retry(() =>
-		env.DB.prepare(sql)
-			.bind(round, tournament)
-			.all<RoundPerfRow>()
-	);
-	return result.results ?? [];
+	return selectRoundField(env.DB, round, tournament);
 }
 
 // Rounds per batched range query. Ranking needs every staked model's row for
@@ -267,21 +238,11 @@ async function fetchRoundFields(
 	endRound: number,
 	tournament: number
 ): Promise<Map<number, RoundPerfRow[]>> {
-	const stakeFilter =
-		tournament === 12 ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
-	const sql = `SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, stake_value
-		     FROM model_performances
-		    WHERE round_number BETWEEN ? AND ? AND tournament = ?${stakeFilter}`;
-
 	const byRound = new Map<number, RoundPerfRow[]>();
 	for (let lo = startRound; lo <= endRound; lo += RANGE_CHUNK_ROUNDS) {
 		const hi = Math.min(lo + RANGE_CHUNK_ROUNDS - 1, endRound);
-		const result = await d1Retry(() =>
-			env.DB.prepare(sql)
-				.bind(lo, hi, tournament)
-				.all<RoundPerfRow & { round_number: number }>()
-		);
-		for (const r of result.results ?? []) {
+		const rows = await selectRoundFieldsInRange(env.DB, lo, hi, tournament);
+		for (const r of rows) {
 			const list = byRound.get(r.round_number);
 			if (list) list.push(r);
 			else byRound.set(r.round_number, [r]);
@@ -536,20 +497,7 @@ export interface CacheStatus {
  * Returns nulls when the cache holds no rows for the tournament.
  */
 export async function getCacheStatus(env: Env, tournament: number): Promise<CacheStatus> {
-	const row = await d1Retry(() =>
-		env.DB.prepare(
-			`SELECT MAX(round_number) AS latestRound, MIN(round_number) AS earliestRound
-			   FROM model_performances
-			  WHERE tournament = ?`
-		)
-			.bind(tournament)
-			.first<{ latestRound: number | null; earliestRound: number | null }>()
-	);
-	return {
-		tournament,
-		latestRound: row?.latestRound ?? null,
-		earliestRound: row?.earliestRound ?? null
-	};
+	return { tournament, ...(await selectRoundRange(env.DB, tournament)) };
 }
 
 /** Top-N entry returned by /rankings/top-models. */
