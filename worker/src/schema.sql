@@ -43,20 +43,14 @@ CREATE TABLE IF NOT EXISTS model_performances (
 -- ALTER TABLE model_performances ADD COLUMN alpha REAL;
 -- ALTER TABLE model_performances ADD COLUMN mpc REAL;
 
--- Leads with tournament because every model_performances query filters on it.
--- The old (round_number, tournament) order made MIN/MAX(round_number) WHERE
--- tournament = ? scan the entire table — ~5M rows, a whole day of D1's free read
--- quota — on every rankings page load, and range queries read every tournament's
--- rows. Replaced rather than added, so inserts write no extra index row.
+-- This file is re-applied to the production D1 on every worker deploy
+-- (deploy-worker.yml), so everything in it must be cheap to re-run: tables with
+-- IF NOT EXISTS, and only indexes production already has. schema-safety.test.ts
+-- enforces that.
 --
--- WARNING — do not re-run this file against the production database to pick up
--- this index. On an existing table, CREATE INDEX writes one row per table row
--- (measured: 116,752 written for 116,750 rows), i.e. ~5M rows for production —
--- about 50 days of the free plan's 100k/day write limit. Use
--- migrations/0001_perf_tournament_round_index.sql, which documents the cost and
--- the prerequisites. Creating before dropping means a failed build leaves the
--- old index in place rather than none.
-CREATE INDEX IF NOT EXISTS idx_perf_tournament_round ON model_performances(tournament, round_number);
-DROP INDEX IF EXISTS idx_perf_round;
+-- The model_performances round index is therefore NOT declared here. It lives in
+-- migrations/0001_perf_tournament_round_index.sql, because building an index on
+-- the existing ~5M-row table writes ~5M rows. A fresh database (CI, local dev,
+-- tests) applies this file and then migrations/*.sql in order.
 CREATE INDEX IF NOT EXISTS idx_perf_model ON model_performances(model_name, tournament);
 CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_seconds);

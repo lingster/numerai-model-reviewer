@@ -50,6 +50,10 @@ jobs:
         working-directory: worker
         run: |
           npx wrangler d1 execute numerai-cache --local --persist-to=.wrangler/state --yes --file=src/schema.sql
+          # Then migrations, in order — a fresh database is schema.sql + migrations/*.sql.
+          for migration in $(ls migrations/*.sql | sort); do
+            npx wrangler d1 execute numerai-cache --local --persist-to=.wrangler/state --yes --file="$migration"
+          done
           npx wrangler d1 execute numerai-cache --local --persist-to=.wrangler/state --yes --file=test/seed.sql
 
       - name: Start worker (local)

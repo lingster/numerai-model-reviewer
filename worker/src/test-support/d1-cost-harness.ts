@@ -12,6 +12,16 @@
 import { Miniflare } from 'miniflare';
 import schemaSql from '../schema.sql?raw';
 
+/**
+ * migrations/*.sql, applied after schema.sql in filename order — the same way a
+ * fresh database is built in CI and local dev.
+ */
+const migrationSql = Object.entries(
+	import.meta.glob('../../migrations/*.sql', { query: '?raw', import: 'default', eager: true })
+)
+	.sort(([a], [b]) => a.localeCompare(b))
+	.map(([, sql]) => sql as string);
+
 /** Rows D1 billed for some work. */
 export interface D1Cost {
 	rowsRead: number;
@@ -52,7 +62,7 @@ export class D1CostHarness {
 		private readonly raw: D1Database
 	) {}
 
-	/** A fresh database with the production schema applied. */
+	/** A fresh database built like production's: schema.sql, then every migration. */
 	static async create(): Promise<D1CostHarness> {
 		const miniflare = new Miniflare({
 			modules: true,
@@ -62,6 +72,7 @@ export class D1CostHarness {
 		const raw = (await miniflare.getD1Database('DB')) as unknown as D1Database;
 		const harness = new D1CostHarness(miniflare, raw);
 		await harness.execute(schemaSql);
+		for (const migration of migrationSql) await harness.execute(migration);
 		return harness;
 	}
 

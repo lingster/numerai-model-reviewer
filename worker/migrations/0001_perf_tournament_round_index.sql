@@ -24,6 +24,12 @@
 --   for current included usage), with the precompute workflow disabled so the
 --   two don't compete for quota.
 --
+-- WHY THIS IS NOT IN schema.sql
+--   deploy-worker.yml re-applies schema.sql to production on every deploy. Put
+--   this there and every deploy would attempt the ~5M-row build (or, after the
+--   swap, rebuild whichever index was left out). schema-safety.test.ts enforces
+--   that schema.sql stays cheap to re-run.
+--
 -- ORDER
 --   Create first, then drop. If the build fails part-way, the old index is still
 --   there and queries keep working as before.
