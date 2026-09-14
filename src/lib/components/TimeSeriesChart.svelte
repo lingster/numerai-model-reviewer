@@ -18,8 +18,9 @@
 		endDate: string;
 	} = $props();
 
-	// Color palette for models - distinct from metric colors
-	// Using colors that don't clash with metrics: green, blue, red, purple, orange, brown
+	// Color palette for models - distinct from metric colors. Paired with
+	// dashPatterns below: colour cycles every 20 models and dash every 8, so a
+	// model's (colour, dash) pair only repeats after 40.
 	const modelColorPalette = [
 		'#1e90ff', // dodger blue
 		'#dc143c', // crimson
@@ -29,24 +30,28 @@
 		'#ffa500', // orange
 		'#9370db', // medium purple
 		'#20b2aa', // light sea green
-		'#f0e68c', // khaki
-		'#cd853f', // peru
-		'#dda0dd', // plum
-		'#87ceeb'  // sky blue
+		'#ff6347', // tomato
+		'#ba55d3', // medium orchid
+		'#3cb371', // medium sea green
+		'#ff8c00', // dark orange
+		'#9400d3', // dark violet
+		'#00fa9a', // medium spring green
+		'#ff1493', // deep pink
+		'#4169e1', // royal blue
+		'#8a2be2', // blue violet
+		'#00bfff', // deep sky blue
+		'#adff2f', // green yellow
+		'#ff4500'  // orange red
 	];
 
-	// Dash patterns for differentiating models
+	// Line dash patterns to distinguish lines with the same color
 	const dashPatterns = [
 		'none',           // solid
-		'8,4',            // long dashes
-		'4,4',            // medium dashes
-		'2,2',            // short dashes
-		'12,4,4,4',       // dash-dot
-		'8,4,2,4',        // long-dash-short
-		'2,4',            // dots
-		'16,4',           // very long dashes
-		'4,2,2,2',        // short-dash-dot
-		'12,8',           // spaced long dashes
+		'5,5',            // dashed
+		'2,2',            // dotted
+		'8,4,2,4',        // dash-dot
+		'10,2',           // long dash
+		'2,4',            // loose dot
 		'6,3,2,3',        // medium-dash-dot
 		'4,8'             // short spaced
 	];
@@ -56,8 +61,8 @@
 		corr20: { label: 'Corr20', axis: 'left', color: '#4daf4a' },
 		corr60: { label: 'Corr60', axis: 'left', color: '#377eb8' },
 		mmc: { label: 'MMC', axis: 'left', color: '#e41a1c' },
+		mmc60: { label: 'MMC60', axis: 'left', color: '#ff7f00' },
 		fnc: { label: 'FNC', axis: 'left', color: '#984ea3' },
-		tc: { label: 'TC', axis: 'right', color: '#ff7f00' },
 		payout: { label: 'Payout', axis: 'right', color: '#a65628' },
 		// New Numerai scoring (Signals)
 		alpha: { label: 'Alpha', axis: 'left', color: '#00c0d0' },
@@ -65,12 +70,20 @@
 		score: { label: 'Score', axis: 'left', color: '#e91e63' }
 	};
 
-	// Metrics shown in each scoring mode.
-	const CLASSIC_METRICS: ChartMetric[] = ['corr20', 'mmc', 'tc'];
+	// Every metric, and the two axis groups, derived from metricConfig so that
+	// adding or removing a metric there is the only edit required.
+	const ALL_METRICS = Object.keys(metricConfig) as ChartMetric[];
+	const LEFT_METRICS = ALL_METRICS.filter(m => metricConfig[m].axis === 'left');
+	const RIGHT_METRICS = ALL_METRICS.filter(m => metricConfig[m].axis === 'right');
+
+	// Metrics shown in each scoring mode. Classic switched its scoring target from
+	// the 20-day to the 60-day window on 28 Aug, so Corr60/MMC60 are the default
+	// pair; the 20-day series stay available as individual toggles.
+	const CLASSIC_METRICS: ChartMetric[] = ['corr60', 'mmc60'];
 	const NEW_METRICS: ChartMetric[] = ['alpha', 'mpc', 'score'];
 
-	// State for metric toggles - default to corr20 and mmc
-	let activeMetrics = $state<Set<ChartMetric>>(new Set(['corr20', 'mmc']));
+	// State for metric toggles - default to the Classic (60-day) pair.
+	let activeMetrics = $state<Set<ChartMetric>>(new Set(CLASSIC_METRICS));
 
 	// Calculated score weights (default Numerai Signals: 0.3*alpha + 0.8*mpc).
 	// Adjustable so the score can track future scoring-rule changes.
@@ -164,11 +177,13 @@
 					// Filter by resolved status - but keep rounds with actual data even if not officially resolved
 					if (!showUnresolved && !round.roundResolved) {
 						// Only filter out if there's no actual performance data
+						// mmc60 is deliberately excluded: it is a trailing average derived
+						// from earlier rounds, so it is non-null even for a round that has
+						// no scores of its own and would wrongly keep empty rounds here.
 						const hasMetric = round.correlation !== null
 							|| round.mmc !== null
 							|| round.corr60 !== null
 							|| round.fnc !== null
-							|| round.tc !== null
 							|| round.payout !== null
 							|| round.alpha != null
 							|| round.mpc != null;
@@ -195,8 +210,8 @@
 						corr20: toNumber(round.correlation),
 						corr60: toNumber(round.corr60),
 						mmc: toNumber(round.mmc),
+						mmc60: toNumber(round.mmc60),
 						fnc: toNumber(round.fnc),
-						tc: toNumber(round.tc),
 						payout: toNumber(round.payout),
 						alpha,
 						mpc,
@@ -222,44 +237,23 @@
 	const chartSeriesDisplay = $derived.by(() => {
 		if (!showCumulative) return chartSeries;
 
-		const metrics: ChartMetric[] = ['corr20', 'corr60', 'mmc', 'fnc', 'tc', 'payout', 'alpha', 'mpc', 'score'];
-
 		return chartSeries.map(series => {
-			const runningTotals: Record<ChartMetric, number> = {
-				corr20: 0,
-				corr60: 0,
-				mmc: 0,
-				fnc: 0,
-				tc: 0,
-				payout: 0,
-				alpha: 0,
-				mpc: 0,
-				score: 0
-			};
-
-			const seenMetric: Record<ChartMetric, boolean> = {
-				corr20: false,
-				corr60: false,
-				mmc: false,
-				fnc: false,
-				tc: false,
-				payout: false,
-				alpha: false,
-				mpc: false,
-				score: false
-			};
+			// Running total per metric, null until that metric's first finite value —
+			// so a metric with no data yet stays absent rather than plotting as 0.
+			const runningTotals = Object.fromEntries(
+				ALL_METRICS.map(m => [m, null])
+			) as Record<ChartMetric, number | null>;
 
 			const data = series.data.map(point => {
 				const nextPoint: ChartDataPoint = { ...point };
 
-				metrics.forEach(metric => {
+				ALL_METRICS.forEach(metric => {
 					const value = point[metric];
 					if (typeof value === 'number' && Number.isFinite(value)) {
-						runningTotals[metric] += value;
-						seenMetric[metric] = true;
+						runningTotals[metric] = (runningTotals[metric] ?? 0) + value;
 					}
 
-					nextPoint[metric] = seenMetric[metric] ? runningTotals[metric] : null;
+					nextPoint[metric] = runningTotals[metric];
 				});
 
 				return nextPoint;
@@ -282,10 +276,12 @@
 		allDataPoints.some(p => p.alpha !== null || p.mpc !== null)
 	);
 
+	// True when any right-axis metric is active — gates the whole right axis.
+	const hasRightAxis = $derived(RIGHT_METRICS.some(m => activeMetrics.has(m)));
+
 	// Calculate domains for left and right axes
 	const leftAxisDomain = $derived.by(() => {
-		const leftMetrics: ChartMetric[] = ['corr20', 'corr60', 'mmc', 'fnc', 'alpha', 'mpc', 'score'];
-		const activeLeftMetrics = leftMetrics.filter(m => activeMetrics.has(m));
+		const activeLeftMetrics = LEFT_METRICS.filter(m => activeMetrics.has(m));
 
 		if (activeLeftMetrics.length === 0 || allDataPoints.length === 0) {
 			return [-0.05, 0.05];
@@ -311,8 +307,7 @@
 	});
 
 	const rightAxisDomain = $derived.by(() => {
-		const rightMetrics: ChartMetric[] = ['tc', 'payout'];
-		const activeRightMetrics = rightMetrics.filter(m => activeMetrics.has(m));
+		const activeRightMetrics = RIGHT_METRICS.filter(m => activeMetrics.has(m));
 
 		if (activeRightMetrics.length === 0 || allDataPoints.length === 0) {
 			return [0, 1];
@@ -415,9 +410,9 @@
 		return regions;
 	});
 
-	// Switch the active metric set between Classic (corr/mmc/tc) and New (alpha/mpc/score).
+	// Switch the active metric set between Classic (corr60/mmc60) and New (alpha/mpc/score).
 	function setScoringMode(mode: 'classic' | 'new') {
-		activeMetrics = new Set<ChartMetric>(mode === 'classic' ? ['corr20', 'mmc'] : NEW_METRICS);
+		activeMetrics = new Set<ChartMetric>(mode === 'classic' ? CLASSIC_METRICS : NEW_METRICS);
 	}
 
 	// True when the New (alpha/mpc/score) metric set is currently shown.
@@ -486,17 +481,7 @@
 			roundNumber: point.roundNumber,
 			date: point.date,
 			resolved: point.resolved,
-			metrics: {
-				corr20: point.corr20,
-				corr60: point.corr60,
-				mmc: point.mmc,
-				fnc: point.fnc,
-				tc: point.tc,
-				payout: point.payout,
-				alpha: point.alpha,
-				mpc: point.mpc,
-				score: point.score
-			}
+			metrics: Object.fromEntries(ALL_METRICS.map(m => [m, point[m]]))
 		};
 	}
 
@@ -645,41 +630,11 @@
 
 	// Get all raw data for the expandable table
 	const rawTableData = $derived.by(() => {
-		const data: Array<{
-			modelName: string;
-			username: string;
-			roundNumber: number;
-			date: Date;
-			resolved: boolean;
-			corr20: number | null;
-			corr60: number | null;
-			mmc: number | null;
-			fnc: number | null;
-			tc: number | null;
-			payout: number | null;
-			alpha: number | null;
-			mpc: number | null;
-			score: number | null;
-		}> = [];
+		const data: Array<ChartDataPoint & { modelName: string; username: string }> = [];
 
 		chartSeries.filter(series => series.visible).forEach(series => {
 			series.data.forEach(point => {
-				data.push({
-					modelName: series.modelName,
-					username: series.username,
-					roundNumber: point.roundNumber,
-					date: point.date,
-					resolved: point.resolved,
-					corr20: point.corr20,
-					corr60: point.corr60,
-					mmc: point.mmc,
-					fnc: point.fnc,
-					tc: point.tc,
-					payout: point.payout,
-					alpha: point.alpha,
-					mpc: point.mpc,
-					score: point.score
-				});
+				data.push({ modelName: series.modelName, username: series.username, ...point });
 			});
 		});
 
@@ -794,6 +749,19 @@
 	});
 </script>
 
+<!-- Signed numeric cell used by every metric column of the raw-data table (DRY):
+     green when positive, red when negative, muted when the value is missing. -->
+{#snippet metricCell(value: number | null)}
+	<td
+		class="px-4 py-2 text-sm text-right font-mono {value !== null
+			? value > 0
+				? 'text-green-400'
+				: value < 0
+					? 'text-red-400'
+					: 'retro-text-primary'
+			: 'retro-text-secondary'}">{formatValue(value)}</td>
+{/snippet}
+
 <div class="time-series-chart">
 	<!-- Model Legend (Interactive) - Now on top -->
 	{#if chartSeries.length > 0}
@@ -836,7 +804,7 @@
 							? 'background-color: var(--retro-primary); color: white;'
 							: 'color: var(--retro-text-primary);'}
 					>
-						Classic (Corr/MMC/TC)
+						Classic (Corr60/MMC60)
 					</button>
 					<button
 						onclick={() => setScoringMode('new')}
@@ -1052,7 +1020,7 @@
 					/>
 
 					<!-- Right Y-Axis line (only if right metrics active) -->
-					{#if activeMetrics.has('tc') || activeMetrics.has('payout')}
+					{#if hasRightAxis}
 						<line
 							x1={chartWidth - marginRight}
 							y1={marginTop}
@@ -1096,7 +1064,7 @@
 					{/each}
 
 					<!-- Right Y-Axis ticks and labels (only if right metrics active) -->
-					{#if activeMetrics.has('tc') || activeMetrics.has('payout')}
+					{#if hasRightAxis}
 						{#each rightAxisTicks as tick}
 							<line
 								x1={chartWidth - marginRight}
@@ -1222,7 +1190,7 @@
 					</text>
 
 					<!-- Right Y-Axis label (only if right metrics active) -->
-					{#if activeMetrics.has('tc') || activeMetrics.has('payout')}
+					{#if hasRightAxis}
 						<text
 							x={chartWidth - marginRight / 2 + 5}
 							y={chartHeight / 2}
@@ -1232,7 +1200,7 @@
 							class="fill-current retro-text-secondary axis-label"
 							font-size="11"
 						>
-							TC / Payout
+							Payout
 						</text>
 					{/if}
 
@@ -1418,10 +1386,10 @@
 								<th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Date</th>
 								<th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Status</th>
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">MMC</th>
+								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">MMC60</th>
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Corr20</th>
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Corr60</th>
 								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">FNC</th>
-								<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">TC</th>
 								{#if hasNewMetrics}
 									<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
 									<th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
@@ -1442,17 +1410,17 @@
 											{row.resolved ? 'Resolved' : 'Pending'}
 										</span>
 									</td>
-									<td class="px-4 py-2 text-sm text-right font-mono {row.mmc !== null ? (row.mmc > 0 ? 'text-green-400' : row.mmc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.mmc)}</td>
-									<td class="px-4 py-2 text-sm text-right font-mono {row.corr20 !== null ? (row.corr20 > 0 ? 'text-green-400' : row.corr20 < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.corr20)}</td>
-									<td class="px-4 py-2 text-sm text-right font-mono {row.corr60 !== null ? (row.corr60 > 0 ? 'text-green-400' : row.corr60 < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.corr60)}</td>
-									<td class="px-4 py-2 text-sm text-right font-mono {row.fnc !== null ? (row.fnc > 0 ? 'text-green-400' : row.fnc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.fnc)}</td>
-									<td class="px-4 py-2 text-sm text-right font-mono {row.tc !== null ? (row.tc > 0 ? 'text-green-400' : row.tc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.tc)}</td>
+									{@render metricCell(row.mmc)}
+									{@render metricCell(row.mmc60)}
+									{@render metricCell(row.corr20)}
+									{@render metricCell(row.corr60)}
+									{@render metricCell(row.fnc)}
 									{#if hasNewMetrics}
-										<td class="px-4 py-2 text-sm text-right font-mono {row.alpha !== null ? (row.alpha > 0 ? 'text-green-400' : row.alpha < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.alpha)}</td>
-										<td class="px-4 py-2 text-sm text-right font-mono {row.mpc !== null ? (row.mpc > 0 ? 'text-green-400' : row.mpc < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.mpc)}</td>
-										<td class="px-4 py-2 text-sm text-right font-mono {row.score !== null ? (row.score > 0 ? 'text-green-400' : row.score < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.score)}</td>
+										{@render metricCell(row.alpha)}
+										{@render metricCell(row.mpc)}
+										{@render metricCell(row.score)}
 									{/if}
-									<td class="px-4 py-2 text-sm text-right font-mono {row.payout !== null ? (row.payout > 0 ? 'text-green-400' : row.payout < 0 ? 'text-red-400' : 'retro-text-primary') : 'retro-text-secondary'}">{formatValue(row.payout)}</td>
+									{@render metricCell(row.payout)}
 								</tr>
 							{/each}
 						</tbody>

@@ -59,14 +59,42 @@ describe('getModelPerformance round history window', () => {
 
   it('requests the full history for Signals alpha/mpc augmentation', async () => {
     const calls = mockFetch([
-      { v2SignalsProfile: { id: 'model-id-123', username: 'mymodel', accountName: 'owner', roundModelPerformances: [] } },
+      {
+        v2SignalsProfile: {
+          id: 'model-id-123',
+          username: 'mymodel',
+          accountName: 'owner',
+          roundModelPerformances: [{ roundNumber: 1344, roundResolved: true }]
+        }
+      },
       { v2RoundModelPerformances: [] }
     ]);
 
     await getModelPerformance('mymodel', env, 'owner', 'model-id-123', SIGNALS_TOURNAMENT);
 
+    // No cache in this env, so the augmentation starts cold and asks for
+    // everything; a warm cache narrows this to the mutable tail.
     const augmentCall = calls.find((c) => 'lastNRounds' in c.variables);
     expect(augmentCall?.variables.lastNRounds).toBe(MAX_ROUNDS_HISTORY);
+  });
+
+  it('skips the augmentation fetch entirely when a model has no rounds', async () => {
+    const calls = mockFetch([
+      {
+        v2SignalsProfile: {
+          id: 'model-id-123',
+          username: 'mymodel',
+          accountName: 'owner',
+          roundModelPerformances: []
+        }
+      }
+    ]);
+
+    await getModelPerformance('mymodel', env, 'owner', 'model-id-123', SIGNALS_TOURNAMENT);
+
+    // The submissionScores response is ~420KB; there is nothing to merge it
+    // into, so it must not be requested at all.
+    expect(calls.some((c) => 'lastNRounds' in c.variables)).toBe(false);
   });
 });
 

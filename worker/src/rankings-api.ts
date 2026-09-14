@@ -23,6 +23,7 @@
  */
 import { CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 import { d1Retry } from './d1-retry';
+import { computeTrailingAverages } from './windowed-metrics';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -91,6 +92,9 @@ export interface MetricTriple {
 	tc: number | null;
 }
 
+/** The MetricTriple members, as the key list the windowed averager takes. */
+const TRIPLE_KEYS = ['corr', 'mmc', 'tc'] as const satisfies readonly (keyof MetricTriple)[];
+
 /** Custom score for a metric triple under the formula. null if no metric present. */
 function scoreFromMetrics(m: MetricTriple, formula: ScoreFormula): number | null {
 	if (m.corr === null && m.mmc === null && m.tc === null) return null;
@@ -132,34 +136,14 @@ export function buildWindowedMetrics(
 
 	const result = new Map<string, Map<number, MetricTriple>>();
 	for (const [key, entries] of perModel) {
-		entries.sort((a, b) => a.round - b.round);
-
-		// Slide a width-`window` window (by round number) with running per-metric
-		// sums/counts so each round's average is O(1) amortized.
-		let lo = 0;
-		let sumCorr = 0, cntCorr = 0;
-		let sumMmc = 0, cntMmc = 0;
-		let sumTc = 0, cntTc = 0;
-		const apply = (e: { round: number } & MetricTriple, sign: 1 | -1) => {
-			if (e.corr !== null) { sumCorr += sign * e.corr; cntCorr += sign; }
-			if (e.mmc !== null) { sumMmc += sign * e.mmc; cntMmc += sign; }
-			if (e.tc !== null) { sumTc += sign * e.tc; cntTc += sign; }
-		};
-
-		const byRound = new Map<number, MetricTriple>();
-		for (let hi = 0; hi < entries.length; hi++) {
-			apply(entries[hi], 1);
-			while (entries[lo].round <= entries[hi].round - window) {
-				apply(entries[lo], -1);
-				lo++;
-			}
-			byRound.set(entries[hi].round, {
-				corr: cntCorr > 0 ? sumCorr / cntCorr : null,
-				mmc: cntMmc > 0 ? sumMmc / cntMmc : null,
-				tc: cntTc > 0 ? sumTc / cntTc : null
-			});
-		}
-		result.set(key, byRound);
+		result.set(
+			key,
+			computeTrailingAverages(
+				entries.map((e) => ({ round: e.round, values: e })),
+				TRIPLE_KEYS,
+				window
+			)
+		);
 	}
 	return result;
 }
