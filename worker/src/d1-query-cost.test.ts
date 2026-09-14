@@ -4,9 +4,8 @@
  *
  * Why these exist: on D1's free tier (5M rows read / 100k written per day) a
  * single full-table scan of model_performances (~5M rows) is a whole day's read
- * budget. getCacheStatus ran one on every /rankings and /round-summary page
- * load, and once reads ran out the precompute's max-round read failed — which
- * is what triggered the 2026-09 backfill incidents.
+ * budget, and running out of reads is what triggered the 2026-09 backfill
+ * incidents. getCacheStatus has its own suite: cache-status-cost.test.ts.
  *
  * Budgets are stated relative to what a query returns, never to table size, so
  * they hold at any scale: a query may read its own tournament's matching rows,
@@ -18,7 +17,6 @@ import {
 	maxRoundSql,
 	selectRoundField,
 	selectRoundFieldsInRange,
-	selectRoundRange,
 	selectTopModelByName
 } from './perf-queries';
 import { readMaxRound } from './refresh-floor';
@@ -44,26 +42,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
 	await d1?.dispose();
-});
-
-describe('selectRoundRange (getCacheStatus, on every rankings page load)', () => {
-	it.each([CLASSIC, SIGNALS, CRYPTO])('reports tournament $tournament round span', async (slice) => {
-		const { result } = await d1.measure((db) => selectRoundRange(db, slice.tournament));
-		expect(result).toEqual({ latestRound: slice.toRound, earliestRound: slice.fromRound });
-	});
-
-	it('reports nulls for a tournament with no rows', async () => {
-		const { result } = await d1.measure((db) => selectRoundRange(db, 99));
-		expect(result).toEqual({ latestRound: null, earliestRound: null });
-	});
-
-	it.each([CLASSIC, SIGNALS, CRYPTO])(
-		'reads a constant handful of rows for tournament $tournament, not the table',
-		async (slice) => {
-			const { cost } = await d1.measure((db) => selectRoundRange(db, slice.tournament));
-			expect(cost.rowsRead).toBeLessThanOrEqual(4);
-		}
-	);
 });
 
 describe('selectRoundFieldsInRange (rolling-window rankings)', () => {

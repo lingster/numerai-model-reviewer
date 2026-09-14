@@ -28,12 +28,6 @@ export interface RoundPerfRow {
 	stake_value: number | null;
 }
 
-/** The round span a tournament's stored data covers; both null when it has none. */
-export interface RoundRange {
-	latestRound: number | null;
-	earliestRound: number | null;
-}
-
 /**
  * Guard for the few statements that inline the tournament id rather than bind
  * it (the wrangler CLI's --command has no parameter binding).
@@ -126,24 +120,4 @@ export async function selectRoundFieldsInRange(
 			.all<RoundPerfRow & { round_number: number }>()
 	);
 	return result.results ?? [];
-}
-
-/**
- * The earliest and latest round stored for a tournament.
- *
- * MIN and MAX are separate subqueries on purpose: SQLite answers a lone MIN or
- * MAX with a single index seek, but a SELECT holding both scans every matching
- * row — all of a tournament's history, on every rankings page load.
- */
-export async function selectRoundRange(db: D1Database, tournament: number): Promise<RoundRange> {
-	const row = await d1Retry(() =>
-		db
-			.prepare(
-				`SELECT (SELECT MAX(round_number) FROM model_performances WHERE tournament = ?1) AS latestRound,
-				        (SELECT MIN(round_number) FROM model_performances WHERE tournament = ?1) AS earliestRound`
-			)
-			.bind(tournament)
-			.first<RoundRange>()
-	);
-	return { latestRound: row?.latestRound ?? null, earliestRound: row?.earliestRound ?? null };
 }

@@ -14,6 +14,7 @@
  */
 
 import { readMaxRound } from './refresh-floor';
+import { refreshCoverage } from './tournament-coverage';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
 import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
@@ -1168,9 +1169,8 @@ async function main() {
   //
   // A failed read throws and ends the run (exit 1) rather than being mistaken for
   // an empty tournament — see refresh-floor.ts for the incidents that caused.
-  const maxRoundInD1 = reset
-    ? null
-    : await readMaxRound(createWranglerQuery(runCommand, isLocal), config.tournament);
+  const d1Query = createWranglerQuery(runCommand, isLocal);
+  const maxRoundInD1 = reset ? null : await readMaxRound(d1Query, config.tournament);
   const minRound = computeMinRound(maxRoundInD1, reset, REFRESH_OVERLAP_ROUNDS);
   if (reset) {
     console.log('Refresh mode: --reset — full backfill.\n');
@@ -1321,6 +1321,18 @@ async function main() {
   console.log('Step 5: Storing in D1...');
   await storeInD1(allModels, performanceData, config.tournament, isLocal, reset, minRound);
   console.log('  Done!\n');
+
+  // Step 6: Refresh the tournament's round span, which page loads read instead
+  // of scanning model_performances. Recomputed from the table, so it is exact
+  // after incremental runs, backfills and resets alike. A failure ends the run
+  // loudly: the stored rows are fine, but the UI's latest round would be stale.
+  console.log('Step 6: Refreshing tournament coverage...');
+  const coverage = await refreshCoverage(d1Query, config.tournament);
+  console.log(
+    coverage
+      ? `  Rounds ${coverage.earliestRound}–${coverage.latestRound}\n`
+      : '  No rows for this tournament; coverage cleared\n'
+  );
 
   console.log('=== Precomputation complete! ===');
   console.log(`  Models:              ${allModels.length}`);

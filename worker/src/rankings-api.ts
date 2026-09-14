@@ -26,12 +26,13 @@ import { d1Retry } from './d1-retry';
 import {
 	selectRoundField,
 	selectRoundFieldsInRange,
-	selectRoundRange,
 	selectTopModelByName,
 	type RoundPerfRow,
 	type TopModelRow
 } from './perf-queries';
 import { computeTrailingAverages } from './windowed-metrics';
+import { bindingQuery } from './d1-query';
+import { getRoundCoverage } from './tournament-coverage';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -474,14 +475,22 @@ export interface CacheStatus {
 }
 
 /**
- * Report the round range the precomputed cache currently covers for a tournament
- * (min/max round_number in model_performances). Used by the UI to tell users
- * which rounds have data when a requested range comes back empty — the cache
+ * Report the round range the precomputed cache currently covers for a tournament.
+ * Used by the UI to tell users which rounds have data when a requested range
+ * comes back empty, and to mark the latest round as still settling — the cache
  * lags the live current round by however long since the last precompute run.
  * Returns nulls when the cache holds no rows for the tournament.
+ *
+ * Runs on every rankings page load, so it reads the one tournament_coverage row
+ * precompute maintains rather than computing MIN/MAX over model_performances.
  */
 export async function getCacheStatus(env: Env, tournament: number): Promise<CacheStatus> {
-	return { tournament, ...(await selectRoundRange(env.DB, tournament)) };
+	const span = await getRoundCoverage(bindingQuery(env.DB), tournament);
+	return {
+		tournament,
+		latestRound: span?.latestRound ?? null,
+		earliestRound: span?.earliestRound ?? null
+	};
 }
 
 /** Top-N entry returned by /rankings/top-models. */
