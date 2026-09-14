@@ -31,6 +31,15 @@ jobs:
         working-directory: worker
         run: npm ci
 
+      # Worker unit tests, including the D1 query-cost budgets (d1-query-cost.test.ts),
+      # which run against an in-process Miniflare D1 and need no running worker.
+      # rankings-api.test.ts is excluded: it expects a live-sized dataset (rank 13
+      # of 4,046 models) that test/seed.sql does not provide, and an Origin the
+      # worker does not allow, so it fails on main today independent of any change.
+      - name: Run worker unit tests
+        working-directory: worker
+        run: npx vitest run --exclude src/rankings-api.test.ts
+
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
