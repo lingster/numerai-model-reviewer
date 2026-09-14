@@ -13,6 +13,9 @@
  *   npm run precompute:prod -- --no-cache     -- bypass CSV cache, force fresh API fetch
  */
 
+import { readMaxRound } from './refresh-floor';
+import { createWranglerReader, execErrorDetail, type CommandRunner } from './wrangler-d1';
+import { execSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
@@ -503,6 +506,10 @@ const MAX_ROUNDS_HISTORY = 1000;
 // than a small overlap buys. See getLatestResolvedRound for that boundary.
 const REFRESH_OVERLAP_ROUNDS = 0;
 
+/** The real shell for wrangler D1 commands: stdout as text, output kept on failure. */
+const runCommand: CommandRunner = (command) =>
+  execSync(command, { encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'] });
+
 /**
  * The lowest round a run should fetch/store, given the highest round already in
  * D1 for this tournament. Returns 0 (full backfill) when D1 is empty for the
@@ -986,35 +993,6 @@ async function fetchCryptoPerformance(
 
 // --- D1 storage ---
 
-/**
- * Highest round_number already stored in D1 for a tournament, or null when the
- * tournament has no rows yet (first-ever backfill). Drives the incremental
- * refresh: each run then only fetches/writes rounds at/after this (minus a small
- * overlap) instead of rewriting the entire multi-million-row history every day.
- * Best-effort: any read/parse failure returns null so the run falls back to a
- * full backfill rather than aborting.
- */
-async function getMaxRoundInD1(tournament: number, isLocal: boolean): Promise<number | null> {
-  const { execSync } = await import('child_process');
-  const flag = isLocal ? '--local' : '--remote';
-  try {
-    const out = execSync(
-      `wrangler d1 execute numerai-cache ${flag} --yes --json --command "SELECT MAX(round_number) AS maxRound FROM model_performances WHERE tournament = ${tournament}"`,
-      { cwd: process.cwd(), encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'] }
-    );
-    // wrangler --json emits an array of statement results: [{ results: [...] }].
-    const parsed = JSON.parse(out);
-    const results = Array.isArray(parsed) ? parsed[0]?.results : parsed?.results;
-    const maxRound = results?.[0]?.maxRound;
-    return typeof maxRound === 'number' ? maxRound : null;
-  } catch (error) {
-    console.warn(
-      `  Could not read max round from D1 (falling back to full backfill): ${(error as Error).message}`
-    );
-    return null;
-  }
-}
-
 async function storeInD1(
   topModels: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>,
   performanceData: Map<string, PerformanceRound[]>,
@@ -1052,7 +1030,7 @@ async function storeInD1(
         });
         return;
       } catch (error: any) {
-        const msg = (error.stderr?.toString() || '') + (error.stdout?.toString() || '') || error.message;
+        const msg = execErrorDetail(error);
         if (attempt < maxAttempts && isTransientD1Error(msg)) {
           const delaySec = attempt * 5;
           console.log(`  ${label} attempt ${attempt}/${maxAttempts} hit a transient D1 error; retrying in ${delaySec}s...`);
@@ -1187,7 +1165,12 @@ async function main() {
   // this tournament or on --reset. This keeps each daily run to a handful of new
   // rounds instead of rewriting the entire history (which was OOMing/timing out
   // and, being first in the job, blocking later tournaments).
-  const maxRoundInD1 = reset ? null : await getMaxRoundInD1(config.tournament, isLocal);
+  //
+  // A failed read throws and ends the run (exit 1) rather than being mistaken for
+  // an empty tournament — see refresh-floor.ts for the incidents that caused.
+  const maxRoundInD1 = reset
+    ? null
+    : await readMaxRound(createWranglerReader(runCommand, isLocal), config.tournament);
   const minRound = computeMinRound(maxRoundInD1, reset, REFRESH_OVERLAP_ROUNDS);
   if (reset) {
     console.log('Refresh mode: --reset — full backfill.\n');
