@@ -14,7 +14,10 @@
  */
 
 import { readMaxRound } from './refresh-floor';
-import { refreshCoverage } from './tournament-coverage';
+import { refreshCoverage, type RoundSpan } from './tournament-coverage';
+import { encodeFieldMetrics } from './round-field';
+import { fieldFromRows, readStoredRounds, roundsToBackfill, upsertRoundFieldSql } from './round-field-store';
+import type { D1Query } from './d1-query';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
 import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
@@ -34,6 +37,8 @@ const CACHE_META = join(CACHE_DIR, 'meta.json');
 interface PrecomputeConfig {
   tournament: number;
   topN: number;
+  /** Older rounds to build stored fields for per run (see Step 7). */
+  backfillRounds: number;
   batchSize: number;
   rateLimitMs: number;
   concurrency: number;
@@ -42,6 +47,9 @@ interface PrecomputeConfig {
 }
 
 const DEFAULT_CONFIG: PrecomputeConfig = {
+  // 100 rounds a run keeps the backfill's reads a small share of D1's free daily
+  // budget while covering ~2,900 rounds of history in about a month.
+  backfillRounds: 100,
   tournament: 8,
   topN: 10000,
   // Max batchSize is 3 — higher values exceed the Numerai API rate limit
@@ -79,6 +87,7 @@ function loadYamlConfig(): Partial<PrecomputeConfig> {
       return {
         tournament: parsed.tournament,
         topN: parsed.topN,
+        backfillRounds: parsed.backfillRounds,
         batchSize: parsed.batchSize,
         rateLimitMs: parsed.rateLimitMs,
         concurrency: parsed.concurrency,
@@ -112,6 +121,9 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
     switch (arg) {
       case '--top-n':
         if (next) { overrides.topN = parseInt(next, 10); i++; }
+        break;
+      case '--backfill-rounds':
+        if (next) { overrides.backfillRounds = parseInt(next, 10); i++; }
         break;
       case '--tournament':
         if (next) { overrides.tournament = parseInt(next, 10); i++; }
@@ -507,9 +519,20 @@ const MAX_ROUNDS_HISTORY = 1000;
 // than a small overlap buys. See getLatestResolvedRound for that boundary.
 const REFRESH_OVERLAP_ROUNDS = 0;
 
-/** Runs wrangler without a shell: stdout as text, output kept on failure. */
+/**
+ * Runs wrangler without a shell: stdout as text, output kept on failure.
+ *
+ * maxBuffer is raised well above Node's 1MB default because the round-field
+ * backfill reads several rounds of a full field at a time — a few megabytes of
+ * JSON per call.
+ */
+const MAX_WRANGLER_OUTPUT_BYTES = 64 * 1024 * 1024;
 const runCommand: CommandRunner = (file, args) =>
-  execFileSync(file, args, { encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'] });
+  execFileSync(file, args, {
+    encoding: 'utf-8',
+    stdio: ['inherit', 'pipe', 'pipe'],
+    maxBuffer: MAX_WRANGLER_OUTPUT_BYTES
+  });
 
 /**
  * The lowest round a run should fetch/store, given the highest round already in
@@ -994,6 +1017,121 @@ async function fetchCryptoPerformance(
 
 // --- D1 storage ---
 
+/**
+ * Rows of a round's staked field, as the live ranking path selects them: every
+ * model with a positive stake, or every model at all for Crypto, which has no
+ * stake data.
+ */
+function stakedFieldRows(
+  rounds: Array<{ round: PerformanceRound }>,
+  tournament: number
+): Array<Pick<PerformanceRound, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc'>> {
+  return rounds
+    .filter(({ round }) =>
+      tournament === CRYPTO_TOURNAMENT ? true : round.stakeValue !== null && round.stakeValue > 0
+    )
+    .map(({ round }) => round);
+}
+
+/** Group the in-memory performance data by round, for rounds at or after `minRound`. */
+function roundsFromMemory(
+  performanceData: Map<string, PerformanceRound[]>,
+  minRound: number
+): Map<number, Array<{ round: PerformanceRound }>> {
+  const byRound = new Map<number, Array<{ round: PerformanceRound }>>();
+  for (const rounds of performanceData.values()) {
+    for (const round of rounds) {
+      if (round.roundNumber < minRound) continue;
+      const list = byRound.get(round.roundNumber);
+      if (list) list.push({ round });
+      else byRound.set(round.roundNumber, [{ round }]);
+    }
+  }
+  return byRound;
+}
+
+/** Rounds read back from D1, for backfilling fields we did not just fetch. */
+async function readFieldRowsFromD1(
+  d1Query: D1Query,
+  tournament: number,
+  rounds: number[]
+): Promise<Map<number, Array<{ round: PerformanceRound }>>> {
+  const byRound = new Map<number, Array<{ round: PerformanceRound }>>();
+  if (rounds.length === 0) return byRound;
+
+  // A few rounds per query: one wrangler call per round would dominate the run,
+  // and a whole run's worth at once is a multi-megabyte JSON response.
+  const CHUNK = 5;
+  const sorted = [...rounds].sort((a, b) => a - b);
+  for (let i = 0; i < sorted.length; i += CHUNK) {
+    const chunk = sorted.slice(i, i + CHUNK);
+    const rows = await d1Query(
+      `SELECT round_number, corr, mmc, tc, alpha, mpc, stake_value FROM model_performances
+       WHERE tournament = ${tournament} AND round_number IN (${chunk.join(', ')})`
+    );
+    for (const row of rows) {
+      const roundNumber = Number(row.round_number);
+      const round: PerformanceRound = {
+        roundNumber,
+        corr: toNumberOrNull(row.corr),
+        mmc: toNumberOrNull(row.mmc),
+        tc: toNumberOrNull(row.tc),
+        alpha: toNumberOrNull(row.alpha),
+        mpc: toNumberOrNull(row.mpc),
+        stakeValue: toNumberOrNull(row.stake_value)
+      };
+      const list = byRound.get(roundNumber);
+      if (list) list.push({ round });
+      else byRound.set(roundNumber, [{ round }]);
+    }
+  }
+  return byRound;
+}
+
+/** wrangler --json renders SQL NULL as the string "null" (see refresh-floor.ts). */
+function toNumberOrNull(value: unknown): number | null {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value !== 'null' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/**
+ * Store one row per round holding that round's whole field, so ranking a model
+ * costs a read per round instead of a read per model per round.
+ *
+ * Rounds this run fetched are built from memory. Older rounds are read back,
+ * `backfillLimit` per run, newest first — the rankings page opens on the most
+ * recent rounds, so the view people load is covered first.
+ */
+async function storeRoundFields(
+  d1Query: D1Query,
+  tournament: number,
+  performanceData: Map<string, PerformanceRound[]>,
+  minRound: number,
+  coverage: RoundSpan | null,
+  backfillLimit: number
+): Promise<{ fresh: number; backfilled: number }> {
+  const fresh = roundsFromMemory(performanceData, minRound);
+
+  const alreadyStored = await readStoredRounds(d1Query, tournament);
+  const missing = roundsToBackfill(coverage, new Set([...alreadyStored, ...fresh.keys()]), backfillLimit);
+  const backfilled = await readFieldRowsFromD1(d1Query, tournament, missing);
+
+  const now = Math.floor(Date.now() / 1000);
+  const write = async (round: number, rows: Array<{ round: PerformanceRound }>) => {
+    const field = fieldFromRows(stakedFieldRows(rows, tournament), tournament);
+    await d1Query(upsertRoundFieldSql(tournament, round, encodeFieldMetrics(field), now));
+  };
+
+  for (const [round, rows] of fresh) await write(round, rows);
+  for (const [round, rows] of backfilled) await write(round, rows);
+
+  return { fresh: fresh.size, backfilled: backfilled.size };
+}
+
 async function storeInD1(
   topModels: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>,
   performanceData: Map<string, PerformanceRound[]>,
@@ -1333,6 +1471,21 @@ async function main() {
       ? `  Rounds ${coverage.earliestRound}–${coverage.latestRound}\n`
       : '  No rows for this tournament; coverage cleared\n'
   );
+
+  // Step 7: Build the stored per-round fields the rankings page ranks against.
+  // Today's rounds come from what we just fetched; older ones are read back a
+  // bounded number per run, newest first, so history fills in within D1's free
+  // daily budget instead of all at once.
+  console.log('Step 7: Storing round fields...');
+  const stored = await storeRoundFields(
+    d1Query,
+    config.tournament,
+    performanceData,
+    minRound,
+    coverage,
+    config.backfillRounds
+  );
+  console.log(`  Wrote ${stored.fresh} new and ${stored.backfilled} backfilled round(s)\n`);
 
   console.log('=== Precomputation complete! ===');
   console.log(`  Models:              ${allModels.length}`);
