@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { decodeFieldMetrics, encodeFieldMetrics, rankInField, type FieldMetrics } from './round-field';
-import { pickMetrics, scoreFromMetrics, type MetricTriple, type ScoreFormula } from './ranking';
+import { pickMetrics, rankAmong, rankSortedScores, scoreFromMetrics, type MetricTriple, type ScoreFormula } from './ranking';
 import type { RoundPerfRow } from './perf-queries';
 
 const FORMULA: ScoreFormula = { corrWeight: 0.75, mmcWeight: 2.25, tcWeight: 0 };
@@ -150,4 +150,19 @@ describe('ranking from a stored field matches ranking the raw rows', () => {
 			expect(rankInField(stored, pickMetrics(own, CLASSIC), FORMULA)).toEqual(liveRank(target));
 		}
 	);
+});
+
+describe('rankSortedScores', () => {
+	it('gives competition ranks, so equal scores share one', () => {
+		expect(rankSortedScores([0.5, 0.3, 0.3, 0.1])).toEqual([1, 2, 2, 4]);
+	});
+
+	it('agrees with rankAmong, which ranks a model against a stored field', () => {
+		const scores = [0.5, 0.3, 0.3, 0.1];
+		expect(rankSortedScores(scores)).toEqual(scores.map((s) => rankAmong(scores, s)));
+	});
+
+	it('handles an empty field', () => {
+		expect(rankSortedScores([])).toEqual([]);
+	});
 });

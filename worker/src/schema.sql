@@ -64,6 +64,25 @@ CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_second
 -- production's (round_number, tournament) index read a large share of the
 -- ~5M rows per call. Precompute replaces the row after each store; the worker
 -- only reads it. See tournament-coverage.ts.
+-- One row per round holding that round's whole field: every staked model's
+-- scored metric pair, packed as base64 Float32 arrays (~24KB for 4,600 models).
+-- Ranking a model in a round needs to know how many models scored above it, so
+-- the live path reads every model's row for the round (~4,600) — ~300k reads for
+-- the default 30-round view of one model. From here it is one read per round.
+--
+-- Metrics, not scores: the payout formula changes (Classic moved to 3xCORR60 +
+-- 15xMMC60) and the UI varies the weights per request, so stored scores would
+-- invalidate history. Model names are not stored; a model's own metrics come
+-- from its own model_performances rows. See round-field.ts.
+CREATE TABLE IF NOT EXISTS round_field_metrics (
+  tournament INTEGER NOT NULL,
+  round_number INTEGER NOT NULL,
+  corr_values TEXT NOT NULL,
+  mmc_values TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (tournament, round_number)
+);
+
 CREATE TABLE IF NOT EXISTS tournament_coverage (
   tournament INTEGER PRIMARY KEY,
   earliest_round INTEGER NOT NULL,

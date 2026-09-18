@@ -63,3 +63,16 @@ export function rankAmong(scores: ArrayLike<number>, score: number): number {
 	}
 	return better + 1;
 }
+
+/**
+ * Competition ranks for a list already ordered best-first: 1, 2, 2, 4. Equal
+ * scores share a rank, the same answer rankAmong gives, in one pass instead of
+ * one scan per model.
+ */
+export function rankSortedScores(scores: ReadonlyArray<number>): number[] {
+	const ranks: number[] = [];
+	for (let i = 0; i < scores.length; i++) {
+		ranks.push(i > 0 && scores[i] === scores[i - 1] ? ranks[i - 1] : i + 1);
+	}
+	return ranks;
+}

@@ -33,6 +33,8 @@ import {
 import { computeTrailingAverages } from './windowed-metrics';
 import {
 	pickMetrics,
+	rankAmong,
+	rankSortedScores,
 	scoreFromMetrics,
 	TRIPLE_KEYS,
 	type MetricTriple,
@@ -133,19 +135,21 @@ function rankRoundFromWindowed(
 		scored.push({ modelName: row.model_name, score, corr: m.corr, mmc: m.mmc });
 	}
 
-	scored.sort((a, b) => b.score - a.score);
 	const totalModels = scored.length;
 
-	const idx = scored.findIndex((s) => s.modelName.toLowerCase() === targetModelLower);
-	if (idx < 0) {
+	const target = scored.find((s) => s.modelName.toLowerCase() === targetModelLower);
+	if (!target) {
 		return { roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels };
 	}
 	return {
 		roundNumber: round,
-		rank: idx + 1,
-		corr: scored[idx].corr,
-		mmc: scored[idx].mmc,
-		customScore: scored[idx].score,
+		rank: rankAmong(
+			scored.map((s) => s.score),
+			target.score
+		),
+		corr: target.corr,
+		mmc: target.mmc,
+		customScore: target.score,
 		totalModels
 	};
 }
@@ -235,20 +239,20 @@ function rankRound(
 		});
 	}
 
-	scored.sort((a, b) => b.score - a.score);
 	const totalModels = scored.length;
 
-	const idx = scored.findIndex(
-		(s) => s.modelName.toLowerCase() === targetModelLower
-	);
-	if (idx < 0) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels };
+	const target = scored.find((s) => s.modelName.toLowerCase() === targetModelLower);
+	if (!target) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels };
 
 	return {
 		roundNumber: 0,
-		rank: idx + 1,
-		corr: scored[idx].corr,
-		mmc: scored[idx].mmc,
-		customScore: scored[idx].score,
+		rank: rankAmong(
+			scored.map((s) => s.score),
+			target.score
+		),
+		corr: target.corr,
+		mmc: target.mmc,
+		customScore: target.score,
 		totalModels
 	};
 }
@@ -556,11 +560,14 @@ export async function getTopModelsForRound(
 
 	// limit <= 0 means "return the whole ranked field" — the frontend pages and
 	// searches it client-side so users can find any staked model, not just top N.
+	// Competition ranks over the whole field before slicing, so models that score
+	// identically share a rank here exactly as they do in a model's own history.
+	const ranks = rankSortedScores(scored.map((s) => s.score));
 	const ranked = limit > 0 ? scored.slice(0, limit) : scored;
 	return ranked.map((s, i) => ({
 		modelName: s.modelName,
 		username: usernames.get(s.modelName.toLowerCase()) ?? '',
-		rank: i + 1,
+		rank: ranks[i],
 		corr: s.corr,
 		mmc: s.mmc,
 		customScore: s.score,
