@@ -30,13 +30,23 @@ const row = (model_name: string, corr: number | null, mmc: number | null): Round
 });
 
 describe('encodeFieldMetrics / decodeFieldMetrics', () => {
-	it('round-trips metric pairs', () => {
+	it('round-trips metric pairs exactly', () => {
 		const corr = [0.0123, -0.05, 0.4];
 		const mmc = [-0.001, 0.02, 0.0009];
 		const decoded = decodeFieldMetrics(encodeFieldMetrics({ corr, mmc } satisfies FieldMetrics));
-		// Float32 is the storage precision, so values come back rounded to it.
-		expect(Array.from(decoded.corr)).toEqual(corr.map(Math.fround));
-		expect(Array.from(decoded.mmc)).toEqual(mmc.map(Math.fround));
+		// Stored at the precision SQLite holds them at, so nothing is lost: two
+		// competitors can never swap order through storage.
+		expect(Array.from(decoded.corr)).toEqual(corr);
+		expect(Array.from(decoded.mmc)).toEqual(mmc);
+	});
+
+	it('keeps scores that differ far below Float32 resolution in order', () => {
+		// Packed as Float32 these collapse to the same value, and the two models
+		// tie instead of ordering.
+		const a = 0.0123456789;
+		const b = a + 1e-12;
+		const decoded = decodeFieldMetrics(encodeFieldMetrics({ corr: [a, b], mmc: [0, 0] }));
+		expect(decoded.corr[1]).toBeGreaterThan(decoded.corr[0]);
 	});
 
 	it('keeps a missing metric missing rather than turning it into zero', () => {
@@ -64,8 +74,9 @@ describe('encodeFieldMetrics / decodeFieldMetrics', () => {
 			mmc: Array.from({ length: size }, (_, i) => -i / 100000)
 		});
 		const bytes = encoded.corr.length + encoded.mmc.length;
-		// Two base64 Float32 arrays: about 8 bytes per model before base64's 4/3.
-		expect(bytes).toBeLessThan(size * 12);
+		// Two base64 Float64 arrays: 16 bytes per model before base64's 4/3, so a
+		// round of ~4,600 models is ~96KB — one D1 row, one read.
+		expect(bytes).toBeLessThan(size * 24);
 	});
 });
 

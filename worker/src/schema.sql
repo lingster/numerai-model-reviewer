@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_second
 -- ~5M rows per call. Precompute replaces the row after each store; the worker
 -- only reads it. See tournament-coverage.ts.
 -- One row per round holding that round's whole field: every staked model's
--- scored metric pair, packed as base64 Float32 arrays (~24KB for 4,600 models).
+-- scored metric pair, packed as base64 Float64 arrays (~96KB for 4,600 models).
 -- Ranking a model in a round needs to know how many models scored above it, so
 -- the live path reads every model's row for the round (~4,600) — ~300k reads for
 -- the default 30-round view of one model. From here it is one read per round.
