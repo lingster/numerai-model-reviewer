@@ -8,7 +8,6 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
-	getCacheStatus,
 	getModelRank,
 	computeLatestResolvedRound,
 	type OwnPerformanceFetcher
@@ -267,39 +266,5 @@ describe('getModelRank unstaked-model support', () => {
 		const r100 = res.rounds.find((r) => r.roundNumber === 100);
 		expect(r100?.rank).toBeNull();
 		expect(r100?.totalModels).toBe(2); // field still reported so the UI can explain "not staked"
-	});
-});
-
-/** Mock env whose model_performances MAX/MIN aggregate returns the given row. */
-function mockAggEnv(agg: { latestRound: number | null; earliestRound: number | null } | null) {
-	const DB = {
-		prepare() {
-			return {
-				bind() {
-					return { first: async () => agg };
-				}
-			};
-		}
-	};
-	return { DB } as unknown as Env;
-}
-
-describe('getCacheStatus', () => {
-	it('reports the cache round coverage for a tournament', async () => {
-		const env = mockAggEnv({ latestRound: 1272, earliestRound: 800 });
-		const status = await getCacheStatus(env, 8);
-		expect(status).toEqual({ tournament: 8, latestRound: 1272, earliestRound: 800 });
-	});
-
-	it('returns null bounds when the cache is empty for the tournament', async () => {
-		const env = mockAggEnv({ latestRound: null, earliestRound: null });
-		const status = await getCacheStatus(env, 12);
-		expect(status).toEqual({ tournament: 12, latestRound: null, earliestRound: null });
-	});
-
-	it('tolerates a missing aggregate row', async () => {
-		const env = mockAggEnv(null);
-		const status = await getCacheStatus(env, 11);
-		expect(status).toEqual({ tournament: 11, latestRound: null, earliestRound: null });
 	});
 });

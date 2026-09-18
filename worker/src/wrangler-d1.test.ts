@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-	createWranglerReader,
+	createWranglerQuery,
 	execErrorDetail,
 	parseWranglerJsonRows,
 	type CommandRunner
@@ -67,35 +67,48 @@ describe('parseWranglerJsonRows', () => {
 	});
 });
 
-describe('createWranglerReader', () => {
-	const ok = (rows: unknown[]): CommandRunner => () => JSON.stringify([{ results: rows }]);
+describe('createWranglerQuery', () => {
+	const rowsOutput = (rows: unknown[]) => JSON.stringify([{ results: rows }]);
+	const ok = (rows: unknown[]): CommandRunner => () => rowsOutput(rows);
+
+	/** A runner that records the argument list it was given. */
+	function recording(): { run: CommandRunner; calls: Array<{ file: string; args: string[] }> } {
+		const calls: Array<{ file: string; args: string[] }> = [];
+		return {
+			calls,
+			run: (file, args) => {
+				calls.push({ file, args });
+				return rowsOutput([]);
+			}
+		};
+	}
 
 	it('targets the remote database unless told otherwise', async () => {
-		let command = '';
-		const run: CommandRunner = (cmd) => {
-			command = cmd;
-			return JSON.stringify([{ results: [] }]);
-		};
-		await createWranglerReader(run, false)('SELECT 1');
-		expect(command).toContain('d1 execute numerai-cache --remote');
-		expect(command).toContain('--json');
+		const { run, calls } = recording();
+		await createWranglerQuery(run, false)('SELECT 1');
+		await createWranglerQuery(run, true)('SELECT 1');
 
-		await createWranglerReader(run, true)('SELECT 1');
-		expect(command).toContain('--local');
+		expect(calls[0].file).toBe('wrangler');
+		expect(calls[0].args.slice(0, 3)).toEqual(['d1', 'execute', 'numerai-cache']);
+		expect(calls[0].args).toContain('--remote');
+		expect(calls[0].args).toContain('--json');
+		expect(calls[1].args).toContain('--local');
 	});
 
-	it('passes the SQL as a single quoted argument', async () => {
-		let command = '';
-		const run: CommandRunner = (cmd) => {
-			command = cmd;
-			return JSON.stringify([{ results: [] }]);
-		};
-		await createWranglerReader(run, false)('SELECT "a" FROM t WHERE x = 1');
-		expect(command).toContain('--command "SELECT \\"a\\" FROM t WHERE x = 1"');
+	it('passes multi-line SQL with quotes through byte-for-byte, as one argument', async () => {
+		// Regression: the SQL used to be JSON-quoted into a shell string, which sent
+		// literal "\n" and "\t" to SQLite ("unrecognized token") for any multi-line
+		// query. Found by an end-to-end precompute run.
+		const sql = "WITH RECURSIVE\n\tup(n) AS (SELECT 1)\nSELECT name FROM t WHERE type = 'index' AND x = \"y\"";
+		const { run, calls } = recording();
+		await createWranglerQuery(run, false)(sql);
+
+		const args = calls[0].args;
+		expect(args[args.indexOf('--command') + 1]).toBe(sql);
 	});
 
 	it('resolves with the parsed result rows', async () => {
-		await expect(createWranglerReader(ok([{ maxRound: 9 }]), false)('SELECT 1')).resolves.toEqual([
+		await expect(createWranglerQuery(ok([{ maxRound: 9 }]), false)('SELECT 1')).resolves.toEqual([
 			{ maxRound: 9 }
 		]);
 	});
@@ -106,6 +119,6 @@ describe('createWranglerReader', () => {
 				stderr: "exceeded D1's free tier daily row read limit"
 			});
 		};
-		await expect(createWranglerReader(run, false)('SELECT 1')).rejects.toThrow(/read limit/);
+		await expect(createWranglerQuery(run, false)('SELECT 1')).rejects.toThrow(/read limit/);
 	});
 });

@@ -22,6 +22,22 @@ const migrationSql = Object.entries(
 	.sort(([a], [b]) => a.localeCompare(b))
 	.map(([, sql]) => sql as string);
 
+/**
+ * Which round index model_performances has. Production still has the original
+ * (round_number, tournament) index — migrations/0001 swaps it for
+ * (tournament, round_number) but needs a paid plan to run — so query costs are
+ * tested against both shapes, and against neither.
+ */
+export type RoundIndexShape = 'round_then_tournament' | 'tournament_then_round' | 'none';
+
+const ROUND_INDEX_SQL: Record<RoundIndexShape, string> = {
+	round_then_tournament:
+		'CREATE INDEX idx_perf_round ON model_performances(round_number, tournament)',
+	tournament_then_round:
+		'CREATE INDEX idx_perf_tournament_round ON model_performances(tournament, round_number)',
+	none: ''
+};
+
 /** Rows D1 billed for some work. */
 export interface D1Cost {
 	rowsRead: number;
@@ -109,13 +125,30 @@ export class D1CostHarness {
 		await this.raw
 			.prepare(
 				`WITH RECURSIVE m(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM m WHERE i < ?1 - 1)
-				 INSERT INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at)
+				 INSERT OR IGNORE INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at)
 				 SELECT 'id-' || CAST(?2 AS INTEGER) || '-' || i, 't' || CAST(?2 AS INTEGER) || '_m' || i,
 				        'user' || i, 1.0, ?2, 0
 				   FROM m`
 			)
 			.bind(models, tournament)
 			.run();
+	}
+
+	/**
+	 * Tables, indexes and other objects in sqlite_master. Code that inspects the
+	 * schema pays roughly this many reads — a cost bounded by the schema, not the
+	 * data — so budgets for it are stated in these terms.
+	 */
+	async schemaObjectCount(): Promise<number> {
+		const row = await this.raw.prepare('SELECT COUNT(*) AS n FROM sqlite_master').first<{ n: number }>();
+		return row?.n ?? 0;
+	}
+
+	/** Give model_performances exactly the round index `shape` describes. */
+	async setRoundIndex(shape: RoundIndexShape): Promise<void> {
+		await this.execute(
+			`DROP INDEX IF EXISTS idx_perf_round; DROP INDEX IF EXISTS idx_perf_tournament_round; ${ROUND_INDEX_SQL[shape]}`
+		);
 	}
 
 	/**

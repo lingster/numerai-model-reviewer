@@ -55,6 +55,19 @@ CREATE TABLE IF NOT EXISTS model_performances (
 CREATE INDEX IF NOT EXISTS idx_perf_model ON model_performances(model_name, tournament);
 CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_seconds);
 
+-- One row per tournament: the first and last round stored in model_performances.
+-- /rankings/cache-status runs on every rankings page load and reads this row
+-- instead of computing MIN/MAX(round_number) over the table, which on
+-- production's (round_number, tournament) index read a large share of the
+-- ~5M rows per call. Precompute replaces the row after each store; the worker
+-- only reads it. See tournament-coverage.ts.
+CREATE TABLE IF NOT EXISTS tournament_coverage (
+  tournament INTEGER PRIMARY KEY,
+  earliest_round INTEGER NOT NULL,
+  latest_round INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 -- Per-round metrics that only submissionScores exposes (Classic mmc60, Signals
 -- alpha/mpc). Fetching them returns a model's whole history in one ~420KB
 -- response, so rounds are stored once here and only the still-mutable tail is

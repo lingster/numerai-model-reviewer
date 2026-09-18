@@ -12,10 +12,8 @@
  * throws for anything else. Precompute lets the error end the run.
  */
 
+import type { D1Query } from './d1-query';
 import { maxRoundSql } from './perf-queries';
-
-/** Runs one read-only SQL statement and resolves with its result rows. */
-export type D1Reader = (sql: string) => Promise<ReadonlyArray<Record<string, unknown>>>;
 
 /** The max-round read failed, or returned something that is not a round. */
 export class MaxRoundReadError extends Error {
@@ -32,7 +30,7 @@ const describe = (error: unknown): string =>
  * Highest stored round for `tournament`, or null when it has no rows yet.
  * @throws MaxRoundReadError when the read fails or its result is unrecognisable.
  */
-export async function readMaxRound(read: D1Reader, tournament: number): Promise<number | null> {
+export async function readMaxRound(read: D1Query, tournament: number): Promise<number | null> {
 	const sql = maxRoundSql(tournament);
 
 	let rows: ReadonlyArray<Record<string, unknown>>;
@@ -49,8 +47,11 @@ export async function readMaxRound(read: D1Reader, tournament: number): Promise<
 		throw new MaxRoundReadError(tournament, `unexpected result ${JSON.stringify(rows)}`);
 	}
 
+	// "null" as well as null: `wrangler d1 execute --json` renders SQL NULL as the
+	// string "null". That is ambiguous for a text column, but not here — MAX over
+	// an integer column can only produce a number or NULL.
 	const { maxRound } = row;
-	if (maxRound === null) return null;
+	if (maxRound === null || maxRound === 'null') return null;
 	if (typeof maxRound === 'number' && Number.isSafeInteger(maxRound)) return maxRound;
 
 	throw new MaxRoundReadError(tournament, `maxRound is not a round number: ${JSON.stringify(maxRound)}`);
