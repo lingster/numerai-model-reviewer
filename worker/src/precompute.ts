@@ -1121,15 +1121,26 @@ async function storeRoundFields(
   const backfilled = await readFieldRowsFromD1(d1Query, tournament, missing);
 
   const now = Math.floor(Date.now() / 1000);
-  const write = async (round: number, rows: Array<{ round: PerformanceRound }>) => {
-    const field = fieldFromRows(stakedFieldRows(rows, tournament), tournament);
-    await d1Query(upsertRoundFieldSql(tournament, round, encodeFieldMetrics(field), now));
+  // A field that fails to write is left missing, so a later run picks it up as
+  // backfill. These rows only make ranking cheaper — losing one is not worth
+  // failing a run whose performance data stored fine.
+  const write = async (round: number, rows: Array<{ round: PerformanceRound }>): Promise<boolean> => {
+    try {
+      const field = fieldFromRows(stakedFieldRows(rows, tournament), tournament);
+      await d1Query(upsertRoundFieldSql(tournament, round, encodeFieldMetrics(field), now));
+      return true;
+    } catch (error) {
+      console.warn(`  Could not store the field for round ${round}; leaving it for a later run:`, error);
+      return false;
+    }
   };
 
-  for (const [round, rows] of fresh) await write(round, rows);
-  for (const [round, rows] of backfilled) await write(round, rows);
+  let written = 0;
+  let backfilledWritten = 0;
+  for (const [round, rows] of fresh) if (await write(round, rows)) written++;
+  for (const [round, rows] of backfilled) if (await write(round, rows)) backfilledWritten++;
 
-  return { fresh: fresh.size, backfilled: backfilled.size };
+  return { fresh: written, backfilled: backfilledWritten };
 }
 
 async function storeInD1(

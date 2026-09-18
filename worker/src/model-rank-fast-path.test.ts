@@ -160,9 +160,81 @@ describe('when the stored fields cannot be read', () => {
 	it('still returns the live ranks rather than failing the request', async () => {
 		const target = fleetModelName(CLASSIC.tournament, 7);
 		const expected = await rankModel(target);
-		await d1.execute('DROP TABLE round_field_metrics');
 
+		// Renamed rather than dropped, and put back, so the stored fields other
+		// tests rely on survive this one.
+		await d1.execute('ALTER TABLE round_field_metrics RENAME TO round_field_metrics_gone');
 		const { result } = await rankModel(target);
+		await d1.execute('ALTER TABLE round_field_metrics_gone RENAME TO round_field_metrics');
+
 		expect(result.rounds).toEqual(expected.result.rounds);
+	});
+});
+
+describe('models that are not part of the stored field', () => {
+	/** Stands in for the live API: serves a model's own rows straight from D1. */
+	const ownScoresFromD1 =
+		(db: D1Database) =>
+		async (_env: Env, params: { modelName: string; tournament: number }) => {
+			const rows = await db
+				.prepare(
+					`SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, stake_value
+					   FROM model_performances
+					  WHERE model_name = ? AND tournament = ?`
+				)
+				.bind(params.modelName, params.tournament)
+				.all<{ round_number: number } & Record<string, unknown>>();
+			return new Map(
+				(rows.results ?? []).map((r) => [r.round_number, r as never])
+			);
+		};
+
+	it('ranks an unstaked model the same as the live path, which injects it into the field', async () => {
+		// Every tenth seeded model has no stake, so it is absent from the stored
+		// field. Ranking it against a field it is not in would report a different
+		// field size, and a rank that ignores its own presence.
+		const unstaked = fleetModelName(CLASSIC.tournament, 10);
+
+		const withFields = await d1.measure((db) =>
+			getModelRank(
+				envFor(db),
+				{ modelName: unstaked, startRound: FROM, endRound: TO, tournament: CLASSIC.tournament, formula: FORMULA },
+				ownScoresFromD1(db)
+			)
+		);
+
+		await d1.execute('ALTER TABLE round_field_metrics RENAME TO round_field_metrics_hidden');
+		const live = await d1.measure((db) =>
+			getModelRank(
+				envFor(db),
+				{ modelName: unstaked, startRound: FROM, endRound: TO, tournament: CLASSIC.tournament, formula: FORMULA },
+				ownScoresFromD1(db)
+			)
+		);
+		await d1.execute('ALTER TABLE round_field_metrics_hidden RENAME TO round_field_metrics');
+
+		expect(withFields.result.rounds).toEqual(live.result.rounds);
+	});
+
+	it('reports the field size for a staked model that has no score in a round', async () => {
+		const round = 1299;
+		await d1.execute(
+			`INSERT OR REPLACE INTO model_performances
+			   (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at)
+			 VALUES ('t8_unscored', ${round}, NULL, NULL, NULL, NULL, NULL, 1.0, 8, 0)`
+		);
+
+		const { result } = await d1.measure((db) =>
+			getModelRank(
+				envFor(db),
+				{ modelName: 't8_unscored', startRound: round, endRound: round, tournament: CLASSIC.tournament, formula: FORMULA },
+				ownScoresFromD1(db)
+			)
+		);
+
+		const [only] = result.rounds;
+		expect(only.rank).toBeNull();
+		// The round still had a full field; reporting 0 would say the field was empty.
+		expect(only.totalModels).toBeGreaterThan(0);
 	});
 });

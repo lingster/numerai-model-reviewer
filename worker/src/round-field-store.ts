@@ -8,6 +8,7 @@
  * the daily read budget and covers the default 30-round view immediately.
  */
 
+import { d1Retry } from './d1-retry';
 import type { D1Query } from './d1-query';
 import { pickMetrics } from './ranking';
 import type { RoundPerfRow } from './perf-queries';
@@ -69,14 +70,16 @@ export async function readStoredFields(
 	fromRound: number,
 	toRound: number
 ): Promise<Map<number, DecodedFieldMetrics>> {
-	const result = await db
-		.prepare(
-			`SELECT round_number, corr_values, mmc_values
-			   FROM round_field_metrics
-			  WHERE tournament = ? AND round_number BETWEEN ? AND ?`
-		)
-		.bind(tournament, fromRound, toRound)
-		.all<{ round_number: number; corr_values: string; mmc_values: string }>();
+	const result = await d1Retry(() =>
+		db
+			.prepare(
+				`SELECT round_number, corr_values, mmc_values
+				   FROM round_field_metrics
+				  WHERE tournament = ? AND round_number BETWEEN ? AND ?`
+			)
+			.bind(tournament, fromRound, toRound)
+			.all<{ round_number: number; corr_values: string; mmc_values: string }>()
+	);
 
 	const fields = new Map<number, DecodedFieldMetrics>();
 	for (const row of result.results ?? []) {

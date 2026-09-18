@@ -42,7 +42,7 @@ import {
 } from './ranking';
 import { bindingQuery } from './d1-query';
 import { getRoundCoverage } from './tournament-coverage';
-import { rankInField } from './round-field';
+import { countScored, rankInField } from './round-field';
 import { readStoredFields } from './round-field-store';
 import { selectModelRounds } from './perf-queries';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
@@ -429,7 +429,9 @@ async function rankFromStoredFields(
 			mmc: metrics.mmc,
 			// Reported at full precision; only the comparison uses the stored precision.
 			customScore: scoreFromMetrics(metrics, formula),
-			totalModels: placed?.totalModels ?? 0
+			// The field was this big whether or not the target scored in it, which is
+			// what the live path reports for an unscored model too.
+			totalModels: placed?.totalModels ?? countScored(field, formula)
 		});
 	}
 	return rounds;

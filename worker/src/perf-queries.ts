@@ -103,9 +103,13 @@ export async function selectRoundField(
 }
 
 /**
- * One model's own scores for each round in [fromRound, toRound]. The primary key
- * leads with model_name, so this seeks rather than scanning: reads are about the
- * number of rounds returned, not the size of the field.
+ * One model's own scores for each round in [fromRound, toRound], restricted to
+ * the rounds where it was part of the staked field — the same filter the field
+ * itself is built with, so a round it sat out has no row here and the caller
+ * knows to rank it another way.
+ *
+ * The primary key leads with model_name, so this seeks rather than scanning:
+ * reads are about the number of rounds returned, not the size of the field.
  */
 export async function selectModelRounds(
 	db: D1Database,
@@ -119,7 +123,7 @@ export async function selectModelRounds(
 			.prepare(
 				`SELECT round_number, ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE model_name = LOWER(?) AND tournament = ? AND round_number BETWEEN ? AND ?`
+				  WHERE model_name = LOWER(?) AND tournament = ? AND round_number BETWEEN ? AND ?${stakedFilter(tournament)}`
 			)
 			.bind(modelName, tournament, fromRound, toRound)
 			.all<RoundPerfRow & { round_number: number }>()

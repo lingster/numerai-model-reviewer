@@ -97,6 +97,11 @@ function scoresIn(field: DecodedFieldMetrics, formula: ScoreFormula): number[] {
 	return scores;
 }
 
+/** How many models in the field have a score under `formula`. */
+export function countScored(field: DecodedFieldMetrics, formula: ScoreFormula): number {
+	return scoresIn(field, formula).length;
+}
+
 /**
  * Where a model with `own` metrics places in the field, and how many models were
  * scored at all. Null when the model has no score for the round.
