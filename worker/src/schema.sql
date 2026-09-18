@@ -52,7 +52,10 @@ CREATE TABLE IF NOT EXISTS model_performances (
 -- migrations/0001_perf_tournament_round_index.sql, because building an index on
 -- the existing ~5M-row table writes ~5M rows. A fresh database (CI, local dev,
 -- tests) applies this file and then migrations/*.sql in order.
-CREATE INDEX IF NOT EXISTS idx_perf_model ON model_performances(model_name, tournament);
+-- No index on model_name: nothing queries model_performances by model name any
+-- more (the rankings read paths all filter by tournament and round), and every
+-- index costs an extra written row per stored performance row — ~10k a day
+-- against a 100k/day free limit. migrations/0002 drops it from production.
 CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_seconds);
 
 -- One row per tournament: the first and last round stored in model_performances.

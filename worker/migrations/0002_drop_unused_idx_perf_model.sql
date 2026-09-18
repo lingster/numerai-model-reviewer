@@ -1,0 +1,30 @@
+-- Drop idx_perf_model (model_name, tournament) from model_performances.
+--
+-- WHY
+--   Nothing queries model_performances by model name: the rankings read paths
+--   filter by tournament and round, and precompute only writes. Measured on a
+--   local D1, every production query costs the same with and without it, while
+--   each stored performance row costs one extra written row because of it:
+--
+--     query                    with idx_perf_model    without
+--     single round field                     151         151
+--     60-round window                     18,001      18,001
+--     precompute max round                 5,001       5,001
+--     coverage span (Crypto)                 525         524
+--     INSERT one perf row          4 rows written   3 written
+--
+--   Precompute stores ~9.9k performance rows a day, so this saves ~9.9k rows
+--   written a day against D1's 100k/day free limit — about 10%.
+--
+-- COST
+--   DROP INDEX is free: 16 rows read, 0 written (unlike CREATE INDEX, which
+--   writes one row per table row).
+--
+-- RUN
+--   npx wrangler d1 execute numerai-cache --remote --file=migrations/0002_drop_unused_idx_perf_model.sql
+--
+-- REVERSIBLE?
+--   Only at the usual index-build cost (~5M rows written in production), so
+--   re-create it only if a query that needs it comes back.
+
+DROP INDEX IF EXISTS idx_perf_model;
