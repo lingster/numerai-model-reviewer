@@ -42,6 +42,9 @@ import {
 } from './ranking';
 import { bindingQuery } from './d1-query';
 import { getRoundCoverage } from './tournament-coverage';
+import { rankInField } from './round-field';
+import { readStoredFields } from './round-field-store';
+import { selectModelRounds } from './perf-queries';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -356,6 +359,83 @@ async function injectOwnScores(
 }
 
 /**
+ * Ranks from the stored per-round fields, or null when they cannot answer and
+ * the live path must.
+ *
+ * Usable when every round of the requested range that the tournament has data
+ * for has both a stored field and a row for this model. A model missing from
+ * some round was unstaked then, and the live path has a fallback that fetches
+ * its scores and injects them into the field — behaviour this path deliberately
+ * does not reimplement.
+ *
+ * Costs about two reads per round (the field, and the model's own row) instead
+ * of every staked model's row for every round.
+ */
+async function rankFromStoredFields(
+	env: Env,
+	params: {
+		modelName: string;
+		startRound: number;
+		endRound: number;
+		tournament: number;
+		formula: ScoreFormula;
+	}
+): Promise<ModelRankRoundResult[] | null> {
+	const { modelName, startRound, endRound, tournament, formula } = params;
+
+	let fields: Awaited<ReturnType<typeof readStoredFields>>;
+	let own: Map<number, Awaited<ReturnType<typeof selectModelRounds>>[number]>;
+	try {
+		const span = await getRoundCoverage(bindingQuery(env.DB), tournament);
+		if (!span) return null;
+
+		const from = Math.max(startRound, span.earliestRound);
+		const to = Math.min(endRound, span.latestRound);
+		if (from > to) return null;
+
+		const [storedFields, ownRows] = await Promise.all([
+			readStoredFields(env.DB, tournament, from, to),
+			selectModelRounds(env.DB, modelName, tournament, from, to)
+		]);
+
+		own = new Map(ownRows.map((row) => [row.round_number, row]));
+		for (let round = from; round <= to; round++) {
+			if (!storedFields.has(round) || !own.has(round)) return null;
+		}
+		fields = storedFields;
+	} catch (error) {
+		// Falling back is always correct here — the live path computes the same
+		// ranks from the same rows — so a missing table or an unreadable field
+		// costs reads rather than the request.
+		console.error('stored-field ranking unavailable; ranking live instead:', error);
+		return null;
+	}
+
+	const rounds: ModelRankRoundResult[] = [];
+	for (let round = startRound; round <= endRound; round++) {
+		const field = fields.get(round);
+		const ownRow = own.get(round);
+		if (!field || !ownRow) {
+			rounds.push({ roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels: 0 });
+			continue;
+		}
+
+		const metrics = pickMetrics(ownRow, tournament);
+		const placed = rankInField(field, metrics, formula);
+		rounds.push({
+			roundNumber: round,
+			rank: placed?.rank ?? null,
+			corr: metrics.corr,
+			mmc: metrics.mmc,
+			// Reported at full precision; only the comparison uses the stored precision.
+			customScore: scoreFromMetrics(metrics, formula),
+			totalModels: placed?.totalModels ?? 0
+		});
+	}
+	return rounds;
+}
+
+/**
  * Compute ranks for a model over [startRound, endRound].
  *
  * Staked models are ranked purely from D1 (no live API calls). A model absent
@@ -397,6 +477,28 @@ export async function getModelRank(
 		customScore: null,
 		totalModels: 0
 	});
+
+	// Per-round ranking with the default weighting can be served from the stored
+	// round fields: two reads a round rather than the whole field. tcWeight has no
+	// stored metric, and a trailing window needs every model's history, so both
+	// stay on the live path.
+	if (window === 1 && !formula.tcWeight) {
+		const stored = await rankFromStoredFields(env, {
+			modelName: meta?.model_name ?? modelName,
+			startRound,
+			endRound,
+			tournament,
+			formula
+		});
+		if (stored) {
+			return {
+				modelName: meta?.model_name ?? modelName,
+				username: meta?.username ?? username ?? '',
+				modelId: meta?.model_id ?? modelId ?? '',
+				rounds: stored
+			};
+		}
+	}
 
 	// Fetch the staked field once over the (window-extended) range, then augment it
 	// with the target's own scores if it's unstaked/absent. Both ranking paths below
