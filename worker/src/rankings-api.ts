@@ -31,6 +31,13 @@ import {
 	type TopModelRow
 } from './perf-queries';
 import { computeTrailingAverages } from './windowed-metrics';
+import {
+	pickMetrics,
+	scoreFromMetrics,
+	TRIPLE_KEYS,
+	type MetricTriple,
+	type ScoreFormula
+} from './ranking';
 import { bindingQuery } from './d1-query';
 import { getRoundCoverage } from './tournament-coverage';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
@@ -42,12 +49,6 @@ export interface Env {
 	// unstaked-model fallback, which fetches a single model's own scores live.
 	NUMERAI_PUBLIC_KEY?: string;
 	NUMERAI_SECRET_KEY?: string;
-}
-
-export interface ScoreFormula {
-	corrWeight: number;
-	mmcWeight: number;
-	tcWeight?: number;
 }
 
 export interface ModelRankRoundResult {
@@ -67,38 +68,7 @@ export interface ModelRankResponse {
 }
 
 export type { RoundPerfRow } from './perf-queries';
-
-/** Pick the (corr-like, mmc-like) metric pair for the given tournament. */
-function pickMetrics(row: RoundPerfRow, tournament: number): {
-	corrMetric: number | null;
-	mmcMetric: number | null;
-	tcMetric: number | null;
-} {
-	if (tournament === SIGNALS_TOURNAMENT) {
-		return { corrMetric: row.alpha, mmcMetric: row.mpc, tcMetric: null };
-	}
-	return { corrMetric: row.corr, mmcMetric: row.mmc, tcMetric: row.tc };
-}
-
-/** A corr/mmc/tc metric triple (already normalized for the tournament). */
-export interface MetricTriple {
-	corr: number | null;
-	mmc: number | null;
-	tc: number | null;
-}
-
-/** The MetricTriple members, as the key list the windowed averager takes. */
-const TRIPLE_KEYS = ['corr', 'mmc', 'tc'] as const satisfies readonly (keyof MetricTriple)[];
-
-/** Custom score for a metric triple under the formula. null if no metric present. */
-function scoreFromMetrics(m: MetricTriple, formula: ScoreFormula): number | null {
-	if (m.corr === null && m.mmc === null && m.tc === null) return null;
-	const score =
-		formula.corrWeight * (m.corr ?? 0) +
-		formula.mmcWeight * (m.mmc ?? 0) +
-		(formula.tcWeight ?? 0) * (m.tc ?? 0);
-	return Number.isFinite(score) ? score : null;
-}
+export type { MetricTriple, ScoreFormula } from './ranking';
 
 /**
  * Build, for every model, the trailing `window`-round average (by round number)
@@ -120,9 +90,8 @@ export function buildWindowedMetrics(
 	const perModel = new Map<string, Array<{ round: number } & MetricTriple>>();
 	for (const [round, rows] of fields) {
 		for (const row of rows) {
-			const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
 			const key = row.model_name.toLowerCase();
-			const entry = { round, corr: corrMetric, mmc: mmcMetric, tc: tcMetric };
+			const entry = { round, ...pickMetrics(row, tournament) };
 			const list = perModel.get(key);
 			if (list) list.push(entry);
 			else perModel.set(key, [entry]);
@@ -255,18 +224,14 @@ function rankRound(
 	}> = [];
 
 	for (const row of field) {
-		const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
-		if (corrMetric === null && mmcMetric === null && tcMetric === null) continue;
-		const score =
-			formula.corrWeight * (corrMetric ?? 0) +
-			formula.mmcWeight * (mmcMetric ?? 0) +
-			(formula.tcWeight ?? 0) * (tcMetric ?? 0);
-		if (!Number.isFinite(score)) continue;
+		const metrics = pickMetrics(row, tournament);
+		const score = scoreFromMetrics(metrics, formula);
+		if (score === null) continue;
 		scored.push({
 			modelName: row.model_name,
 			score,
-			corr: corrMetric,
-			mmc: mmcMetric
+			corr: metrics.corr,
+			mmc: metrics.mmc
 		});
 	}
 
@@ -579,10 +544,10 @@ export async function getTopModelsForRound(
 		]);
 		usernames = userMap;
 		for (const row of field) {
-			const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
-			const score = scoreFromMetrics({ corr: corrMetric, mmc: mmcMetric, tc: tcMetric }, formula);
+			const metrics = pickMetrics(row, tournament);
+			const score = scoreFromMetrics(metrics, formula);
 			if (score === null) continue;
-			scored.push({ modelName: row.model_name, score, corr: corrMetric, mmc: mmcMetric });
+			scored.push({ modelName: row.model_name, score, corr: metrics.corr, mmc: metrics.mmc });
 		}
 	}
 
