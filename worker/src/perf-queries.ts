@@ -102,6 +102,35 @@ export async function selectRoundField(
 	return result.results ?? [];
 }
 
+/**
+ * One model's own scores for each round in [fromRound, toRound], restricted to
+ * the rounds where it was part of the staked field — the same filter the field
+ * itself is built with, so a round it sat out has no row here and the caller
+ * knows to rank it another way.
+ *
+ * The primary key leads with model_name, so this seeks rather than scanning:
+ * reads are about the number of rounds returned, not the size of the field.
+ */
+export async function selectModelRounds(
+	db: D1Database,
+	modelName: string,
+	tournament: number,
+	fromRound: number,
+	toRound: number
+): Promise<Array<RoundPerfRow & { round_number: number }>> {
+	const result = await d1Retry(() =>
+		db
+			.prepare(
+				`SELECT round_number, ${ROUND_PERF_COLUMNS}
+				   FROM model_performances
+				  WHERE model_name = LOWER(?) AND tournament = ? AND round_number BETWEEN ? AND ?${stakedFilter(tournament)}`
+			)
+			.bind(modelName, tournament, fromRound, toRound)
+			.all<RoundPerfRow & { round_number: number }>()
+	);
+	return result.results ?? [];
+}
+
 /** Every staked model's scores for each round in [fromRound, toRound]. */
 export async function selectRoundFieldsInRange(
 	db: D1Database,

@@ -31,8 +31,20 @@ import {
 	type TopModelRow
 } from './perf-queries';
 import { computeTrailingAverages } from './windowed-metrics';
+import {
+	pickMetrics,
+	rankAmong,
+	rankSortedScores,
+	scoreFromMetrics,
+	TRIPLE_KEYS,
+	type MetricTriple,
+	type ScoreFormula
+} from './ranking';
 import { bindingQuery } from './d1-query';
 import { getRoundCoverage } from './tournament-coverage';
+import { countScored, rankInField } from './round-field';
+import { readStoredFields } from './round-field-store';
+import { selectModelRounds } from './perf-queries';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -42,12 +54,6 @@ export interface Env {
 	// unstaked-model fallback, which fetches a single model's own scores live.
 	NUMERAI_PUBLIC_KEY?: string;
 	NUMERAI_SECRET_KEY?: string;
-}
-
-export interface ScoreFormula {
-	corrWeight: number;
-	mmcWeight: number;
-	tcWeight?: number;
 }
 
 export interface ModelRankRoundResult {
@@ -67,38 +73,7 @@ export interface ModelRankResponse {
 }
 
 export type { RoundPerfRow } from './perf-queries';
-
-/** Pick the (corr-like, mmc-like) metric pair for the given tournament. */
-function pickMetrics(row: RoundPerfRow, tournament: number): {
-	corrMetric: number | null;
-	mmcMetric: number | null;
-	tcMetric: number | null;
-} {
-	if (tournament === SIGNALS_TOURNAMENT) {
-		return { corrMetric: row.alpha, mmcMetric: row.mpc, tcMetric: null };
-	}
-	return { corrMetric: row.corr, mmcMetric: row.mmc, tcMetric: row.tc };
-}
-
-/** A corr/mmc/tc metric triple (already normalized for the tournament). */
-export interface MetricTriple {
-	corr: number | null;
-	mmc: number | null;
-	tc: number | null;
-}
-
-/** The MetricTriple members, as the key list the windowed averager takes. */
-const TRIPLE_KEYS = ['corr', 'mmc', 'tc'] as const satisfies readonly (keyof MetricTriple)[];
-
-/** Custom score for a metric triple under the formula. null if no metric present. */
-function scoreFromMetrics(m: MetricTriple, formula: ScoreFormula): number | null {
-	if (m.corr === null && m.mmc === null && m.tc === null) return null;
-	const score =
-		formula.corrWeight * (m.corr ?? 0) +
-		formula.mmcWeight * (m.mmc ?? 0) +
-		(formula.tcWeight ?? 0) * (m.tc ?? 0);
-	return Number.isFinite(score) ? score : null;
-}
+export type { MetricTriple, ScoreFormula } from './ranking';
 
 /**
  * Build, for every model, the trailing `window`-round average (by round number)
@@ -120,9 +95,8 @@ export function buildWindowedMetrics(
 	const perModel = new Map<string, Array<{ round: number } & MetricTriple>>();
 	for (const [round, rows] of fields) {
 		for (const row of rows) {
-			const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
 			const key = row.model_name.toLowerCase();
-			const entry = { round, corr: corrMetric, mmc: mmcMetric, tc: tcMetric };
+			const entry = { round, ...pickMetrics(row, tournament) };
 			const list = perModel.get(key);
 			if (list) list.push(entry);
 			else perModel.set(key, [entry]);
@@ -164,19 +138,21 @@ function rankRoundFromWindowed(
 		scored.push({ modelName: row.model_name, score, corr: m.corr, mmc: m.mmc });
 	}
 
-	scored.sort((a, b) => b.score - a.score);
 	const totalModels = scored.length;
 
-	const idx = scored.findIndex((s) => s.modelName.toLowerCase() === targetModelLower);
-	if (idx < 0) {
+	const target = scored.find((s) => s.modelName.toLowerCase() === targetModelLower);
+	if (!target) {
 		return { roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels };
 	}
 	return {
 		roundNumber: round,
-		rank: idx + 1,
-		corr: scored[idx].corr,
-		mmc: scored[idx].mmc,
-		customScore: scored[idx].score,
+		rank: rankAmong(
+			scored.map((s) => s.score),
+			target.score
+		),
+		corr: target.corr,
+		mmc: target.mmc,
+		customScore: target.score,
 		totalModels
 	};
 }
@@ -255,35 +231,31 @@ function rankRound(
 	}> = [];
 
 	for (const row of field) {
-		const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
-		if (corrMetric === null && mmcMetric === null && tcMetric === null) continue;
-		const score =
-			formula.corrWeight * (corrMetric ?? 0) +
-			formula.mmcWeight * (mmcMetric ?? 0) +
-			(formula.tcWeight ?? 0) * (tcMetric ?? 0);
-		if (!Number.isFinite(score)) continue;
+		const metrics = pickMetrics(row, tournament);
+		const score = scoreFromMetrics(metrics, formula);
+		if (score === null) continue;
 		scored.push({
 			modelName: row.model_name,
 			score,
-			corr: corrMetric,
-			mmc: mmcMetric
+			corr: metrics.corr,
+			mmc: metrics.mmc
 		});
 	}
 
-	scored.sort((a, b) => b.score - a.score);
 	const totalModels = scored.length;
 
-	const idx = scored.findIndex(
-		(s) => s.modelName.toLowerCase() === targetModelLower
-	);
-	if (idx < 0) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels };
+	const target = scored.find((s) => s.modelName.toLowerCase() === targetModelLower);
+	if (!target) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels };
 
 	return {
 		roundNumber: 0,
-		rank: idx + 1,
-		corr: scored[idx].corr,
-		mmc: scored[idx].mmc,
-		customScore: scored[idx].score,
+		rank: rankAmong(
+			scored.map((s) => s.score),
+			target.score
+		),
+		corr: target.corr,
+		mmc: target.mmc,
+		customScore: target.score,
 		totalModels
 	};
 }
@@ -387,6 +359,85 @@ async function injectOwnScores(
 }
 
 /**
+ * Ranks from the stored per-round fields, or null when they cannot answer and
+ * the live path must.
+ *
+ * Usable when every round of the requested range that the tournament has data
+ * for has both a stored field and a row for this model. A model missing from
+ * some round was unstaked then, and the live path has a fallback that fetches
+ * its scores and injects them into the field — behaviour this path deliberately
+ * does not reimplement.
+ *
+ * Costs about two reads per round (the field, and the model's own row) instead
+ * of every staked model's row for every round.
+ */
+async function rankFromStoredFields(
+	env: Env,
+	params: {
+		modelName: string;
+		startRound: number;
+		endRound: number;
+		tournament: number;
+		formula: ScoreFormula;
+	}
+): Promise<ModelRankRoundResult[] | null> {
+	const { modelName, startRound, endRound, tournament, formula } = params;
+
+	let fields: Awaited<ReturnType<typeof readStoredFields>>;
+	let own: Map<number, Awaited<ReturnType<typeof selectModelRounds>>[number]>;
+	try {
+		const span = await getRoundCoverage(bindingQuery(env.DB), tournament);
+		if (!span) return null;
+
+		const from = Math.max(startRound, span.earliestRound);
+		const to = Math.min(endRound, span.latestRound);
+		if (from > to) return null;
+
+		const [storedFields, ownRows] = await Promise.all([
+			readStoredFields(env.DB, tournament, from, to),
+			selectModelRounds(env.DB, modelName, tournament, from, to)
+		]);
+
+		own = new Map(ownRows.map((row) => [row.round_number, row]));
+		for (let round = from; round <= to; round++) {
+			if (!storedFields.has(round) || !own.has(round)) return null;
+		}
+		fields = storedFields;
+	} catch (error) {
+		// Falling back is always correct here — the live path computes the same
+		// ranks from the same rows — so a missing table or an unreadable field
+		// costs reads rather than the request.
+		console.error('stored-field ranking unavailable; ranking live instead:', error);
+		return null;
+	}
+
+	const rounds: ModelRankRoundResult[] = [];
+	for (let round = startRound; round <= endRound; round++) {
+		const field = fields.get(round);
+		const ownRow = own.get(round);
+		if (!field || !ownRow) {
+			rounds.push({ roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels: 0 });
+			continue;
+		}
+
+		const metrics = pickMetrics(ownRow, tournament);
+		const placed = rankInField(field, metrics, formula);
+		rounds.push({
+			roundNumber: round,
+			rank: placed?.rank ?? null,
+			corr: metrics.corr,
+			mmc: metrics.mmc,
+			// Reported at full precision; only the comparison uses the stored precision.
+			customScore: scoreFromMetrics(metrics, formula),
+			// The field was this big whether or not the target scored in it, which is
+			// what the live path reports for an unscored model too.
+			totalModels: placed?.totalModels ?? countScored(field, formula)
+		});
+	}
+	return rounds;
+}
+
+/**
  * Compute ranks for a model over [startRound, endRound].
  *
  * Staked models are ranked purely from D1 (no live API calls). A model absent
@@ -428,6 +479,28 @@ export async function getModelRank(
 		customScore: null,
 		totalModels: 0
 	});
+
+	// Per-round ranking with the default weighting can be served from the stored
+	// round fields: two reads a round rather than the whole field. tcWeight has no
+	// stored metric, and a trailing window needs every model's history, so both
+	// stay on the live path.
+	if (window === 1 && !formula.tcWeight) {
+		const stored = await rankFromStoredFields(env, {
+			modelName: meta?.model_name ?? modelName,
+			startRound,
+			endRound,
+			tournament,
+			formula
+		});
+		if (stored) {
+			return {
+				modelName: meta?.model_name ?? modelName,
+				username: meta?.username ?? username ?? '',
+				modelId: meta?.model_id ?? modelId ?? '',
+				rounds: stored
+			};
+		}
+	}
 
 	// Fetch the staked field once over the (window-extended) range, then augment it
 	// with the target's own scores if it's unstaked/absent. Both ranking paths below
@@ -579,10 +652,10 @@ export async function getTopModelsForRound(
 		]);
 		usernames = userMap;
 		for (const row of field) {
-			const { corrMetric, mmcMetric, tcMetric } = pickMetrics(row, tournament);
-			const score = scoreFromMetrics({ corr: corrMetric, mmc: mmcMetric, tc: tcMetric }, formula);
+			const metrics = pickMetrics(row, tournament);
+			const score = scoreFromMetrics(metrics, formula);
 			if (score === null) continue;
-			scored.push({ modelName: row.model_name, score, corr: corrMetric, mmc: mmcMetric });
+			scored.push({ modelName: row.model_name, score, corr: metrics.corr, mmc: metrics.mmc });
 		}
 	}
 
@@ -591,11 +664,14 @@ export async function getTopModelsForRound(
 
 	// limit <= 0 means "return the whole ranked field" — the frontend pages and
 	// searches it client-side so users can find any staked model, not just top N.
+	// Competition ranks over the whole field before slicing, so models that score
+	// identically share a rank here exactly as they do in a model's own history.
+	const ranks = rankSortedScores(scored.map((s) => s.score));
 	const ranked = limit > 0 ? scored.slice(0, limit) : scored;
 	return ranked.map((s, i) => ({
 		modelName: s.modelName,
 		username: usernames.get(s.modelName.toLowerCase()) ?? '',
-		rank: i + 1,
+		rank: ranks[i],
 		corr: s.corr,
 		mmc: s.mmc,
 		customScore: s.score,

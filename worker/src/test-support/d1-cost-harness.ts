@@ -105,6 +105,9 @@ export class D1CostHarness {
 	 *
 	 * D1 binds JS numbers as REAL, so ids are CAST before being concatenated into
 	 * names — otherwise tournament 8 yields "t8.0_m0" rather than "t8_m0".
+	 *
+	 * Metrics vary by model index rather than being constant: a field where every
+	 * model scores the same is entirely ties, which hides ranking differences.
 	 */
 	async seed(slice: FleetSlice): Promise<void> {
 		const { tournament, models, fromRound, toRound, unstakedEvery } = slice;
@@ -115,7 +118,8 @@ export class D1CostHarness {
 				   r(n) AS (SELECT ?2 UNION ALL SELECT n + 1 FROM r WHERE n < ?3)
 				 INSERT INTO model_performances
 				   (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at)
-				 SELECT 't' || CAST(?4 AS INTEGER) || '_m' || i, n, 0.01, 0.02, NULL, NULL, NULL,
+				 SELECT 't' || CAST(?4 AS INTEGER) || '_m' || i, n,
+				        0.05 - i * 0.0001, 0.02 - i * 0.00005, NULL, NULL, NULL,
 				        CASE WHEN i % ?5 = 0 THEN 0 ELSE 1.0 END, ?4, 0
 				   FROM m, r`
 			)

@@ -114,7 +114,7 @@ describe('selectTopModelByName (model-rank lookup)', () => {
 });
 
 describe('write cost', () => {
-	it('adds no index writes: one model_performances row still costs table + 3 indexes', async () => {
+	it('keeps one model_performances row at table + primary key + round index', async () => {
 		const { cost } = await d1.measure((db) =>
 			db
 				.prepare(
@@ -124,8 +124,10 @@ describe('write cost', () => {
 				)
 				.run()
 		);
-		// Table row + primary key + idx_perf_model + the round index. Reordering the
-		// round index must keep this at 4; adding an index instead would make it 5.
-		expect(cost.rowsWritten).toBe(4);
+		// Table row + the primary key's index + the round index. Precompute stores
+		// ~9.9k rows a day against a 100k/day free limit, so every extra index on
+		// this table costs ~10% of the daily budget: idx_perf_model was dropped for
+		// exactly that reason (migrations/0002), and adding one back would show here.
+		expect(cost.rowsWritten).toBe(3);
 	});
 });

@@ -25,7 +25,7 @@ import { splitSqlStatements } from './test-support/d1-cost-harness';
  * replaced by idx_perf_tournament_round in migrations/0001; keeping either here
  * would rebuild one of them (~5M writes) on the next deploy after the swap.
  */
-const INDEXES_OWNED_BY_SCHEMA = new Set(['idx_perf_model', 'idx_cache_ttl']);
+const INDEXES_OWNED_BY_SCHEMA = new Set(['idx_cache_ttl']);
 
 const statements = splitSqlStatements(schemaSql);
 

@@ -52,7 +52,10 @@ CREATE TABLE IF NOT EXISTS model_performances (
 -- migrations/0001_perf_tournament_round_index.sql, because building an index on
 -- the existing ~5M-row table writes ~5M rows. A fresh database (CI, local dev,
 -- tests) applies this file and then migrations/*.sql in order.
-CREATE INDEX IF NOT EXISTS idx_perf_model ON model_performances(model_name, tournament);
+-- No index on model_name: nothing queries model_performances by model name any
+-- more (the rankings read paths all filter by tournament and round), and every
+-- index costs an extra written row per stored performance row — ~10k a day
+-- against a 100k/day free limit. migrations/0002 drops it from production.
 CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_seconds);
 
 -- One row per tournament: the first and last round stored in model_performances.
@@ -61,6 +64,25 @@ CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_second
 -- production's (round_number, tournament) index read a large share of the
 -- ~5M rows per call. Precompute replaces the row after each store; the worker
 -- only reads it. See tournament-coverage.ts.
+-- One row per round holding that round's whole field: every staked model's
+-- scored metric pair, packed as base64 Float64 arrays (~96KB for 4,600 models).
+-- Ranking a model in a round needs to know how many models scored above it, so
+-- the live path reads every model's row for the round (~4,600) — ~300k reads for
+-- the default 30-round view of one model. From here it is one read per round.
+--
+-- Metrics, not scores: the payout formula changes (Classic moved to 3xCORR60 +
+-- 15xMMC60) and the UI varies the weights per request, so stored scores would
+-- invalidate history. Model names are not stored; a model's own metrics come
+-- from its own model_performances rows. See round-field.ts.
+CREATE TABLE IF NOT EXISTS round_field_metrics (
+  tournament INTEGER NOT NULL,
+  round_number INTEGER NOT NULL,
+  corr_values TEXT NOT NULL,
+  mmc_values TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (tournament, round_number)
+);
+
 CREATE TABLE IF NOT EXISTS tournament_coverage (
   tournament INTEGER PRIMARY KEY,
   earliest_round INTEGER NOT NULL,
