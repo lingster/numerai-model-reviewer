@@ -18,6 +18,7 @@ export interface ServerConfig {
 	migrationsPath: string;
 	applySchema: boolean;
 	numeraiApiUrl: string;
+	/** Optional: the API reads only public data, which Numerai serves anonymously. */
 	numeraiPublicKey: string;
 	numeraiSecretKey: string;
 	allowedOrigins: string;
@@ -62,13 +63,5 @@ export function loadConfig(): ServerConfig {
 		rateLimitWindowSeconds: int('RATE_LIMIT_WINDOW_SECONDS', 60, { min: 1 }),
 		maxRequestBodyBytes: int('MAX_REQUEST_BODY_BYTES', 1_048_576, { min: 1 })
 	};
-
-	// Signals and Crypto reach Numerai with credentials; Classic mostly does not.
-	// Warn rather than fail: the rankings endpoints serve stored data regardless.
-	if (!config.numeraiPublicKey || !config.numeraiSecretKey) {
-		console.warn(
-			'NUMERAI_PUBLIC_KEY / NUMERAI_SECRET_KEY are unset — endpoints that call Numerai live may fail'
-		);
-	}
 	return config;
 }

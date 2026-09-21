@@ -1,6 +1,6 @@
 # Self-hosted Numerai API.
 #
-#   cp .env.example .env && edit
+#   cp .env.example .env    # optional: every setting has a default
 #   docker compose up -d --build api
 #
 # Compose runs from server/ but builds with the repository root as context, so
@@ -34,8 +34,8 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173}
       ALLOWED_ORIGIN_SUFFIXES: ${ALLOWED_ORIGIN_SUFFIXES:-}
       NUMERAI_API_URL: ${NUMERAI_API_URL:-https://api-tournament.numer.ai/graphql}
-      NUMERAI_PUBLIC_KEY: ${NUMERAI_PUBLIC_KEY:?set NUMERAI_PUBLIC_KEY in .env}
-      NUMERAI_SECRET_KEY: ${NUMERAI_SECRET_KEY:?set NUMERAI_SECRET_KEY in .env}
+      NUMERAI_PUBLIC_KEY: ${NUMERAI_PUBLIC_KEY:-}
+      NUMERAI_SECRET_KEY: ${NUMERAI_SECRET_KEY:-}
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-100}
       RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
     volumes:

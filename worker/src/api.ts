@@ -33,8 +33,9 @@ import {
 } from './round-scores-cache';
 
 export interface Env {
-  NUMERAI_PUBLIC_KEY: string;
-  NUMERAI_SECRET_KEY: string;
+  // Optional: every query here reads public data, which Numerai serves anonymously.
+  NUMERAI_PUBLIC_KEY?: string;
+  NUMERAI_SECRET_KEY?: string;
   NUMERAI_API_URL: string;
   // D1 holds precomputed staked models (username + model_name per tournament),
   // used as a fast-path index for user search.
@@ -46,6 +47,15 @@ interface GraphQLResponse<T> {
   errors?: Array<{ message: string }>;
 }
 
+/** Headers for a Numerai call; Authorization only when both keys are set. */
+function numeraiHeaders(env: Env): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (env.NUMERAI_PUBLIC_KEY && env.NUMERAI_SECRET_KEY) {
+    headers.Authorization = `Token ${env.NUMERAI_PUBLIC_KEY}$${env.NUMERAI_SECRET_KEY}`;
+  }
+  return headers;
+}
+
 async function query<T>(
   env: Env,
   queryStr: string,
@@ -53,10 +63,7 @@ async function query<T>(
 ): Promise<T> {
   const response = await fetch(env.NUMERAI_API_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Token ${env.NUMERAI_PUBLIC_KEY}$${env.NUMERAI_SECRET_KEY}`
-    },
+    headers: numeraiHeaders(env),
     body: JSON.stringify({
       query: queryStr,
       variables

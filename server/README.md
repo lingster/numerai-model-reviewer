@@ -24,7 +24,7 @@ curl -H 'Origin: http://localhost:5173' localhost:8787/health
 ## Run it in Docker
 
 ```bash
-cp .env.example .env          # add the Numerai keys
+cp .env.example .env          # optional; see Configuration
 docker compose up -d --build api
 docker compose ps             # healthy
 ```
@@ -60,7 +60,7 @@ sudo install -d -o numerdiff -g numerdiff -m 750 /data/numerai/numerdiff
 | `MIGRATIONS_PATH` | `../worker/migrations` | Applied after the schema, in filename order |
 | `APPLY_SCHEMA` | `true` | `false` to skip startup DDL |
 | `NUMERAI_API_URL` | Numerai's GraphQL endpoint | |
-| `NUMERAI_PUBLIC_KEY` / `NUMERAI_SECRET_KEY` | — | Warns if unset; stored-data endpoints still work |
+| `NUMERAI_PUBLIC_KEY` / `NUMERAI_SECRET_KEY` | — | Optional; sent only when both are set. Queries are public data |
 | `ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated exact origins |
 | `ALLOWED_ORIGIN_SUFFIXES` | — | e.g. `.pages.dev` for preview deployments |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `100` / `60` | In-memory here (no KV) |
