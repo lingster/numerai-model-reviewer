@@ -89,8 +89,11 @@ frontend's `VITE_API_URL` points at it.
 Verified locally, including in Docker:
 
 - `server/src/sqlite-d1.ts` — the D1-shaped SQLite adapter (12 tests).
-- `server/src/server.ts` — the node:http ↔ worker-handler bridge (4 + 6 tests).
-- `server/src/config.ts` — environment configuration mirroring the worker's vars.
+- `server/src/server.ts` — the node:http ↔ worker-handler bridge, with a request-body cap so an
+  unauthenticated client cannot make it buffer unbounded memory ahead of routing.
+- `server/src/config.ts` — environment configuration mirroring the worker's vars, validated at
+  startup rather than coerced.
+- `server/src/migrations.ts` — schema application and once-only, transactional migrations.
 - `server/Dockerfile`, `server/docker-compose.yml`, `server/.env.example` — image builds
   (165 MB), starts with **no network access**, and reports healthy.
 

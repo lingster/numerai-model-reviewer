@@ -10,12 +10,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApiServer } from './server.js';
-import type { ServerConfig } from './config.js';
-
-const ORIGIN = 'http://localhost:5173';
+import { TEST_ORIGIN as ORIGIN, testConfig } from './test-support/server-config.js';
 
 let directory: string;
 let close: () => Promise<void>;
@@ -23,21 +21,7 @@ let baseUrl: string;
 
 beforeAll(async () => {
 	directory = mkdtempSync(join(tmpdir(), 'numerai-api-'));
-	const config: ServerConfig = {
-		host: '127.0.0.1',
-		port: 0, // any free port
-		databasePath: join(directory, 'test.sqlite'),
-		schemaPath: resolve('../worker/src/schema.sql'),
-		migrationsPath: resolve('../worker/migrations'),
-		applySchema: true,
-		numeraiApiUrl: 'https://api-tournament.numer.ai/graphql',
-		numeraiPublicKey: '',
-		numeraiSecretKey: '',
-		allowedOrigins: ORIGIN,
-		allowedOriginSuffixes: '',
-		rateLimitRequests: 1000,
-		rateLimitWindowSeconds: 60
-	};
+	const config = testConfig(join(directory, 'test.sqlite'));
 
 	const api = createApiServer(config);
 	close = api.close;

@@ -13,10 +13,9 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import worker from '../../worker/src/index.js';
 import { SqliteD1 } from './sqlite-d1.js';
+import { applyMigrations, applySchema } from './migrations.js';
 import { loadConfig, type ServerConfig } from './config.js';
 
 /** The worker's `fetch`, whichever shape the module system hands us. */
@@ -56,8 +55,22 @@ class NodeExecutionContext {
 	}
 }
 
-/** A node:http request as a web Request the worker handler understands. */
-async function toWebRequest(req: IncomingMessage, origin: string): Promise<Request> {
+/** Thrown when a client sends more body than we are willing to buffer. */
+export class RequestTooLargeError extends Error {
+	constructor(readonly limit: number) {
+		super(`request body exceeds ${limit} bytes`);
+		this.name = 'RequestTooLargeError';
+	}
+}
+
+/**
+ * A node:http request as a web Request the worker handler understands.
+ *
+ * The body is capped and the read abandoned as soon as the cap is passed:
+ * buffering it whole first would let an unauthenticated client exhaust memory
+ * before routing or rate limiting ever runs — and every route here is a GET.
+ */
+async function toWebRequest(req: IncomingMessage, origin: string, maxBodyBytes: number): Promise<Request> {
 	const url = new URL(req.url ?? '/', origin);
 	const headers = new Headers();
 	for (const [name, value] of Object.entries(req.headers)) {
@@ -68,8 +81,18 @@ async function toWebRequest(req: IncomingMessage, origin: string): Promise<Reque
 	const method = req.method ?? 'GET';
 	let body: Buffer | undefined;
 	if (method !== 'GET' && method !== 'HEAD') {
+		// A declared length short-circuits the read; it is a hint, not a promise,
+		// so the running total below is what actually enforces the cap.
+		const declared = Number(req.headers['content-length'] ?? 0);
+		if (Number.isFinite(declared) && declared > maxBodyBytes) throw new RequestTooLargeError(maxBodyBytes);
+
 		const chunks: Buffer[] = [];
-		for await (const chunk of req) chunks.push(chunk as Buffer);
+		let size = 0;
+		for await (const chunk of req) {
+			size += (chunk as Buffer).length;
+			if (size > maxBodyBytes) throw new RequestTooLargeError(maxBodyBytes);
+			chunks.push(chunk as Buffer);
+		}
 		body = Buffer.concat(chunks);
 	}
 
@@ -83,45 +106,13 @@ async function writeWebResponse(response: Response, res: ServerResponse): Promis
 	res.end(body);
 }
 
-/** Statements in a SQL file: comments stripped, split on `;`. */
-export function splitSqlStatements(sql: string): string[] {
-	return sql
-		.replace(/--[^\n]*/g, '')
-		.split(';')
-		.map((statement) => statement.trim())
-		.filter(Boolean);
-}
-
-/**
- * Bring a database up to date: schema.sql, then every migration in order — the
- * same sequence CI builds a fresh database with.
- *
- * Migrations are applied here, unlike on Cloudflare where they are run by hand.
- * There they are deliberately manual because building an index on D1 writes a
- * row per table row and can exceed a daily quota; on your own disk that cost
- * does not exist, so a self-hosted database gets the better index from the
- * start — including the (tournament, round_number) one the rankings queries
- * want, which D1's free plan cannot afford to build.
- */
-function applySchemaAndMigrations(db: SqliteD1, schemaPath: string, migrationsPath: string): void {
-	for (const statement of splitSqlStatements(readFileSync(schemaPath, 'utf-8'))) {
-		db.exec(statement);
-	}
-
-	if (!existsSync(migrationsPath)) return;
-	const migrations = readdirSync(migrationsPath)
-		.filter((name) => name.endsWith('.sql'))
-		.sort();
-	for (const name of migrations) {
-		for (const statement of splitSqlStatements(readFileSync(join(migrationsPath, name), 'utf-8'))) {
-			db.exec(statement);
-		}
-	}
-}
-
 export function createApiServer(config: ServerConfig) {
 	const sqlite = SqliteD1.open(config.databasePath);
-	if (config.applySchema) applySchemaAndMigrations(sqlite, config.schemaPath, config.migrationsPath);
+	if (config.applySchema) {
+		applySchema(sqlite, config.schemaPath);
+		const applied = applyMigrations(sqlite, config.migrationsPath);
+		if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
+	}
 
 	const env = {
 		DB: sqlite.asD1(),
@@ -141,16 +132,24 @@ export function createApiServer(config: ServerConfig) {
 		const origin = `http://${req.headers.host ?? `localhost:${config.port}`}`;
 		void (async () => {
 			try {
-				const request = await toWebRequest(req, origin);
+				const request = await toWebRequest(req, origin, config.maxRequestBodyBytes);
 				const response = await handleRequest(request, env, ctx);
 				await writeWebResponse(response, res);
 			} catch (error) {
-				console.error(`${req.method} ${req.url} failed:`, error);
+				const tooLarge = error instanceof RequestTooLargeError;
+				if (!tooLarge) console.error(`${req.method} ${req.url} failed:`, error);
 				if (!res.headersSent) {
-					res.statusCode = 500;
+					res.statusCode = tooLarge ? 413 : 500;
 					res.setHeader('content-type', 'application/json');
+					// The rest of the body is never read, so the connection cannot be
+					// reused; saying so lets the client read the response before the
+					// socket goes away, instead of seeing a reset.
+					if (tooLarge) res.setHeader('connection', 'close');
 				}
-				res.end(JSON.stringify({ error: 'Internal server error' }));
+				const payload = JSON.stringify({ error: tooLarge ? 'Payload too large' : 'Internal server error' });
+				res.end(payload, () => {
+					if (tooLarge) req.destroy();
+				});
 			}
 		})();
 	});

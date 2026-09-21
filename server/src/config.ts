@@ -24,15 +24,24 @@ export interface ServerConfig {
 	allowedOriginSuffixes: string;
 	rateLimitRequests: number;
 	rateLimitWindowSeconds: number;
+	/** Cap on a request body, buffered before routing. Every route is a GET. */
+	maxRequestBodyBytes: number;
 }
 
 const str = (name: string, fallback: string): string => process.env[name]?.trim() || fallback;
 
-const int = (name: string, fallback: number): number => {
-	const raw = process.env[name];
+/**
+ * A whole non-negative integer, or fail. parseInt would accept "8787x" as 8787
+ * and "-1" as a rate limit that rejects every request.
+ */
+const int = (name: string, fallback: number, { min = 0 }: { min?: number } = {}): number => {
+	const raw = process.env[name]?.trim();
 	if (!raw) return fallback;
+	if (!/^\d+$/.test(raw)) {
+		throw new RangeError(`${name} must be a whole number, got ${JSON.stringify(raw)}`);
+	}
 	const parsed = Number.parseInt(raw, 10);
-	if (!Number.isFinite(parsed)) throw new RangeError(`${name} must be an integer, got ${raw}`);
+	if (parsed < min) throw new RangeError(`${name} must be at least ${min}, got ${parsed}`);
 	return parsed;
 };
 
@@ -49,8 +58,9 @@ export function loadConfig(): ServerConfig {
 		numeraiSecretKey: str('NUMERAI_SECRET_KEY', ''),
 		allowedOrigins: str('ALLOWED_ORIGINS', 'http://localhost:5173'),
 		allowedOriginSuffixes: str('ALLOWED_ORIGIN_SUFFIXES', ''),
-		rateLimitRequests: int('RATE_LIMIT_REQUESTS', 100),
-		rateLimitWindowSeconds: int('RATE_LIMIT_WINDOW_SECONDS', 60)
+		rateLimitRequests: int('RATE_LIMIT_REQUESTS', 100, { min: 1 }),
+		rateLimitWindowSeconds: int('RATE_LIMIT_WINDOW_SECONDS', 60, { min: 1 }),
+		maxRequestBodyBytes: int('MAX_REQUEST_BODY_BYTES', 1_048_576, { min: 1 })
 	};
 
 	// Signals and Crypto reach Numerai with credentials; Classic mostly does not.

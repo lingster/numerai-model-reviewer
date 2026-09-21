@@ -10,7 +10,7 @@ API keys (same values as the worker's `wrangler secret` entries).
 
 ## 0. Run what already exists  ·  ~30 min
 
-- [ ] `cd server && npm ci && npm test` — 23 tests should pass.
+- [ ] `cd server && npm ci && npm test` — 40 tests should pass (CI runs this too).
 - [ ] `npm start` with `ALLOWED_ORIGINS=http://localhost:5173`, then
       `curl -H 'Origin: http://localhost:5173' localhost:8787/health`.
 - [ ] `cp server/.env.example server/.env`, fill the Numerai keys, then
@@ -124,7 +124,10 @@ dodge wrangler's per-invocation overhead can be simplified, but do it in a separ
 - [ ] Revisit the windowed (20/60) ranking path, which still reads whole fields. Off D1 that is
       merely slow rather than expensive, so a simpler fix may now be acceptable.
 - [ ] Consider dropping `graphql_cache` and the D1-era batching complexity in precompute.
-- [ ] CI: the `server/` suite should run alongside the worker's in `.github/workflows/ci.yml`.
+- [ ] Move SQLite reads off the main thread **if latency warrants it**. `node:sqlite` is
+      synchronous, so a slow query blocks every other in-flight request. Indexed queries here run
+      in well under a millisecond and the load is one household, so measure before building
+      anything: a worker-thread pool behind the `SqliteD1` shape is the fix, and it is not free.
 
 ---
 

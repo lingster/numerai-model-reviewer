@@ -145,8 +145,22 @@ export class SqliteD1 {
 	/** Run one or more statements for their effect (schema application, PRAGMAs). */
 	async exec(sql: string): Promise<{ count: number; duration: number }> {
 		const started = performance.now();
-		this.db.exec(sql);
+		this.execSync(sql);
 		return { count: 1, duration: performance.now() - started };
+	}
+
+	/**
+	 * The same, without the promise. Startup DDL and transaction control need to
+	 * run in order relative to each other; an unawaited `exec` only happens to.
+	 */
+	execSync(sql: string): void {
+		this.db.exec(sql);
+	}
+
+	/** A synchronous read, for the startup paths that cannot await. */
+	selectSync<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
+		const rows = this.db.prepare(sql).all(...params.map(toSqliteValue)) as Array<Record<string, unknown>>;
+		return rows.map((row) => fromSqliteRow<T>(row));
 	}
 
 	close(): void {

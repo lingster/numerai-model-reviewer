@@ -52,13 +52,25 @@ opening a router port. Remove it if you terminate TLS another way.
 | `ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated exact origins |
 | `ALLOWED_ORIGIN_SUFFIXES` | — | e.g. `.pages.dev` for preview deployments |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `100` / `60` | In-memory here (no KV) |
+| `MAX_REQUEST_BODY_BYTES` | `1048576` | Bodies over this get 413. Every route is a GET |
+
+Numeric variables are validated at startup: a non-integer, a negative or (for the rate limit) a
+zero is a startup failure rather than a silently wrong setting.
 
 ## Notes
 
 **Migrations run at startup**, unlike on Cloudflare where they are deliberately manual: building
 an index on D1 writes a row per table row and can blow a daily quota, which on local disk is not
 a concern. A fresh database therefore gets the `(tournament, round_number)` index immediately —
-the one D1's free plan could not afford.
+the one D1's free plan could not afford. Each migration is applied once, in its own transaction,
+and recorded in `applied_migrations`; `schema.sql` is re-applied every start, which is safe
+because it is written to be (`worker/src/schema-safety.test.ts`).
+
+**SQLite calls block the event loop.** `node:sqlite` is synchronous, so a slow query stalls every
+other in-flight request. With the round index in place the API's queries are sub-millisecond and
+one box serves one household, so this is not a problem today — but it is the first thing to look
+at if latency becomes one. Fixes, in order of cost: keep the indexes healthy, then move reads to
+a worker thread pool behind the same `D1Database` shape.
 
 **The database is a cache** derived from the Numerai API. Back it up, but losing it means a
 rebuild, not data loss.
