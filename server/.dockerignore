@@ -1,0 +1,7 @@
+**/node_modules
+**/.wrangler
+**/dist
+**/data
+**/.svelte-kit
+**/*.log
+.git
