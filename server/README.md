@@ -35,15 +35,27 @@ Build from the repository root, since the image needs both source trees:
 docker build -f server/Dockerfile -t numerai-api .
 ```
 
-The bundled `tunnel` service publishes the API on a hostname via Cloudflare Tunnel without
-opening a router port. Remove it if you terminate TLS another way.
+The API port is bound to `127.0.0.1` only. To publish it, either route a hostname to
+`http://127.0.0.1:8787` from a `cloudflared` already running on the host, or use the bundled
+opt-in `tunnel` service: `docker compose --profile tunnel up -d`, with `TUNNEL_TOKEN` in `.env`.
+
+The container runs with a read-only root filesystem, no capabilities and `no-new-privileges`;
+only `/data` and a `/tmp` tmpfs are writable. For a host directory owned by a dedicated user:
+
+```bash
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin numerdiff
+sudo install -d -o numerdiff -g numerdiff -m 750 /data/numerai/numerdiff
+# .env: DATA_DIR=/data/numerai/numerdiff, APP_UID/APP_GID from `id numerdiff`
+```
 
 ## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
 | `HOST` / `PORT` | `0.0.0.0` / `8787` | |
-| `DATABASE_PATH` | `./data/numerai-cache.sqlite` | The SQLite file; a volume in Docker |
+| `DATABASE_PATH` | `./data/numerai-cache.sqlite` | The SQLite file; `/data/…` in Docker |
+| `DATA_DIR` | named volume | Compose only: host directory mounted at `/data` |
+| `APP_UID` / `APP_GID` | image's `numerai` user | Compose only: must own `DATA_DIR` |
 | `SCHEMA_PATH` | `../worker/src/schema.sql` | Applied at startup |
 | `MIGRATIONS_PATH` | `../worker/migrations` | Applied after the schema, in filename order |
 | `APPLY_SCHEMA` | `true` | `false` to skip startup DDL |

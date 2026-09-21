@@ -1,7 +1,7 @@
 # Self-hosted Numerai API.
 #
 #   cp .env.example .env && edit
-#   docker compose up -d --build
+#   docker compose up -d --build api
 #
 # Compose runs from server/ but builds with the repository root as context, so
 # the image can include worker/ as well.
@@ -13,6 +13,18 @@ services:
     image: numerai-api:latest
     container_name: numerai-api
     restart: unless-stopped
+    # Run as a dedicated host user that owns only DATA_DIR, so an escape from
+    # the container lands on a UID with nothing else on the host. Defaults to
+    # the image's own unprivileged user.
+    user: "${APP_UID:-numerai}:${APP_GID:-numerai}"
+    # Nothing but /data (and scratch in /tmp) needs to be writable.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Bound to localhost: Cloudflare Tunnel reaches it from the host, so the
       # API is never exposed on the LAN or the internet directly.
@@ -27,7 +39,9 @@ services:
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-100}
       RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
     volumes:
-      - numerai-data:/data
+      # A host path (e.g. /data/numerai/numerdiff) bind-mounts that directory;
+      # unset, a named volume is used. The directory must be owned by APP_UID.
+      - ${DATA_DIR:-numerai-data}:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
       interval: 30s
@@ -38,14 +52,16 @@ services:
   # Publishes the API on a hostname without opening a port on your router.
   # Create the tunnel in the Cloudflare dashboard, put its token in .env, and
   # point the public hostname at http://api:8787.
-  # Remove this service if you terminate TLS some other way.
+  # Opt-in: `docker compose --profile tunnel up -d`. Skip it if the host
+  # already runs cloudflared — route a hostname to http://127.0.0.1:8787 there.
   tunnel:
+    profiles: [tunnel]
     image: cloudflare/cloudflared:latest
     container_name: numerai-tunnel
     restart: unless-stopped
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env, or remove this service}
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     depends_on:
       api:
         condition: service_healthy
