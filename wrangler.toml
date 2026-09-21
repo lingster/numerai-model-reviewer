@@ -4,3 +4,8 @@ compatibility_date = "2024-12-05"
 
 # Enable Node.js compatibility for SvelteKit
 compatibility_flags = ["nodejs_compat"]
+
+# Pages reads its variables from this file, not the dashboard, while it exists.
+# VITE_* are inlined at build time (src/lib/config.ts).
+[vars]
+VITE_API_URL = "https://numerdiff-api-home.imperialai.ai"
