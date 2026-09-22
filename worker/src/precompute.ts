@@ -20,7 +20,13 @@ import { readMaxRound } from './refresh-floor';
 import { refreshCoverage, type RoundSpan } from './tournament-coverage';
 import { encodeFieldMetrics, FIELD_SCOPES, type FieldScope } from './round-field';
 import { METRIC_SETS, type MetricSet } from './ranking';
-import { fieldFromRows, readStoredRounds, roundsToBackfill, upsertRoundFieldSql } from './round-field-store';
+import {
+  fieldFromRows,
+  readStoredRounds,
+  roundsToBackfill,
+  upsertRoundFieldSql,
+  type FieldRow
+} from './round-field-store';
 import type { D1Query } from './d1-query';
 import type { PrecomputeTarget, SqlWriter } from './precompute-target';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
@@ -1066,14 +1072,31 @@ function fieldRowsInScope(
   rounds: Array<{ round: PerformanceRound }>,
   tournament: number,
   scope: FieldScope
-): Array<Pick<PerformanceRound, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc'>> {
+): FieldRow[] {
   return rounds
     .filter(({ round }) =>
       scope === 'all' || tournament === CRYPTO_TOURNAMENT
         ? true
         : round.stakeValue !== null && round.stakeValue > 0
     )
-    .map(({ round }) => round);
+    .map(({ round }) => toFieldRow(round));
+}
+
+/**
+ * A fetched round in the shape the stored field reads. The pipeline names the
+ * neutral pair neutralCorr/neutralMmc and the database neutral_corr/neutral_mmc,
+ * so the translation happens here, once.
+ */
+function toFieldRow(round: PerformanceRound): FieldRow {
+  return {
+    corr: round.corr,
+    mmc: round.mmc,
+    tc: round.tc,
+    alpha: round.alpha,
+    mpc: round.mpc,
+    neutral_corr: round.neutralCorr ?? null,
+    neutral_mmc: round.neutralMmc ?? null
+  };
 }
 
 /** Group the in-memory performance data by round, for rounds at or after `minRound`. */

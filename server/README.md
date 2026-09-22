@@ -45,6 +45,15 @@ only for D1's free plan: every leaderboard model (`--top-n 1000000`), full store
 (`--backfill-rounds 5000`), and a 70-round `--refresh-overlap`, so still-resolving Signals and
 Crypto rounds are rewritten until they settle.
 
+Stored fields are written by precompute as it fetches, and only for rounds that
+have none. A field stored wrongly, or a scope/metric set added after the history
+was built, is rebuilt from the database alone — no Numerai calls, ~25s for all
+three tournaments:
+
+```bash
+docker compose exec scheduler sh -c 'cd /app/server && node_modules/.bin/tsx src/rebuild-fields.ts'
+```
+
 ```bash
 docker compose logs -f scheduler                                        # job output
 docker compose exec scheduler /app/server/jobs/nightly-precompute.sh    # run now

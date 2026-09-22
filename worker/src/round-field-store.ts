@@ -23,8 +23,12 @@ import {
 } from './round-field';
 import type { RoundSpan } from './tournament-coverage';
 
-/** Just the metrics a field needs; model identity is deliberately not required. */
-type FieldRow = Pick<RoundPerfRow, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc'>;
+/**
+ * Just the metrics a field needs; model identity is deliberately not required.
+ * Every metric set's pair is listed, so a caller holding rows in another shape
+ * fails to compile rather than storing a field of NaN.
+ */
+export type FieldRow = Pick<RoundPerfRow, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc' | 'neutral_corr' | 'neutral_mmc'>;
 
 /**
  * A round's field from its rows, normalised for the tournament (Signals is
