@@ -11,6 +11,9 @@
  *   npm run precompute:dev -- --models m1,m2  -- include specific models
  *   npm run precompute:prod                   -- populates remote D1
  *   npm run precompute:prod -- --no-cache     -- bypass CSV cache, force fresh API fetch
+ *
+ * The self-hosted server runs the same pipeline against its SQLite file through
+ * server/src/precompute-sqlite.ts; this entry point writes to D1 via wrangler.
  */
 
 import { readMaxRound } from './refresh-floor';
@@ -18,16 +21,19 @@ import { refreshCoverage, type RoundSpan } from './tournament-coverage';
 import { encodeFieldMetrics } from './round-field';
 import { fieldFromRows, readStoredRounds, roundsToBackfill, upsertRoundFieldSql } from './round-field-store';
 import type { D1Query } from './d1-query';
+import type { PrecomputeTarget, SqlWriter } from './precompute-target';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
-import { execFileSync } from 'child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { execFileSync, execSync } from 'child_process';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
 import { mapWithConcurrency } from './concurrency';
 
 const NUMERAI_API_URL = 'https://api-tournament.numer.ai/graphql';
 
-const CACHE_DIR = join(process.cwd(), '.cache');
+// Overridable because the self-hosted container's filesystem is read-only.
+const CACHE_DIR = process.env.PRECOMPUTE_CACHE_DIR || join(process.cwd(), '.cache');
 const CACHE_TOP_MODELS = join(CACHE_DIR, 'top_models.csv');
 const CACHE_PERFORMANCES = join(CACHE_DIR, 'performances.csv');
 const CACHE_META = join(CACHE_DIR, 'meta.json');
@@ -39,6 +45,8 @@ interface PrecomputeConfig {
   topN: number;
   /** Older rounds to build stored fields for per run (see Step 7). */
   backfillRounds: number;
+  /** Already-stored rounds to re-fetch and rewrite (see --refresh-overlap below). */
+  refreshOverlapRounds: number;
   batchSize: number;
   rateLimitMs: number;
   concurrency: number;
@@ -50,6 +58,7 @@ const DEFAULT_CONFIG: PrecomputeConfig = {
   // 100 rounds a run keeps the backfill's reads a small share of D1's free daily
   // budget while covering ~2,900 rounds of history in about a month.
   backfillRounds: 100,
+  refreshOverlapRounds: 0,
   tournament: 8,
   topN: 10000,
   // Max batchSize is 3 — higher values exceed the Numerai API rate limit
@@ -88,6 +97,7 @@ function loadYamlConfig(): Partial<PrecomputeConfig> {
         tournament: parsed.tournament,
         topN: parsed.topN,
         backfillRounds: parsed.backfillRounds,
+        refreshOverlapRounds: parsed.refreshOverlapRounds,
         batchSize: parsed.batchSize,
         rateLimitMs: parsed.rateLimitMs,
         concurrency: parsed.concurrency,
@@ -124,6 +134,9 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
         break;
       case '--backfill-rounds':
         if (next) { overrides.backfillRounds = parseInt(next, 10); i++; }
+        break;
+      case '--refresh-overlap':
+        if (next) { overrides.refreshOverlapRounds = parseInt(next, 10); i++; }
         break;
       case '--tournament':
         if (next) { overrides.tournament = parseInt(next, 10); i++; }
@@ -490,7 +503,7 @@ async function fetchUserModels(
   return models;
 }
 
-type PerformanceRound = {
+export type PerformanceRound = {
   roundNumber: number;
   corr: number | null;
   mmc: number | null;
@@ -510,14 +523,14 @@ const CRYPTO_TOURNAMENT = 12;
 // all available history rather than truncating older rounds.
 const MAX_ROUNDS_HISTORY = 1000;
 
-// Incremental refresh re-fetches this many already-stored rounds below the last
-// round in D1. 0 = write only strictly-new rounds (minimum D1 writes). We keep
-// it at 0 rather than re-writing recent rounds every run because rounds are
-// scored for all models together (no late stragglers to backfill), and re-
-// writing to chase a round's final resolved score would need a window as wide
-// as the resolution lag (~24 rounds crypto, ~64 signals) — far more D1 writes
-// than a small overlap buys. See getLatestResolvedRound for that boundary.
-const REFRESH_OVERLAP_ROUNDS = 0;
+// --refresh-overlap (DEFAULT_CONFIG.refreshOverlapRounds): how many already-stored rounds below the last
+// stored round an incremental run re-fetches and rewrites. 0 = write only
+// strictly-new rounds (minimum D1 writes). D1 runs keep it at 0 because chasing
+// a round's final resolved score needs a window as wide as the resolution lag
+// (~24 rounds crypto, ~64 signals) — far more writes than the free plan allows.
+// Without that ceiling (the self-hosted SQLite scheduler) pass ~70, so
+// still-resolving rounds are rewritten until they settle instead of keeping
+// their first-scored values. See getLatestResolvedRound for that boundary.
 
 /**
  * Runs wrangler without a shell: stdout as text, output kept on failure.
@@ -564,7 +577,7 @@ export function computeRoundsToFetch(
   return Math.max(1, Math.min(cap, currentRound - minRound + 1));
 }
 
-type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
+export type TopModel = { modelId: string; modelName: string; username: string; stakeValue: number };
 
 // --- CSV cache ---
 
@@ -1143,55 +1156,68 @@ async function storeRoundFields(
   return { fresh: written, backfilled: backfilledWritten };
 }
 
-async function storeInD1(
-  topModels: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>,
-  performanceData: Map<string, PerformanceRound[]>,
-  tournament: number,
-  isLocal: boolean,
-  reset: boolean,
-  minRound = 0
-): Promise<void> {
-  const { execSync } = await import('child_process');
-  const fs = await import('fs');
-  const pathModule = await import('path');
-  const os = await import('os');
-
+/**
+ * A SqlWriter over `wrangler d1 execute --file`, against local or remote D1.
+ *
+ * D1 file-executes are transactional and occasionally hit a transient "storage
+ * operation exceeded timeout which caused object to be reset" (the DB rolls
+ * back, so it's safe to retry). Such failures are retried with backoff; anything
+ * else, or a failure after the last attempt, is thrown.
+ */
+function createWranglerWriter(isLocal: boolean): SqlWriter {
   const flag = isLocal ? '--local' : '--remote';
-  const now = Math.floor(Date.now() / 1000);
-
-  const tmpFile = pathModule.join(os.tmpdir(), `numerai-precompute-${Date.now()}.sql`);
-
-  // D1 file-executes are transactional and occasionally hit a transient
-  // "storage operation exceeded timeout which caused object to be reset" (the
-  // DB rolls back, so it's safe to retry). Retry such failures with backoff;
-  // re-throw anything else or after exhausting attempts.
   const isTransientD1Error = (msg: string): boolean =>
     /exceeded timeout|object to be reset|connection (lost|reset)|please try again|temporarily/i.test(msg);
 
-  const execD1 = async (sql: string[], label: string): Promise<void> => {
+  return async (sql, label) => {
+    const tmpFile = join(tmpdir(), `numerai-precompute-${process.pid}-${Date.now()}.sql`);
     const maxAttempts = 4;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      fs.writeFileSync(tmpFile, sql.join('\n'));
-      try {
-        execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
-          cwd: process.cwd(),
-          stdio: ['inherit', 'pipe', 'pipe'],
-          encoding: 'utf-8'
-        });
-        return;
-      } catch (error: any) {
-        const msg = execErrorDetail(error);
-        if (attempt < maxAttempts && isTransientD1Error(msg)) {
-          const delaySec = attempt * 5;
-          console.log(`  ${label} attempt ${attempt}/${maxAttempts} hit a transient D1 error; retrying in ${delaySec}s...`);
-          await sleep(delaySec * 1000);
-          continue;
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        writeFileSync(tmpFile, sql.join('\n'));
+        try {
+          execSync(`wrangler d1 execute numerai-cache ${flag} --yes --file="${tmpFile}"`, {
+            cwd: process.cwd(),
+            stdio: ['inherit', 'pipe', 'pipe'],
+            encoding: 'utf-8'
+          });
+          return;
+        } catch (error: unknown) {
+          const msg = execErrorDetail(error);
+          if (attempt < maxAttempts && isTransientD1Error(msg)) {
+            const delaySec = attempt * 5;
+            console.log(`  ${label} attempt ${attempt}/${maxAttempts} hit a transient D1 error; retrying in ${delaySec}s...`);
+            await sleep(delaySec * 1000);
+            continue;
+          }
+          throw new Error(`D1 ${label} failed: ${msg}`);
         }
-        throw new Error(`D1 ${label} failed: ${msg}`);
       }
+    } finally {
+      if (existsSync(tmpFile)) unlinkSync(tmpFile);
     }
   };
+}
 
+/** Precompute's D1 target: reads and writes through the wrangler CLI. */
+export function createWranglerTarget(isLocal: boolean): PrecomputeTarget {
+  return {
+    description: `${isLocal ? 'local' : 'remote'} D1`,
+    query: createWranglerQuery(runCommand, isLocal),
+    write: createWranglerWriter(isLocal)
+  };
+}
+
+/** Step 5: upsert the models and their per-round rows, BATCH_SIZE statements per write. */
+async function storePerformances(
+  write: SqlWriter,
+  topModels: ReadonlyArray<TopModel>,
+  performanceData: Map<string, PerformanceRound[]>,
+  tournament: number,
+  reset: boolean,
+  minRound = 0
+): Promise<number> {
+  const now = Math.floor(Date.now() / 1000);
   // Normal runs upsert (INSERT OR REPLACE on the PK): resolved history is
   // rewritten in place and new rounds/models are appended — no DELETE needed.
   // --reset clears the tournament first, for one-off migrations (e.g. changing
@@ -1199,10 +1225,10 @@ async function storeInD1(
   // per-operation timeout that a single multi-million-row DELETE was causing.
   if (reset) {
     console.log(`  --reset: clearing existing tournament ${tournament} rows (chunked)...`);
-    await execD1([`DELETE FROM top_staked_models WHERE tournament = ${tournament};`], 'delete top_staked_models');
+    await write([`DELETE FROM top_staked_models WHERE tournament = ${tournament};`], 'delete top_staked_models');
     const CHUNK = 50; // rounds per DELETE — bounds rows-per-operation well under D1's timeout
     for (let lo = 0; lo <= 2000; lo += CHUNK) {
-      await execD1(
+      await write(
         [
           `DELETE FROM model_performances WHERE tournament = ${tournament} AND round_number >= ${lo} AND round_number < ${lo + CHUNK};`
         ],
@@ -1227,48 +1253,46 @@ async function storeInD1(
   const flush = async () => {
     if (buffer.length === 0) return;
     batchNum++;
-    await execD1(buffer, `insert batch ${batchNum}`);
+    await write(buffer, `insert batch ${batchNum}`);
     totalStored += buffer.length;
     if (batchNum % 20 === 0) console.log(`  Stored ${totalStored} statements (${batchNum} batches)...`);
     buffer = [];
   };
 
-  try {
-    for (const model of topModels) {
-      const modelId = model.modelId.replace(/'/g, "''");
-      const modelName = model.modelName.replace(/'/g, "''");
-      const username = model.username.replace(/'/g, "''");
+  for (const model of topModels) {
+    const modelId = model.modelId.replace(/'/g, "''");
+    const modelName = model.modelName.replace(/'/g, "''");
+    const username = model.username.replace(/'/g, "''");
+    buffer.push(
+      `INSERT OR REPLACE INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at) VALUES ('${modelId}', '${modelName}', '${username}', ${model.stakeValue}, ${tournament}, ${now});`
+    );
+    if (buffer.length >= BATCH_SIZE) await flush();
+  }
+
+  for (const [modelName, rounds] of performanceData) {
+    const safeName = modelName.replace(/'/g, "''");
+    for (const round of rounds) {
+      // Incremental refresh: skip rounds already settled in D1 (below the
+      // floor). The overlap window keeps the last few for late corrections.
+      if (round.roundNumber < minRound) continue;
+      const corr = round.corr !== null ? round.corr : 'NULL';
+      const mmc = round.mmc !== null ? round.mmc : 'NULL';
+      const tc = round.tc !== null ? round.tc : 'NULL';
+      const alpha = round.alpha !== null ? round.alpha : 'NULL';
+      const mpc = round.mpc !== null ? round.mpc : 'NULL';
+      const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
       buffer.push(
-        `INSERT OR REPLACE INTO top_staked_models (model_id, model_name, username, stake_value, tournament, updated_at) VALUES ('${modelId}', '${modelName}', '${username}', ${model.stakeValue}, ${tournament}, ${now});`
+        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
       );
       if (buffer.length >= BATCH_SIZE) await flush();
     }
-
-    for (const [modelName, rounds] of performanceData) {
-      const safeName = modelName.replace(/'/g, "''");
-      for (const round of rounds) {
-        // Incremental refresh: skip rounds already settled in D1 (below the
-        // floor). The overlap window keeps the last few for late corrections.
-        if (round.roundNumber < minRound) continue;
-        const corr = round.corr !== null ? round.corr : 'NULL';
-        const mmc = round.mmc !== null ? round.mmc : 'NULL';
-        const tc = round.tc !== null ? round.tc : 'NULL';
-        const alpha = round.alpha !== null ? round.alpha : 'NULL';
-        const mpc = round.mpc !== null ? round.mpc : 'NULL';
-        const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
-        buffer.push(
-          `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
-        );
-        if (buffer.length >= BATCH_SIZE) await flush();
-      }
-    }
-
-    await flush();
-    console.log(`  Stored ${totalStored} statements in ${batchNum} batches.`);
-  } finally {
-    if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }
+
+  await flush();
+  console.log(`  Stored ${totalStored} statements in ${batchNum} batches.`);
+  return totalStored;
 }
+
 
 // --- Main ---
 
@@ -1291,9 +1315,72 @@ function installTimestampedLogging(): void {
   console.error = (...args: unknown[]) => orig.error(stamp(), ...args);
 }
 
-async function main() {
+/**
+ * Steps 5–7: store what a run fetched, then derive the round span and stored
+ * round fields from it. Separate from the fetch so it can be exercised against a
+ * real database without calling Numerai.
+ */
+export async function persistRun(
+  target: PrecomputeTarget,
+  run: {
+    allModels: ReadonlyArray<TopModel>;
+    performanceData: Map<string, PerformanceRound[]>;
+    tournament: number;
+    reset: boolean;
+    minRound: number;
+    backfillRounds: number;
+  }
+): Promise<{ statements: number; coverage: RoundSpan | null; fresh: number; backfilled: number }> {
+  console.log(`Step 5: Storing in ${target.description}...`);
+  const statements = await storePerformances(
+    target.write,
+    run.allModels,
+    run.performanceData,
+    run.tournament,
+    run.reset,
+    run.minRound
+  );
+  console.log('  Done!\n');
+
+  // Step 6: Refresh the tournament's round span, which page loads read instead
+  // of scanning model_performances. Recomputed from the table, so it is exact
+  // after incremental runs, backfills and resets alike. A failure ends the run
+  // loudly: the stored rows are fine, but the UI's latest round would be stale.
+  console.log('Step 6: Refreshing tournament coverage...');
+  const coverage = await refreshCoverage(target.query, run.tournament);
+  console.log(
+    coverage
+      ? `  Rounds ${coverage.earliestRound}–${coverage.latestRound}\n`
+      : '  No rows for this tournament; coverage cleared\n'
+  );
+
+  // Step 7: Build the stored per-round fields the rankings page ranks against.
+  // Today's rounds come from what we just fetched; older ones are read back a
+  // bounded number per run, newest first (--backfill-rounds).
+  console.log('Step 7: Storing round fields...');
+  const stored = await storeRoundFields(
+    target.query,
+    run.tournament,
+    run.performanceData,
+    run.minRound,
+    coverage,
+    run.backfillRounds
+  );
+  console.log(`  Wrote ${stored.fresh} new and ${stored.backfilled} backfilled round(s)\n`);
+
+  return { statements, coverage, ...stored };
+}
+
+/**
+ * The whole pipeline, against whichever database `createTarget` returns for the
+ * parsed CLI options.
+ */
+export async function runPrecompute(
+  createTarget: (options: { isLocal: boolean }) => PrecomputeTarget
+): Promise<void> {
   installTimestampedLogging();
   const { config, isLocal, noCache, reset } = buildConfig();
+  const target = createTarget({ isLocal });
 
   console.log('\n=== Numerai Rankings Precompute ===');
   console.log(`Tournament:  ${config.tournament}`);
@@ -1304,30 +1391,30 @@ async function main() {
   console.log(`Users:       ${config.users.length > 0 ? config.users.join(', ') : '(none)'}`);
   console.log(`Models:      ${config.models.length > 0 ? config.models.join(', ') : '(none)'}`);
   console.log(`Cache:       ${noCache ? 'disabled (--no-cache)' : 'enabled'}`);
-  console.log(`Target:      ${isLocal ? 'local' : 'remote'} D1\n`);
+  console.log(`Overlap:     ${config.refreshOverlapRounds} stored round(s) re-fetched`);
+  console.log(`Target:      ${target.description}\n`);
 
   let allModels: TopModel[];
   let performanceData: Map<string, PerformanceRound[]>;
 
   // Incremental refresh floor: only fetch/write rounds newer than the last round
-  // already in D1 (REFRESH_OVERLAP_ROUNDS re-writes that many recent rounds too;
-  // currently 0 = strictly-new). Full backfill (minRound 0) when D1 is empty for
+  // already stored (--refresh-overlap re-writes that many recent rounds too;
+  // default 0 = strictly-new). Full backfill (minRound 0) when nothing is stored for
   // this tournament or on --reset. This keeps each daily run to a handful of new
   // rounds instead of rewriting the entire history (which was OOMing/timing out
   // and, being first in the job, blocking later tournaments).
   //
   // A failed read throws and ends the run (exit 1) rather than being mistaken for
   // an empty tournament — see refresh-floor.ts for the incidents that caused.
-  const d1Query = createWranglerQuery(runCommand, isLocal);
-  const maxRoundInD1 = reset ? null : await readMaxRound(d1Query, config.tournament);
-  const minRound = computeMinRound(maxRoundInD1, reset, REFRESH_OVERLAP_ROUNDS);
+  const maxRoundInD1 = reset ? null : await readMaxRound(target.query, config.tournament);
+  const minRound = computeMinRound(maxRoundInD1, reset, config.refreshOverlapRounds);
   if (reset) {
     console.log('Refresh mode: --reset — full backfill.\n');
   } else if (maxRoundInD1 === null) {
     console.log('Refresh mode: full backfill (no existing rounds for this tournament).\n');
   } else {
     console.log(
-      `Refresh mode: incremental — D1 has rounds up to ${maxRoundInD1}; fetching from round ${minRound} (overlap ${REFRESH_OVERLAP_ROUNDS}).\n`
+      `Refresh mode: incremental — D1 has rounds up to ${maxRoundInD1}; fetching from round ${minRound} (overlap ${config.refreshOverlapRounds}).\n`
     );
   }
 
@@ -1466,37 +1553,14 @@ async function main() {
     totalRounds += rounds.length;
   }
 
-  // Step 5: Store in D1
-  console.log('Step 5: Storing in D1...');
-  await storeInD1(allModels, performanceData, config.tournament, isLocal, reset, minRound);
-  console.log('  Done!\n');
-
-  // Step 6: Refresh the tournament's round span, which page loads read instead
-  // of scanning model_performances. Recomputed from the table, so it is exact
-  // after incremental runs, backfills and resets alike. A failure ends the run
-  // loudly: the stored rows are fine, but the UI's latest round would be stale.
-  console.log('Step 6: Refreshing tournament coverage...');
-  const coverage = await refreshCoverage(d1Query, config.tournament);
-  console.log(
-    coverage
-      ? `  Rounds ${coverage.earliestRound}–${coverage.latestRound}\n`
-      : '  No rows for this tournament; coverage cleared\n'
-  );
-
-  // Step 7: Build the stored per-round fields the rankings page ranks against.
-  // Today's rounds come from what we just fetched; older ones are read back a
-  // bounded number per run, newest first, so history fills in within D1's free
-  // daily budget instead of all at once.
-  console.log('Step 7: Storing round fields...');
-  const stored = await storeRoundFields(
-    d1Query,
-    config.tournament,
+  await persistRun(target, {
+    allModels,
     performanceData,
+    tournament: config.tournament,
+    reset,
     minRound,
-    coverage,
-    config.backfillRounds
-  );
-  console.log(`  Wrote ${stored.fresh} new and ${stored.backfilled} backfilled round(s)\n`);
+    backfillRounds: config.backfillRounds
+  });
 
   console.log('=== Precomputation complete! ===');
   console.log(`  Models:              ${allModels.length}`);
@@ -1512,7 +1576,7 @@ const invokedDirectly =
   /precompute\.[cm]?ts$/.test(process.argv[1] ?? '');
 
 if (invokedDirectly) {
-  main().catch(err => {
+  runPrecompute(({ isLocal }) => createWranglerTarget(isLocal)).catch(err => {
     console.error('Fatal error:', err);
     process.exit(1);
   });

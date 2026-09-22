@@ -14,8 +14,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import worker from '../../worker/src/index.js';
-import { SqliteD1 } from './sqlite-d1.js';
-import { applyMigrations, applySchema } from './migrations.js';
+import { openDatabase } from './database.js';
 import { loadConfig, type ServerConfig } from './config.js';
 
 /** The worker's `fetch`, whichever shape the module system hands us. */
@@ -107,18 +106,7 @@ async function writeWebResponse(response: Response, res: ServerResponse): Promis
 }
 
 export function createApiServer(config: ServerConfig) {
-	const sqlite = SqliteD1.open(config.databasePath);
-	if (config.applySchema) {
-		applySchema(sqlite, config.schemaPath);
-		const applied = applyMigrations(sqlite, config.migrationsPath);
-		if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
-	}
-	try {
-		sqlite.optimize();
-	} catch (error) {
-		// Statistics only improve plans; a busy or read-only database still serves.
-		console.warn('PRAGMA optimize at startup failed:', error);
-	}
+	const sqlite = openDatabase(config);
 
 	const env = {
 		DB: sqlite.asD1(),
