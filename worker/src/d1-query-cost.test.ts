@@ -12,9 +12,10 @@
  * but never another tournament's, and a lookup of one row may read about one row.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { D1CostHarness, fleetModelName, type FleetSlice } from './test-support/d1-cost-harness';
+import { D1CostHarness, fleetModelName, type FleetSlice, type RoundIndexShape } from './test-support/d1-cost-harness';
 import {
 	maxRoundSql,
+	selectModelRounds,
 	selectRoundField,
 	selectRoundFieldsInRange,
 	selectTopModelByName
@@ -79,6 +80,43 @@ describe('selectRoundField (single-round rankings)', () => {
 		expect(cost.rowsRead).toBeLessThanOrEqual(SIGNALS.models + RANGE_END_PROBE);
 	});
 });
+
+// Its own harness per index shape: which index the planner picks for this query
+// depends on which ones exist, and every shape production has had must seek the
+// model's own rows rather than range-scan the whole tournament.
+describe.each<RoundIndexShape>(['round_then_tournament', 'tournament_then_round', 'covering'])(
+	"selectModelRounds (a model's own rows) with the %s round index",
+	(shape) => {
+		const from = 1291;
+		const to = 1350;
+		const rounds = to - from + 1;
+		const target = fleetModelName(CLASSIC.tournament, 42);
+		let own: D1CostHarness;
+
+		beforeAll(async () => {
+			own = await D1CostHarness.create();
+			await own.seed(CLASSIC);
+			await own.setRoundIndex(shape);
+		}, 60_000);
+
+		afterAll(async () => {
+			await own?.dispose();
+		});
+
+		it('returns the model\'s staked rows in the range', async () => {
+			const { result } = await own.measure((db) => selectModelRounds(db, target.toUpperCase(), 8, from, to));
+			expect(result).toHaveLength(rounds);
+			expect(result.every((r) => r.model_name === target)).toBe(true);
+		});
+
+		it('seeks the primary key: reads about one row per round, not the whole field', async () => {
+			// Without the seek this reads every model's row in the range — ~5k per
+			// round at production scale, which took ~2s on the self-hosted server.
+			const { cost } = await own.measure((db) => selectModelRounds(db, target, 8, from, to));
+			expect(cost.rowsRead).toBeLessThanOrEqual(rounds + RANGE_END_PROBE);
+		});
+	}
+);
 
 describe('max round (precompute incremental floor)', () => {
 	const readerOn = (db: D1Database) => async (sql: string) =>

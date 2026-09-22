@@ -113,6 +113,12 @@ export function createApiServer(config: ServerConfig) {
 		const applied = applyMigrations(sqlite, config.migrationsPath);
 		if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
 	}
+	try {
+		sqlite.optimize();
+	} catch (error) {
+		// Statistics only improve plans; a busy or read-only database still serves.
+		console.warn('PRAGMA optimize at startup failed:', error);
+	}
 
 	const env = {
 		DB: sqlite.asD1(),

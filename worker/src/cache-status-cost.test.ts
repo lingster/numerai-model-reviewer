@@ -36,7 +36,9 @@ describe.each<[string, RoundIndexShape, number]>([
 	// Walking the round index costs a few reads per distinct round, at most.
 	['production today, (round_number, tournament)', 'round_then_tournament', 4 * DISTINCT_ROUNDS],
 	// A direct seek on each end of the tournament's rounds.
-	['after migrations/0001, (tournament, round_number)', 'tournament_then_round', 6]
+	['after migrations/0001, (tournament, round_number)', 'tournament_then_round', 6],
+	// migrations/0003 widens that index; its leading columns, and so the seeks, are the same.
+	['after migrations/0003, covering (tournament, round_number, …)', 'covering', 6]
 ])('getCacheStatus on %s', (_label, shape, queryBudget) => {
 	let d1: D1CostHarness;
 	let schemaObjects = 0;

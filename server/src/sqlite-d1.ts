@@ -44,14 +44,32 @@ function toSqliteValue(value: unknown): null | number | bigint | string | Uint8A
 	throw new TypeError(`Cannot bind ${typeof value} to a SQLite statement`);
 }
 
-/** Integers wider than a JS number come back as bigint; the callers all want numbers. */
-function fromSqliteRow<T>(row: Record<string, unknown>): T {
-	const mapped: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(row)) {
-		mapped[key] = typeof value === 'bigint' ? Number(value) : value;
-	}
-	return mapped as T;
-}
+/**
+ * Applied to every connection. D1 tunes its own SQLite; here the server does,
+ * and node:sqlite is synchronous, so time spent in a query is time every other
+ * request waits.
+ */
+const CONNECTION_PRAGMAS = [
+	// WAL keeps the nightly precompute's writes from blocking API reads.
+	'journal_mode = WAL',
+	// NORMAL is the recommended pairing with WAL: never corrupts, and at worst
+	// loses the last commits on power loss — which the precompute re-runs.
+	'synchronous = NORMAL',
+	'foreign_keys = ON',
+	// Wait rather than fail when the precompute holds a write lock.
+	'busy_timeout = 10000',
+	// Reads come straight from the OS page cache instead of being copied into
+	// SQLite's: ~3x faster wherever a query visits many pages. SQLite caps this
+	// at its compile-time maximum (~2GiB).
+	'mmap_size = 2147483648',
+	// 64 MiB of page cache (negative = KiB), up from 2 MiB.
+	'cache_size = -65536',
+	// DISTINCT / ORDER BY temp b-trees stay off disk.
+	'temp_store = MEMORY',
+	// A big transaction (a migration's index build) grows the WAL to hundreds of
+	// MB; truncate it back afterwards instead of keeping the file that size.
+	'journal_size_limit = 67108864'
+];
 
 class SqlitePreparedStatement {
 	constructor(
@@ -68,10 +86,17 @@ class SqlitePreparedStatement {
 		return this.params.map(toSqliteValue);
 	}
 
+	/**
+	 * Rows exactly as node:sqlite returns them, not copied. Its integers are
+	 * already JS numbers — without `readBigInts` it throws on a value too wide for
+	 * one rather than returning a bigint — so there is nothing to convert, and
+	 * copying every row cost ~40% of a 480k-row field read. They are
+	 * null-prototype objects; nothing in the worker relies on Object.prototype
+	 * methods of a row.
+	 */
 	async all<T = Record<string, unknown>>(): Promise<{ results: T[]; success: true; meta: SqliteMeta }> {
 		const started = performance.now();
-		const rows = this.statement.all(...this.bound) as Array<Record<string, unknown>>;
-		const results = rows.map((row) => fromSqliteRow<T>(row));
+		const results = this.statement.all(...this.bound) as T[];
 		return { results, success: true, meta: meta(performance.now() - started, 0, 0, results.length) };
 	}
 
@@ -79,8 +104,7 @@ class SqlitePreparedStatement {
 	async first<T = Record<string, unknown>>(column?: string): Promise<T | null> {
 		const row = this.statement.get(...this.bound) as Record<string, unknown> | undefined;
 		if (row === undefined) return null;
-		const mapped = fromSqliteRow<Record<string, unknown>>(row);
-		return (column === undefined ? mapped : (mapped[column] ?? null)) as T | null;
+		return (column === undefined ? row : (row[column] ?? null)) as T | null;
 	}
 
 	async run(): Promise<{ results: never[]; success: true; meta: SqliteMeta }> {
@@ -96,7 +120,7 @@ class SqlitePreparedStatement {
 	/** Rows as arrays of values rather than objects. */
 	async raw<T = unknown[]>(): Promise<T[]> {
 		const rows = this.statement.all(...this.bound) as Array<Record<string, unknown>>;
-		return rows.map((row) => Object.values(fromSqliteRow<Record<string, unknown>>(row)) as unknown as T);
+		return rows.map((row) => Object.values(row) as unknown as T);
 	}
 }
 
@@ -109,11 +133,7 @@ export class SqliteD1 {
 
 	static open(path: string): SqliteD1 {
 		const db = new DatabaseSync(path);
-		// WAL keeps the nightly precompute's writes from blocking API reads.
-		db.exec('PRAGMA journal_mode = WAL');
-		db.exec('PRAGMA foreign_keys = ON');
-		// Wait rather than fail when the precompute holds a write lock.
-		db.exec('PRAGMA busy_timeout = 10000');
+		for (const pragma of CONNECTION_PRAGMAS) db.exec(`PRAGMA ${pragma}`);
 		return new SqliteD1(db);
 	}
 
@@ -159,11 +179,29 @@ export class SqliteD1 {
 
 	/** A synchronous read, for the startup paths that cannot await. */
 	selectSync<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
-		const rows = this.db.prepare(sql).all(...params.map(toSqliteValue)) as Array<Record<string, unknown>>;
-		return rows.map((row) => fromSqliteRow<T>(row));
+		return this.db.prepare(sql).all(...params.map(toSqliteValue)) as T[];
 	}
 
+	/**
+	 * Gather planner statistics for tables that lack them or have changed a lot
+	 * since. Run once the schema is final (after migrations): SQLite's
+	 * recommended open-time call, with a sampling limit so the first run on a
+	 * multi-million-row table takes ~0.2s rather than ~1.6s for a full ANALYZE.
+	 * Afterwards it is a no-op until the data has changed substantially.
+	 */
+	optimize(): void {
+		this.db.exec('PRAGMA analysis_limit = 1000');
+		this.db.exec('PRAGMA optimize = 0x10002');
+	}
+
+	/** Close, first refreshing statistics the session's queries showed were stale. */
 	close(): void {
+		try {
+			this.db.exec('PRAGMA optimize');
+		} catch (error) {
+			// Only statistics: never let them stop a shutdown.
+			console.warn('PRAGMA optimize on close failed:', error);
+		}
 		this.db.close();
 	}
 

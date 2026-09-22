@@ -43,7 +43,8 @@ async function fleetDatabase(shape: RoundIndexShape): Promise<D1CostHarness> {
 
 describe.each<[string, RoundIndexShape, number]>([
 	['production today, (round_number, tournament)', 'round_then_tournament', 4 * DISTINCT_ROUNDS],
-	['after migrations/0001, (tournament, round_number)', 'tournament_then_round', 6]
+	['after migrations/0001, (tournament, round_number)', 'tournament_then_round', 6],
+	['after migrations/0003, covering (tournament, round_number, …)', 'covering', 6]
 ])('computeRoundSpan on %s', (_label, shape, queryBudget) => {
 	let d1: D1CostHarness;
 	let schemaObjects = 0;

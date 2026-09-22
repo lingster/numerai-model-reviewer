@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS model_performances (
 --
 -- The model_performances round index is therefore NOT declared here. It lives in
 -- migrations/0001_perf_tournament_round_index.sql, because building an index on
--- the existing ~5M-row table writes ~5M rows. A fresh database (CI, local dev,
--- tests) applies this file and then migrations/*.sql in order.
+-- the existing ~5M-row table writes ~5M rows, and the self-hosted server widens
+-- it into a covering index in migrations/0003. A fresh database (CI, local dev,
+-- tests, the self-hosted server) applies this file and then migrations/*.sql in
+-- order.
 -- No index on model_name: nothing queries model_performances by model name any
 -- more (the rankings read paths all filter by tournament and round), and every
 -- index costs an extra written row per stored performance row — ~10k a day
