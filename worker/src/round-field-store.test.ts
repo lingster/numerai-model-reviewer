@@ -98,7 +98,7 @@ describe('stored fields against a real D1', () => {
 		const { result: rows } = await d1.measure((db) => selectRoundField(db, 1300, 8));
 		const field = fieldFromRows(rows, 8);
 		const { cost } = await d1.measure((db) =>
-			db.prepare(upsertRoundFieldSql(8, 1300, encodeFieldMetrics(field), 1_700_000_000)).run()
+			db.prepare(upsertRoundFieldSql(8, 1300, 'staked', encodeFieldMetrics(field), 1_700_000_000)).run()
 		);
 		// The table row plus its primary key index.
 		expect(cost.rowsWritten).toBeLessThanOrEqual(2);
@@ -108,7 +108,7 @@ describe('stored fields against a real D1', () => {
 		for (const round of [1298, 1299]) {
 			const { result: rows } = await d1.measure((db) => selectRoundField(db, round, 8));
 			await d1.measure((db) =>
-				db.prepare(upsertRoundFieldSql(8, round, encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
+				db.prepare(upsertRoundFieldSql(8, round, 'staked', encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
 			);
 		}
 
@@ -121,6 +121,24 @@ describe('stored fields against a real D1', () => {
 		const { result } = await d1.measure((db) => readStoredRounds(bindingQuery(db), 8));
 		expect(result.has(1300)).toBe(true);
 		expect(result.has(1250)).toBe(false);
+	});
+
+	it('keeps the staked and all-models fields side by side for a round', async () => {
+		// The chart can rank against the staked field or against everyone who
+		// scored, so a round has one stored field per scope.
+		const round = 1297;
+		for (const scope of ['staked', 'all'] as const) {
+			const { result: rows } = await d1.measure((db) => selectRoundField(db, round, 8, scope));
+			await d1.measure((db) =>
+				db.prepare(upsertRoundFieldSql(8, round, scope, encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
+			);
+		}
+
+		const staked = await d1.measure((db) => readStoredFields(db, 8, round, round, 'staked'));
+		const all = await d1.measure((db) => readStoredFields(db, 8, round, round, 'all'));
+
+		expect(staked.result.get(round)?.corr).toHaveLength(stakedCount(CLASSIC));
+		expect(all.result.get(round)?.corr).toHaveLength(CLASSIC.models);
 	});
 
 	it('ranks a model from the stored field exactly as the live rows do', async () => {
@@ -160,7 +178,7 @@ describe('stored fields against a real D1', () => {
 		const { result: rows } = await d1.measure((db) => selectRoundField(db, 1299, 11));
 		const direct = decodeFieldMetrics(encodeFieldMetrics(fieldFromRows(rows, 11)));
 		await d1.measure((db) =>
-			db.prepare(upsertRoundFieldSql(11, 1299, encodeFieldMetrics(fieldFromRows(rows, 11)), 0)).run()
+			db.prepare(upsertRoundFieldSql(11, 1299, 'staked', encodeFieldMetrics(fieldFromRows(rows, 11)), 0)).run()
 		);
 		const stored = (await d1.measure((db) => readStoredFields(db, 11, 1299, 1299))).result.get(1299)!;
 

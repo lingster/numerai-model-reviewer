@@ -13,7 +13,14 @@ import type { D1Query } from './d1-query';
 import { pickMetrics } from './ranking';
 import type { RoundPerfRow } from './perf-queries';
 import { assertTournamentId } from './perf-queries';
-import { decodeFieldMetrics, type DecodedFieldMetrics, type EncodedFieldMetrics, type FieldMetrics } from './round-field';
+import {
+	asFieldScope,
+	decodeFieldMetrics,
+	type DecodedFieldMetrics,
+	type EncodedFieldMetrics,
+	type FieldMetrics,
+	type FieldScope
+} from './round-field';
 import type { RoundSpan } from './tournament-coverage';
 
 /** Just the metrics a field needs; model identity is deliberately not required. */
@@ -39,6 +46,7 @@ export function fieldFromRows(rows: ReadonlyArray<FieldRow>, tournament: number)
 export function upsertRoundFieldSql(
 	tournament: number,
 	round: number,
+	scope: FieldScope,
 	encoded: EncodedFieldMetrics,
 	nowSeconds: number
 ): string {
@@ -46,15 +54,20 @@ export function upsertRoundFieldSql(
 	if (!Number.isSafeInteger(round)) {
 		throw new RangeError(`round must be an integer, got ${round}`);
 	}
-	return `INSERT OR REPLACE INTO round_field_metrics (tournament, round_number, corr_values, mmc_values, updated_at)
-	        VALUES (${tournament}, ${round}, '${encoded.corr}', '${encoded.mmc}', ${Math.floor(nowSeconds)})`;
+	return `INSERT OR REPLACE INTO round_field_metrics (tournament, round_number, field_scope, corr_values, mmc_values, updated_at)
+	        VALUES (${tournament}, ${round}, '${asFieldScope(scope)}', '${encoded.corr}', '${encoded.mmc}', ${Math.floor(nowSeconds)})`;
 }
 
 /** Every round that already has a stored field, so the backfill can skip them. */
-export async function readStoredRounds(query: D1Query, tournament: number): Promise<Set<number>> {
+export async function readStoredRounds(
+	query: D1Query,
+	tournament: number,
+	scope: FieldScope = 'staked'
+): Promise<Set<number>> {
 	assertTournamentId(tournament);
 	const rows = await query(
-		`SELECT round_number FROM round_field_metrics WHERE tournament = ${tournament}`
+		`SELECT round_number FROM round_field_metrics
+		  WHERE tournament = ${tournament} AND field_scope = '${asFieldScope(scope)}'`
 	);
 	const rounds = new Set<number>();
 	for (const row of rows) {
@@ -68,16 +81,17 @@ export async function readStoredFields(
 	db: D1Database,
 	tournament: number,
 	fromRound: number,
-	toRound: number
+	toRound: number,
+	scope: FieldScope = 'staked'
 ): Promise<Map<number, DecodedFieldMetrics>> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT round_number, corr_values, mmc_values
 				   FROM round_field_metrics
-				  WHERE tournament = ? AND round_number BETWEEN ? AND ?`
+				  WHERE tournament = ? AND round_number BETWEEN ? AND ? AND field_scope = ?`
 			)
-			.bind(tournament, fromRound, toRound)
+			.bind(tournament, fromRound, toRound, asFieldScope(scope))
 			.all<{ round_number: number; corr_values: string; mmc_values: string }>()
 	);
 

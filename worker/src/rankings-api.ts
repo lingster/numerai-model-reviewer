@@ -42,7 +42,7 @@ import {
 } from './ranking';
 import { bindingQuery } from './d1-query';
 import { getRoundCoverage } from './tournament-coverage';
-import { countScored, rankInField } from './round-field';
+import { asFieldScope, countScored, rankInField, type FieldScope } from './round-field';
 import { readStoredFields } from './round-field-store';
 import { inStakedField, selectModelRounds, wasStaked } from './perf-queries';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
@@ -206,12 +206,13 @@ async function fetchRoundFields(
 	env: Env,
 	startRound: number,
 	endRound: number,
-	tournament: number
+	tournament: number,
+	fieldScope: FieldScope = 'staked'
 ): Promise<Map<number, RoundPerfRow[]>> {
 	const byRound = new Map<number, RoundPerfRow[]>();
 	for (let lo = startRound; lo <= endRound; lo += RANGE_CHUNK_ROUNDS) {
 		const hi = Math.min(lo + RANGE_CHUNK_ROUNDS - 1, endRound);
-		const rows = await selectRoundFieldsInRange(env.DB, lo, hi, tournament);
+		const rows = await selectRoundFieldsInRange(env.DB, lo, hi, tournament, fieldScope);
 		for (const r of rows) {
 			const list = byRound.get(r.round_number);
 			if (list) list.push(r);
@@ -394,12 +395,13 @@ async function rankFromStoredFields(
 		endRound: number;
 		tournament: number;
 		formula: ScoreFormula;
+		fieldScope: FieldScope;
 		username?: string;
 		modelId?: string;
 	},
 	fetchOwnPerformance: OwnPerformanceFetcher
 ): Promise<ModelRankRoundResult[] | null> {
-	const { modelName, startRound, endRound, tournament, formula, username, modelId } = params;
+	const { modelName, startRound, endRound, tournament, formula, fieldScope, username, modelId } = params;
 
 	let fields: Awaited<ReturnType<typeof readStoredFields>>;
 	let own: Map<number, Awaited<ReturnType<typeof selectModelRounds>>[number]>;
@@ -415,14 +417,18 @@ async function rankFromStoredFields(
 		if (from > to) return null;
 
 		const [storedFields, ownRows] = await Promise.all([
-			readStoredFields(env.DB, tournament, from, to),
+			readStoredFields(env.DB, tournament, from, to, fieldScope),
 			// Unstaked rows included: they rank the model just as well, and save a
 			// live fetch. Their stake decides only whether the field already counts it.
 			selectModelRounds(env.DB, modelName, tournament, from, to, { includeUnstaked: true })
 		]);
 
 		own = new Map(ownRows.map((row) => [row.round_number, row]));
-		for (const row of ownRows) if (!inStakedField(row, tournament)) outsideField.add(row.round_number);
+		// In the all-models field every scored row is a competitor, so only the
+		// staked field can leave the model outside it.
+		if (fieldScope === 'staked') {
+			for (const row of ownRows) if (!inStakedField(row, tournament)) outsideField.add(row.round_number);
+		}
 		const missing: number[] = [];
 		for (let round = from; round <= to; round++) {
 			if (!storedFields.has(round)) return null;
@@ -517,6 +523,8 @@ export async function getModelRank(
 		 * of the metric (MMC20/CORR60-style), matching Numerai's leaderboard.
 		 */
 		window?: number;
+		/** Which competitors to rank against: the staked field, or every scorer. */
+		fieldScope?: FieldScope;
 		/** Owner/id hints so the unstaked-model fallback can fetch scores directly. */
 		username?: string;
 		modelId?: string;
@@ -524,6 +532,7 @@ export async function getModelRank(
 	fetchOwnPerformance: OwnPerformanceFetcher = fetchOwnPerformanceLive
 ): Promise<ModelRankResponse> {
 	const { modelName, startRound, endRound, tournament, formula, username, modelId } = params;
+	const fieldScope = asFieldScope(params.fieldScope);
 	const window = Math.max(1, Math.floor(params.window ?? 1));
 	const targetLower = modelName.toLowerCase();
 
@@ -552,6 +561,7 @@ export async function getModelRank(
 				endRound,
 				tournament,
 				formula,
+				fieldScope,
 				username: meta?.username ?? username,
 				modelId: meta?.model_id ?? modelId
 			},
@@ -571,7 +581,7 @@ export async function getModelRank(
 	// with the target's own scores if it's unstaked/absent. Both ranking paths below
 	// consume `fields`, so the injection benefits per-round and windowed alike.
 	const fetchStart = window > 1 ? Math.max(1, startRound - (window - 1)) : startRound;
-	const fields = await fetchRoundFields(env, fetchStart, endRound, tournament);
+	const fields = await fetchRoundFields(env, fetchStart, endRound, tournament, fieldScope);
 	await injectOwnScores(env, fields, { modelName, username, modelId, tournament }, fetchOwnPerformance);
 
 	const rounds: ModelRankRoundResult[] = [];

@@ -18,7 +18,7 @@
 
 import { readMaxRound } from './refresh-floor';
 import { refreshCoverage, type RoundSpan } from './tournament-coverage';
-import { encodeFieldMetrics } from './round-field';
+import { encodeFieldMetrics, FIELD_SCOPES, type FieldScope } from './round-field';
 import { fieldFromRows, readStoredRounds, roundsToBackfill, upsertRoundFieldSql } from './round-field-store';
 import type { D1Query } from './d1-query';
 import type { PrecomputeTarget, SqlWriter } from './precompute-target';
@@ -1035,13 +1035,16 @@ async function fetchCryptoPerformance(
  * model with a positive stake, or every model at all for Crypto, which has no
  * stake data.
  */
-function stakedFieldRows(
+function fieldRowsInScope(
   rounds: Array<{ round: PerformanceRound }>,
-  tournament: number
+  tournament: number,
+  scope: FieldScope
 ): Array<Pick<PerformanceRound, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc'>> {
   return rounds
     .filter(({ round }) =>
-      tournament === CRYPTO_TOURNAMENT ? true : round.stakeValue !== null && round.stakeValue > 0
+      scope === 'all' || tournament === CRYPTO_TOURNAMENT
+        ? true
+        : round.stakeValue !== null && round.stakeValue > 0
     )
     .map(({ round }) => round);
 }
@@ -1129,7 +1132,14 @@ async function storeRoundFields(
 ): Promise<{ fresh: number; backfilled: number }> {
   const fresh = roundsFromMemory(performanceData, minRound);
 
-  const alreadyStored = await readStoredRounds(d1Query, tournament);
+  // A round counts as stored only once every scope has its field, so adding a
+  // scope backfills it over the existing history.
+  const storedPerScope = await Promise.all(
+    FIELD_SCOPES.map((scope) => readStoredRounds(d1Query, tournament, scope))
+  );
+  const alreadyStored = new Set(
+    [...storedPerScope[0]].filter((round) => storedPerScope.every((stored) => stored.has(round)))
+  );
   const missing = roundsToBackfill(coverage, new Set([...alreadyStored, ...fresh.keys()]), backfillLimit);
   const backfilled = await readFieldRowsFromD1(d1Query, tournament, missing);
 
@@ -1139,8 +1149,10 @@ async function storeRoundFields(
   // failing a run whose performance data stored fine.
   const write = async (round: number, rows: Array<{ round: PerformanceRound }>): Promise<boolean> => {
     try {
-      const field = fieldFromRows(stakedFieldRows(rows, tournament), tournament);
-      await d1Query(upsertRoundFieldSql(tournament, round, encodeFieldMetrics(field), now));
+      for (const scope of FIELD_SCOPES) {
+        const field = fieldFromRows(fieldRowsInScope(rows, tournament, scope), tournament);
+        await d1Query(upsertRoundFieldSql(tournament, round, scope, encodeFieldMetrics(field), now));
+      }
       return true;
     } catch (error) {
       console.warn(`  Could not store the field for round ${round}; leaving it for a later run:`, error);

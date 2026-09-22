@@ -9,6 +9,7 @@
 
 import { d1Retry } from './d1-retry';
 import { CRYPTO_TOURNAMENT } from './mappers';
+import type { FieldScope } from './round-field';
 
 /** A model's identity as stored in top_staked_models. */
 export interface TopModelRow {
@@ -51,6 +52,10 @@ export function maxRoundSql(tournament: number): string {
  * The "staked field" filter. Crypto rows carry no stake data, so every Crypto
  * row counts; Classic and Signals count only rows with a positive stake.
  */
+/** The rows a field of this scope contains: only staked ones, or all of them. */
+const scopeFilter = (tournament: number, scope: FieldScope): string =>
+	scope === 'all' ? '' : stakedFilter(tournament);
+
 const stakedFilter = (tournament: number): string =>
 	tournament === CRYPTO_TOURNAMENT ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
 
@@ -101,18 +106,19 @@ export async function selectTopModelByName(
 	return row ?? null;
 }
 
-/** Every staked model's scores for one round. */
+/** Every model's scores for one round, within the given field scope. */
 export async function selectRoundField(
 	db: D1Database,
 	round: number,
-	tournament: number
+	tournament: number,
+	scope: FieldScope = 'staked'
 ): Promise<RoundPerfRow[]> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE round_number = ? AND tournament = ?${stakedFilter(tournament)}`
+				  WHERE round_number = ? AND tournament = ?${scopeFilter(tournament, scope)}`
 			)
 			.bind(round, tournament)
 			.all<RoundPerfRow>()
@@ -161,19 +167,20 @@ export async function selectModelRounds(
 	return result.results ?? [];
 }
 
-/** Every staked model's scores for each round in [fromRound, toRound]. */
+/** Every model's scores for each round in [fromRound, toRound], within the scope. */
 export async function selectRoundFieldsInRange(
 	db: D1Database,
 	fromRound: number,
 	toRound: number,
-	tournament: number
+	tournament: number,
+	scope: FieldScope = 'staked'
 ): Promise<Array<RoundPerfRow & { round_number: number }>> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT round_number, ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE round_number BETWEEN ? AND ? AND tournament = ?${stakedFilter(tournament)}`
+				  WHERE round_number BETWEEN ? AND ? AND tournament = ?${scopeFilter(tournament, scope)}`
 			)
 			.bind(fromRound, toRound, tournament)
 			.all<RoundPerfRow & { round_number: number }>()

@@ -76,13 +76,17 @@ CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_second
 -- 15xMMC60) and the UI varies the weights per request, so stored scores would
 -- invalidate history. Model names are not stored; a model's own metrics come
 -- from its own model_performances rows. See round-field.ts.
+-- field_scope: which competitors the stored field holds — 'staked' (the staked
+-- field, what payouts rank against) or 'all' (every model that scored, staked or
+-- not). One row per round per scope; see round-field.ts.
 CREATE TABLE IF NOT EXISTS round_field_metrics (
   tournament INTEGER NOT NULL,
   round_number INTEGER NOT NULL,
+  field_scope TEXT NOT NULL DEFAULT 'staked',
   corr_values TEXT NOT NULL,
   mmc_values TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (tournament, round_number)
+  PRIMARY KEY (tournament, round_number, field_scope)
 );
 
 CREATE TABLE IF NOT EXISTS tournament_coverage (

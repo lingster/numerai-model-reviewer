@@ -58,7 +58,7 @@ async function storeFields(slice: FleetSlice, from: number, to: number): Promise
 		await d1.measure((db) =>
 			db
 				.prepare(
-					upsertRoundFieldSql(slice.tournament, round, encodeFieldMetrics(fieldFromRows(rows, slice.tournament)), 0)
+					upsertRoundFieldSql(slice.tournament, round, 'staked', encodeFieldMetrics(fieldFromRows(rows, slice.tournament)), 0)
 				)
 				.run()
 		);
@@ -214,6 +214,51 @@ describe('models that are not part of the stored field', () => {
 		await d1.execute('ALTER TABLE round_field_metrics_hidden RENAME TO round_field_metrics');
 
 		expect(withFields.result.rounds).toEqual(live.result.rounds);
+	});
+
+	it('ranks against every model that scored when asked for the all-models field', async () => {
+		// Same model, same round: against the staked field it competes with ~108
+		// models; against everyone who scored, with all 120.
+		const target = fleetModelName(CLASSIC.tournament, 15);
+		const round = TO;
+		for (const scope of ['staked', 'all'] as const) {
+			const { result: rows } = await d1.measure((db) => selectRoundField(db, round, CLASSIC.tournament, scope));
+			await d1.measure((db) =>
+				db
+					.prepare(
+						upsertRoundFieldSql(
+							CLASSIC.tournament,
+							round,
+							scope,
+							encodeFieldMetrics(fieldFromRows(rows, CLASSIC.tournament)),
+							0
+						)
+					)
+					.run()
+			);
+		}
+
+		const rank = (fieldScope: 'staked' | 'all') =>
+			d1.measure((db) =>
+				getModelRank(
+					envFor(db),
+					{
+						modelName: target,
+						startRound: round,
+						endRound: round,
+						tournament: CLASSIC.tournament,
+						formula: FORMULA,
+						fieldScope
+					},
+					noLiveFetch
+				)
+			);
+
+		const staked = (await rank('staked')).result.rounds[0];
+		const all = (await rank('all')).result.rounds[0];
+
+		expect(all.totalModels).toBeGreaterThan(staked.totalModels);
+		expect(all.totalModels).toBe(CLASSIC.models);
 	});
 
 	it('ranks an unstaked model from its stored rows, without a live fetch', async () => {

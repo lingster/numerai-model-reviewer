@@ -6,6 +6,7 @@ import * as api from './api';
 import { Env as ApiEnv } from './api';
 import { CRYPTO_TOURNAMENT } from './mappers';
 import * as rankings from './rankings-api';
+import { asFieldScope } from './round-field';
 import { isAllowedOrigin, handleCors } from './cors';
 
 // Environment bindings interface
@@ -235,6 +236,10 @@ export default {
               tournament,
               formula,
               window,
+              // staked (default) ranks against the staked field, as payouts do;
+              // all ranks against every model that scored. Anything else falls
+              // back to staked rather than failing the request.
+              fieldScope: asFieldScope(url.searchParams.get('fieldScope')),
               // Owner/id hints let the unstaked-model fallback fetch a model's own
               // scores directly (skipping a Crypto leaderboard scan) when it's not
               // in the precomputed staked field.

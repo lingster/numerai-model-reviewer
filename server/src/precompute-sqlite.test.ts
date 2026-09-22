@@ -72,7 +72,17 @@ describe('precompute into SQLite', () => {
 			db.selectSync('SELECT earliest_round, latest_round FROM tournament_coverage WHERE tournament = ?', CRYPTO)
 		).toEqual([{ earliest_round: 100, latest_round: 102 }]);
 		expect(result.fresh).toBe(3);
-		expect(count('round_field_metrics')).toBe(3);
+		// One field per round per scope: the staked field, and every model that scored.
+		expect(count('round_field_metrics')).toBe(6);
+		expect(
+			db.selectSync<{ field_scope: string; n: number }>(
+				'SELECT field_scope, COUNT(*) AS n FROM round_field_metrics WHERE tournament = ? GROUP BY field_scope ORDER BY field_scope',
+				CRYPTO
+			)
+		).toEqual([
+			{ field_scope: 'all', n: 3 },
+			{ field_scope: 'staked', n: 3 }
+		]);
 	});
 
 	it('rewrites rounds inside the refresh overlap with their latest scores', async () => {
