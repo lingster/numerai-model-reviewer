@@ -216,6 +216,24 @@ describe('models that are not part of the stored field', () => {
 		expect(withFields.result.rounds).toEqual(live.result.rounds);
 	});
 
+	it('ranks an unstaked model from its stored rows, without a live fetch', async () => {
+		// Its rows are in model_performances, just not in the staked field. Fetching
+		// them from Numerai instead cost a round-trip per request: ~0.65s each for
+		// the 25 unstaked models one rankings page asks about.
+		const unstaked = fleetModelName(CLASSIC.tournament, 20);
+
+		const { result } = await d1.measure((db) =>
+			getModelRank(
+				envFor(db),
+				{ modelName: unstaked, startRound: FROM, endRound: TO, tournament: CLASSIC.tournament, formula: FORMULA },
+				noLiveFetch
+			)
+		);
+
+		expect(result.rounds).toHaveLength(ROUNDS);
+		expect(result.rounds.every((r) => r.rank !== null)).toBe(true);
+	});
+
 	it('stays on the stored fields when the model has no row at all in some rounds', async () => {
 		// A model that stopped submitting part-way through the range: precompute
 		// has no row for it in those rounds. Before, one such round sent the whole

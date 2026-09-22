@@ -225,6 +225,28 @@ describe('getModelRank unstaked-model support', () => {
 		expect(res.rounds.find((r) => r.roundNumber === 101)?.rank).toBe(2);
 	});
 
+	it('reports whether the model was staked in each round', async () => {
+		// The chart filters rounds by stake, so each round has to say which it was.
+		// Round 100: staked and in the field. Round 101: absent, injected from its
+		// own scores, so it was not staked.
+		const rows = [
+			row(100, 'target', 0.5, 0.5),
+			row(100, 'b', 0.1, 0.1),
+			row(101, 'b', 0.3, 0.3)
+		];
+		const { env } = mockEnv(rows);
+		const fetchOwn: OwnPerformanceFetcher = async () => new Map([[101, ownRow(0.25, 0.25)]]);
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 101, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		expect(res.rounds.find((r) => r.roundNumber === 100)?.staked).toBe(true);
+		expect(res.rounds.find((r) => r.roundNumber === 101)?.staked).toBe(false);
+	});
+
 	it('ranks an injected unstaked model under windowed averaging', async () => {
 		// window=2 averages each model's trailing two rounds, then scores corr+mmc.
 		// @r101: c avg=0.5/0.5 → score 1.0; target avg=0.15/0.15 → score 0.3;

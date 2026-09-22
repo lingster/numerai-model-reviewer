@@ -44,7 +44,7 @@ import { bindingQuery } from './d1-query';
 import { getRoundCoverage } from './tournament-coverage';
 import { countScored, rankInField } from './round-field';
 import { readStoredFields } from './round-field-store';
-import { selectModelRounds } from './perf-queries';
+import { inStakedField, selectModelRounds, wasStaked } from './perf-queries';
 import { getModelPerformance, findCryptoModelByName, type Env as ApiEnv } from './api';
 
 export interface Env {
@@ -63,6 +63,11 @@ export interface ModelRankRoundResult {
 	mmc: number | null;
 	customScore: number | null;
 	totalModels: number;
+	/**
+	 * Was the model staked in this round? Null when there is no data for it, or
+	 * for Crypto, whose stored stake is the model's current one (see wasStaked).
+	 */
+	staked: boolean | null;
 }
 
 export interface ModelRankResponse {
@@ -127,9 +132,12 @@ function rankRoundFromWindowed(
 	round: number,
 	windowed: Map<string, Map<number, MetricTriple>>,
 	targetModelLower: string,
+	tournament: number,
 	formula: ScoreFormula
 ): ModelRankRoundResult {
 	const scored: Array<{ modelName: string; score: number; corr: number | null; mmc: number | null }> = [];
+	const ownRow = field.find((row) => row.model_name.toLowerCase() === targetModelLower);
+	const staked = ownRow ? wasStaked(ownRow, tournament) : null;
 	for (const row of field) {
 		const m = windowed.get(row.model_name.toLowerCase())?.get(round);
 		if (!m) continue;
@@ -142,7 +150,7 @@ function rankRoundFromWindowed(
 
 	const target = scored.find((s) => s.modelName.toLowerCase() === targetModelLower);
 	if (!target) {
-		return { roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels };
+		return { roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels, staked };
 	}
 	return {
 		roundNumber: round,
@@ -153,7 +161,8 @@ function rankRoundFromWindowed(
 		corr: target.corr,
 		mmc: target.mmc,
 		customScore: target.score,
-		totalModels
+		totalModels,
+		staked
 	};
 }
 
@@ -229,6 +238,8 @@ function rankRound(
 		corr: number | null;
 		mmc: number | null;
 	}> = [];
+	const ownRow = field.find((row) => row.model_name.toLowerCase() === targetModelLower);
+	const staked = ownRow ? wasStaked(ownRow, tournament) : null;
 
 	for (const row of field) {
 		const metrics = pickMetrics(row, tournament);
@@ -245,7 +256,7 @@ function rankRound(
 	const totalModels = scored.length;
 
 	const target = scored.find((s) => s.modelName.toLowerCase() === targetModelLower);
-	if (!target) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels };
+	if (!target) return { roundNumber: 0, rank: null, corr: null, mmc: null, customScore: null, totalModels, staked };
 
 	return {
 		roundNumber: 0,
@@ -256,7 +267,8 @@ function rankRound(
 		corr: target.corr,
 		mmc: target.mmc,
 		customScore: target.score,
-		totalModels
+		totalModels,
+		staked
 	};
 }
 
@@ -391,8 +403,9 @@ async function rankFromStoredFields(
 
 	let fields: Awaited<ReturnType<typeof readStoredFields>>;
 	let own: Map<number, Awaited<ReturnType<typeof selectModelRounds>>[number]>;
-	/** Rounds whose metrics came from the live fetch: the model is not in the stored field. */
-	const fetched = new Set<number>();
+	/** Rounds where the model is not part of the stored field, so it counts itself. */
+	const outsideField = new Set<number>();
+
 	try {
 		const span = await getRoundCoverage(bindingQuery(env.DB), tournament);
 		if (!span) return null;
@@ -403,10 +416,13 @@ async function rankFromStoredFields(
 
 		const [storedFields, ownRows] = await Promise.all([
 			readStoredFields(env.DB, tournament, from, to),
-			selectModelRounds(env.DB, modelName, tournament, from, to)
+			// Unstaked rows included: they rank the model just as well, and save a
+			// live fetch. Their stake decides only whether the field already counts it.
+			selectModelRounds(env.DB, modelName, tournament, from, to, { includeUnstaked: true })
 		]);
 
 		own = new Map(ownRows.map((row) => [row.round_number, row]));
+		for (const row of ownRows) if (!inStakedField(row, tournament)) outsideField.add(row.round_number);
 		const missing: number[] = [];
 		for (let round = from; round <= to; round++) {
 			if (!storedFields.has(round)) return null;
@@ -422,7 +438,7 @@ async function rankFromStoredFields(
 					const row = ownScores.get(round);
 					if (!row) continue;
 					own.set(round, { ...row, round_number: round, model_name: modelName });
-					fetched.add(round);
+					outsideField.add(round);
 				}
 			} catch (error) {
 				console.error(`Live own-performance fetch failed for ${modelName}:`, error);
@@ -451,7 +467,8 @@ async function rankFromStoredFields(
 				// No scores for this round, but the round still had a field: report
 				// its size, as the live path does for a model absent from it. 0 would
 				// say the round was empty.
-				totalModels: field ? countScored(field, formula) : 0
+				totalModels: field ? countScored(field, formula) : 0,
+				staked: ownRow ? wasStaked(ownRow, tournament) : null
 			});
 			continue;
 		}
@@ -461,7 +478,7 @@ async function rankFromStoredFields(
 		// A model the stored field does not contain (unstaked, or absent) is ranked
 		// against it as an extra competitor, exactly as the live path's injection
 		// does — so it counts itself in the field size.
-		const ownNotInField = fetched.has(round) ? 1 : 0;
+		const ownNotInField = outsideField.has(round) ? 1 : 0;
 		rounds.push({
 			roundNumber: round,
 			rank: placed?.rank ?? null,
@@ -471,7 +488,8 @@ async function rankFromStoredFields(
 			customScore: scoreFromMetrics(metrics, formula),
 			// The field was this big whether or not the target scored in it, which is
 			// what the live path reports for an unscored model too.
-			totalModels: placed ? placed.totalModels + ownNotInField : countScored(field, formula)
+			totalModels: placed ? placed.totalModels + ownNotInField : countScored(field, formula),
+			staked: wasStaked(ownRow, tournament)
 		});
 	}
 	return rounds;
@@ -517,7 +535,8 @@ export async function getModelRank(
 		corr: null,
 		mmc: null,
 		customScore: null,
-		totalModels: 0
+		totalModels: 0,
+		staked: null
 	});
 
 	// Per-round ranking with the default weighting can be served from the stored
@@ -565,7 +584,7 @@ export async function getModelRank(
 		for (let r = startRound; r <= endRound; r++) {
 			const field = fields.get(r) ?? [];
 			rounds.push(
-				field.length === 0 ? empty(r) : rankRoundFromWindowed(field, r, windowed, targetLower, formula)
+				field.length === 0 ? empty(r) : rankRoundFromWindowed(field, r, windowed, targetLower, tournament, formula)
 			);
 		}
 	} else {

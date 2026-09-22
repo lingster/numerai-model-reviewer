@@ -54,6 +54,24 @@ export function maxRoundSql(tournament: number): string {
 const stakedFilter = (tournament: number): string =>
 	tournament === CRYPTO_TOURNAMENT ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
 
+/** The same condition as {@link stakedFilter}, in TypeScript. */
+export const isStakedRow = (row: { stake_value: number | null }): boolean =>
+	row.stake_value !== null && row.stake_value > 0;
+
+/**
+ * Whether a row belongs to the round's staked field — what selectRoundField
+ * returns, and so what a rank is measured against.
+ */
+export const inStakedField = (row: { stake_value: number | null }, tournament: number): boolean =>
+	tournament === CRYPTO_TOURNAMENT || isStakedRow(row);
+
+/**
+ * Was the model staked in this round? Null for Crypto, whose rows carry the
+ * model's current stake rather than the round's, so the answer is unknown.
+ */
+export const wasStaked = (row: { stake_value: number | null }, tournament: number): boolean | null =>
+	tournament === CRYPTO_TOURNAMENT ? null : isStakedRow(row);
+
 const ROUND_PERF_COLUMNS = 'model_name, corr, mmc, tc, alpha, mpc, stake_value';
 
 /**
@@ -125,14 +143,17 @@ export async function selectModelRounds(
 	modelName: string,
 	tournament: number,
 	fromRound: number,
-	toRound: number
+	toRound: number,
+	{ includeUnstaked = false }: { includeUnstaked?: boolean } = {}
 ): Promise<Array<RoundPerfRow & { round_number: number }>> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT round_number, ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE model_name = LOWER(?) AND +tournament = ? AND round_number BETWEEN ? AND ?${stakedFilter(tournament)}`
+				  WHERE model_name = LOWER(?) AND +tournament = ? AND round_number BETWEEN ? AND ?${
+					includeUnstaked ? '' : stakedFilter(tournament)
+				}`
 			)
 			.bind(modelName, tournament, fromRound, toRound)
 			.all<RoundPerfRow & { round_number: number }>()
