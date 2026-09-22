@@ -1,30 +1,40 @@
 # Self-hosted Numerai API.
 #
 #   cp .env.example .env    # optional: every setting has a default
-#   docker compose up -d --build api
+#   docker compose up -d --build api scheduler
 #
 # Compose runs from server/ but builds with the repository root as context, so
 # the image can include worker/ as well.
+
+# Shared by every service that opens the database: the same image, user,
+# lockdown and data directory, so the API and its jobs cannot drift apart.
+x-database-service: &database-service
+  image: numerai-api:latest
+  restart: unless-stopped
+  # Run as a dedicated host user that owns only DATA_DIR, so an escape from
+  # the container lands on a UID with nothing else on the host. Defaults to
+  # the image's own unprivileged user.
+  user: "${APP_UID:-numerai}:${APP_GID:-numerai}"
+  # Nothing but /data (and scratch in /tmp) needs to be writable.
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  volumes:
+    # A host path (e.g. /data/numerai/numerdiff) bind-mounts that directory;
+    # unset, a named volume is used. The directory must be owned by APP_UID.
+    - ${DATA_DIR:-numerai-data}:/data
+
 services:
   api:
+    <<: *database-service
     build:
       context: ..
       dockerfile: server/Dockerfile
-    image: numerai-api:latest
     container_name: numerai-api
-    restart: unless-stopped
-    # Run as a dedicated host user that owns only DATA_DIR, so an escape from
-    # the container lands on a UID with nothing else on the host. Defaults to
-    # the image's own unprivileged user.
-    user: "${APP_UID:-numerai}:${APP_GID:-numerai}"
-    # Nothing but /data (and scratch in /tmp) needs to be writable.
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
     ports:
       # Bound to localhost: Cloudflare Tunnel reaches it from the host, so the
       # API is never exposed on the LAN or the internet directly.
@@ -38,16 +48,40 @@ services:
       NUMERAI_SECRET_KEY: ${NUMERAI_SECRET_KEY:-}
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-100}
       RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
-    volumes:
-      # A host path (e.g. /data/numerai/numerdiff) bind-mounts that directory;
-      # unset, a named volume is used. The directory must be owned by APP_UID.
-      - ${DATA_DIR:-numerai-data}:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # A pending migration runs before the server listens (0003 takes ~20s).
+      start_period: 60s
+
+  # Nightly jobs from server/crontab: backup at 03:00 UTC, then precompute of
+  # all three tournaments at 04:30. Logs: `docker compose logs -f scheduler`.
+  # Run a job now: `docker compose exec scheduler /app/server/jobs/nightly-precompute.sh`.
+  scheduler:
+    <<: *database-service
+    container_name: numerai-scheduler
+    command: ["supercronic", "-passthrough-logs", "/app/server/crontab"]
+    environment:
+      DATABASE_PATH: /data/numerai-cache.sqlite
+      NUMERAI_API_URL: ${NUMERAI_API_URL:-https://api-tournament.numer.ai/graphql}
+      PRECOMPUTE_CACHE_DIR: /data/.precompute-cache
+      PRECOMPUTE_TOURNAMENTS: ${PRECOMPUTE_TOURNAMENTS:-8 11 12}
+      PRECOMPUTE_TOP_N: ${PRECOMPUTE_TOP_N:-1000000}
+      PRECOMPUTE_BACKFILL_ROUNDS: ${PRECOMPUTE_BACKFILL_ROUNDS:-5000}
+      PRECOMPUTE_REFRESH_OVERLAP: ${PRECOMPUTE_REFRESH_OVERLAP:-70}
+      BACKUP_DIR: /data/backups
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+      # A full backfill of Classic holds millions of rows in memory.
+      NODE_OPTIONS: --max-old-space-size=12288
+    # The image's healthcheck probes the API port, which this service does not serve.
+    healthcheck:
+      disable: true
+    # The API applies pending migrations at startup; let it finish first.
+    depends_on:
+      api:
+        condition: service_healthy
 
   # Publishes the API on a hostname without opening a port on your router.
   # Create the tunnel in the Cloudflare dashboard, put its token in .env, and

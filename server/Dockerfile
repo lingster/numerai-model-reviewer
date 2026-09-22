@@ -12,21 +12,27 @@
 FROM node:24-alpine
 
 # tini reaps zombies and forwards SIGTERM, so shutdown drains cleanly.
-RUN apk add --no-cache tini
+# supercronic runs the scheduler service's crontab; sqlite3 is for inspecting
+# the database in place (`docker compose exec api sqlite3 /data/…`).
+RUN apk add --no-cache tini supercronic sqlite
 
 WORKDIR /app
 
 # Dependencies first: this layer is cached unless the manifests change.
 COPY server/package.json server/package-lock.json ./server/
 # ci, not install: the lockfile pins tsx so startup never reaches the network.
-RUN cd server && npm ci --omit=dev --no-audit --no-fund
+# worker/ has no install of its own: precompute (run by the scheduler) resolves
+# its one package, yaml, through this link to the server's.
+RUN cd server && npm ci --omit=dev --no-audit --no-fund \
+ && mkdir -p /app/worker && ln -s /app/server/node_modules /app/worker/node_modules
 
 # Sources. worker/ supplies the handler; server/ the bridge.
 COPY worker/src ./worker/src
 COPY worker/migrations ./worker/migrations
 COPY worker/worker-configuration.d.ts ./worker/
 COPY server/src ./server/src
-COPY server/tsconfig.json ./server/
+COPY server/tsconfig.json server/crontab ./server/
+COPY server/jobs ./server/jobs
 
 WORKDIR /app/server
 

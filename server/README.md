@@ -25,9 +25,34 @@ curl -H 'Origin: http://localhost:5173' localhost:8787/health
 
 ```bash
 cp .env.example .env          # optional; see Configuration
-docker compose up -d --build api
-docker compose ps             # healthy
+docker compose up -d --build api scheduler
+docker compose ps             # api healthy, scheduler up
 ```
+
+## Scheduled jobs
+
+The `scheduler` service runs [`crontab`](./crontab) with supercronic, from the same image, user
+and data directory as the API (UTC):
+
+| When | Job | What it does |
+|---|---|---|
+| 03:00 | `src/backup.ts` | `VACUUM INTO` a dated copy under `/data/backups`, keeping `BACKUP_KEEP` (7) |
+| 04:30 | `jobs/nightly-precompute.sh` | Precompute tournaments 8, 11, 12 into SQLite, then `PRAGMA optimize` |
+
+The precompute is the worker's own pipeline (`worker/src/precompute.ts`) with a SQLite target
+(`src/precompute-sqlite.ts`); it takes the same flags. Its defaults lift the caps that exist
+only for D1's free plan: every leaderboard model (`--top-n 1000000`), full stored-field history
+(`--backfill-rounds 5000`), and a 70-round `--refresh-overlap`, so still-resolving Signals and
+Crypto rounds are rewritten until they settle.
+
+```bash
+docker compose logs -f scheduler                                        # job output
+docker compose exec scheduler /app/server/jobs/nightly-precompute.sh    # run now
+docker compose exec api sqlite3 /data/numerai-cache.sqlite              # inspect
+```
+
+Restore a backup: stop both services, copy `backups/numerai-cache-<date>.sqlite` over
+`numerai-cache.sqlite` (removing its `-wal`/`-shm`) as the data directory's owner, start again.
 
 Build from the repository root, since the image needs both source trees:
 
@@ -65,6 +90,8 @@ sudo install -d -o numerdiff -g numerdiff -m 750 /data/numerai/numerdiff
 | `ALLOWED_ORIGIN_SUFFIXES` | — | e.g. `.pages.dev` for preview deployments |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `100` / `60` | In-memory here (no KV) |
 | `MAX_REQUEST_BODY_BYTES` | `1048576` | Bodies over this get 413. Every route is a GET |
+| `PRECOMPUTE_CACHE_DIR` | `./.cache` | Precompute's CSV cache; `/data/.precompute-cache` in Docker |
+| `BACKUP_DIR` / `BACKUP_KEEP` | `./data/backups` / `7` | Backup job |
 
 Numeric variables are validated at startup: a non-integer, a negative or (for the rate limit) a
 zero is a startup failure rather than a silently wrong setting.

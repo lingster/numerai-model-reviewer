@@ -47,17 +47,18 @@ midnight UTC rather than retrying immediately.
 
 Today it writes through the `wrangler` CLI, which only talks to D1. Two seams, both small:
 
-- [ ] **`D1Query` for SQLite.** `worker/src/wrangler-d1.ts` exports `createWranglerQuery`, which
+- [x] **`D1Query` for SQLite.** `worker/src/wrangler-d1.ts` exports `createWranglerQuery`, which
       returns a `D1Query` (`worker/src/d1-query.ts`: `(sql) => rows`). Add the SQLite
       equivalent — `bindingQuery` in `d1-query.ts` already does exactly this over a
       `D1Database`, so `bindingQuery(sqliteD1.asD1())` may be all that is needed.
-- [ ] **Batched writes.** `storeInD1` (`worker/src/precompute.ts:1146`) has an internal
+- [x] **Batched writes.** `storeInD1` (`worker/src/precompute.ts:1146`) has an internal
       `execD1` that writes a temp `.sql` file and shells out to wrangler. Give it an injectable
       writer so it can execute statements against SQLite directly instead.
-- [ ] **Select the target.** A `--sqlite <path>` flag (or `DATABASE_PATH`) alongside the
+- [x] **Select the target.** Done as a separate entry, `server/src/precompute-sqlite.ts`
+      (`DATABASE_PATH`), rather than a `--sqlite` flag — the worker keeps no SQLite code. A `--sqlite <path>` flag (or `DATABASE_PATH`) alongside the
       existing `--local` / `--remote`, defaulting to current behaviour so the GitHub Actions
       workflow is unaffected while both run in parallel.
-- [ ] Tests: the existing `worker/src/*.test.ts` suite must stay green, and add coverage that a
+- [x] Tests: the existing `worker/src/*.test.ts` suite must stay green, and add coverage that a
       run against a SQLite file writes `model_performances`, `tournament_coverage` and
       `round_field_metrics`.
 
@@ -71,10 +72,10 @@ dodge wrangler's per-invocation overhead can be simplified, but do it in a separ
 
 ## 3. Schedule precompute on the box  ·  ~2 h
 
-- [ ] systemd timer (or cron) running the precompute daily, after Numerai resolves (~04:00 UTC).
+- [x] ~~systemd timer (or cron)~~ supercronic `scheduler` service running the precompute daily, after Numerai resolves (~04:00 UTC).
 - [ ] Log to a file with rotation; non-zero exit should be visible (mail, healthchecks.io, or
       whatever you already use).
-- [ ] Keep `--backfill-rounds`; without the D1 write ceiling it can be raised well above 100 —
+- [x] Keep `--backfill-rounds`; without the D1 write ceiling it can be raised well above 100 —
       try 500 and watch the wall-clock time.
 
 **Done when:** two consecutive nights run unattended, and `round_field_metrics` grows.
@@ -108,7 +109,7 @@ dodge wrangler's per-invocation overhead can be simplified, but do it in a separ
 
 ## 6. Operations  ·  ~half a day
 
-- [ ] **Backups.** Nightly `sqlite3 … ".backup"` (safe with WAL) to a second disk or offsite;
+- [ ] **Backups.** (Nightly job done — `scheduler` keeps 7 under `/data/backups`, same disk; offsite and a restore test remain.) Nightly `sqlite3 … ".backup"` (safe with WAL) to a second disk or offsite;
       keep 7 daily. Test a restore into a scratch container.
 - [ ] **Monitoring.** Alert on: container unhealthy, precompute exit code, disk free, and
       `cache-status.latestRound` falling more than two rounds behind Numerai's current round.
