@@ -23,20 +23,26 @@ const migrationSql = Object.entries(
 	.map(([, sql]) => sql as string);
 
 /**
- * Which round index model_performances has. Production still has the original
+ * Which round index model_performances has. Production D1 still has the original
  * (round_number, tournament) index — migrations/0001 swaps it for
- * (tournament, round_number) but needs a paid plan to run — so query costs are
- * tested against both shapes, and against neither.
+ * (tournament, round_number) but needs a paid plan to run — and migrations/0003
+ * widens that into a covering index on the self-hosted database, so query costs
+ * are tested against every shape, and against none.
  */
-export type RoundIndexShape = 'round_then_tournament' | 'tournament_then_round' | 'none';
+export type RoundIndexShape = 'round_then_tournament' | 'tournament_then_round' | 'covering' | 'none';
 
 const ROUND_INDEX_SQL: Record<RoundIndexShape, string> = {
 	round_then_tournament:
 		'CREATE INDEX idx_perf_round ON model_performances(round_number, tournament)',
 	tournament_then_round:
 		'CREATE INDEX idx_perf_tournament_round ON model_performances(tournament, round_number)',
+	covering:
+		'CREATE INDEX idx_perf_round_field ON model_performances(tournament, round_number, model_name, stake_value, corr, mmc, tc, alpha, mpc)',
 	none: ''
 };
+
+/** Every round index name above, so switching shape drops whichever is present. */
+const ROUND_INDEX_NAMES = ['idx_perf_round', 'idx_perf_tournament_round', 'idx_perf_round_field'];
 
 /** Rows D1 billed for some work. */
 export interface D1Cost {
@@ -150,9 +156,8 @@ export class D1CostHarness {
 
 	/** Give model_performances exactly the round index `shape` describes. */
 	async setRoundIndex(shape: RoundIndexShape): Promise<void> {
-		await this.execute(
-			`DROP INDEX IF EXISTS idx_perf_round; DROP INDEX IF EXISTS idx_perf_tournament_round; ${ROUND_INDEX_SQL[shape]}`
-		);
+		const drops = ROUND_INDEX_NAMES.map((name) => `DROP INDEX IF EXISTS ${name};`).join(' ');
+		await this.execute(`${drops} ${ROUND_INDEX_SQL[shape]}`);
 	}
 
 	/**

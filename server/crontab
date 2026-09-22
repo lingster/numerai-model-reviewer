@@ -1,0 +1,10 @@
+# Scheduled jobs for the self-hosted API, run by supercronic in the `scheduler`
+# service (docker-compose.yml). Times are UTC. supercronic never starts a job
+# while its previous run is still going.
+
+# Snapshot the database before the night's writes; keeps BACKUP_KEEP copies.
+0 3 * * * cd /app/server && node_modules/.bin/tsx src/backup.ts
+
+# New and still-resolving rounds, after Numerai's daily resolution (~04:00 UTC).
+# Ends with PRAGMA optimize, so planner statistics track the new data.
+30 4 * * * /app/server/jobs/nightly-precompute.sh

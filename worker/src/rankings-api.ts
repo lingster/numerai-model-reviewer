@@ -363,10 +363,13 @@ async function injectOwnScores(
  * the live path must.
  *
  * Usable when every round of the requested range that the tournament has data
- * for has both a stored field and a row for this model. A model missing from
- * some round was unstaked then, and the live path has a fallback that fetches
- * its scores and injects them into the field — behaviour this path deliberately
- * does not reimplement.
+ * for has a stored field. Rounds the model has no row for — it stopped
+ * submitting, or was never captured — are filled from one live fetch of its own
+ * scores, the same fetch the live path uses, and ranked against the stored
+ * field. Without that, a single missing round sent the whole request down the
+ * live path: in production a 166-round view of a model that stopped submitting
+ * read every staked row of every round (~2.5s) to serve rounds the stored
+ * fields could already answer.
  *
  * Costs about two reads per round (the field, and the model's own row) instead
  * of every staked model's row for every round.
@@ -379,12 +382,17 @@ async function rankFromStoredFields(
 		endRound: number;
 		tournament: number;
 		formula: ScoreFormula;
-	}
+		username?: string;
+		modelId?: string;
+	},
+	fetchOwnPerformance: OwnPerformanceFetcher
 ): Promise<ModelRankRoundResult[] | null> {
-	const { modelName, startRound, endRound, tournament, formula } = params;
+	const { modelName, startRound, endRound, tournament, formula, username, modelId } = params;
 
 	let fields: Awaited<ReturnType<typeof readStoredFields>>;
 	let own: Map<number, Awaited<ReturnType<typeof selectModelRounds>>[number]>;
+	/** Rounds whose metrics came from the live fetch: the model is not in the stored field. */
+	const fetched = new Set<number>();
 	try {
 		const span = await getRoundCoverage(bindingQuery(env.DB), tournament);
 		if (!span) return null;
@@ -399,8 +407,26 @@ async function rankFromStoredFields(
 		]);
 
 		own = new Map(ownRows.map((row) => [row.round_number, row]));
+		const missing: number[] = [];
 		for (let round = from; round <= to; round++) {
-			if (!storedFields.has(round) || !own.has(round)) return null;
+			if (!storedFields.has(round)) return null;
+			if (!own.has(round)) missing.push(round);
+		}
+		if (missing.length > 0) {
+			// One fetch covers every missing round. A failure leaves them unranked
+			// against a field that still reports its true size — what the live path
+			// does when its own injection fails.
+			try {
+				const ownScores = await fetchOwnPerformance(env, { modelName, username, modelId, tournament });
+				for (const round of missing) {
+					const row = ownScores.get(round);
+					if (!row) continue;
+					own.set(round, { ...row, round_number: round, model_name: modelName });
+					fetched.add(round);
+				}
+			} catch (error) {
+				console.error(`Live own-performance fetch failed for ${modelName}:`, error);
+			}
 		}
 		fields = storedFields;
 	} catch (error) {
@@ -416,12 +442,26 @@ async function rankFromStoredFields(
 		const field = fields.get(round);
 		const ownRow = own.get(round);
 		if (!field || !ownRow) {
-			rounds.push({ roundNumber: round, rank: null, corr: null, mmc: null, customScore: null, totalModels: 0 });
+			rounds.push({
+				roundNumber: round,
+				rank: null,
+				corr: null,
+				mmc: null,
+				customScore: null,
+				// No scores for this round, but the round still had a field: report
+				// its size, as the live path does for a model absent from it. 0 would
+				// say the round was empty.
+				totalModels: field ? countScored(field, formula) : 0
+			});
 			continue;
 		}
 
 		const metrics = pickMetrics(ownRow, tournament);
 		const placed = rankInField(field, metrics, formula);
+		// A model the stored field does not contain (unstaked, or absent) is ranked
+		// against it as an extra competitor, exactly as the live path's injection
+		// does — so it counts itself in the field size.
+		const ownNotInField = fetched.has(round) ? 1 : 0;
 		rounds.push({
 			roundNumber: round,
 			rank: placed?.rank ?? null,
@@ -431,7 +471,7 @@ async function rankFromStoredFields(
 			customScore: scoreFromMetrics(metrics, formula),
 			// The field was this big whether or not the target scored in it, which is
 			// what the live path reports for an unscored model too.
-			totalModels: placed?.totalModels ?? countScored(field, formula)
+			totalModels: placed ? placed.totalModels + ownNotInField : countScored(field, formula)
 		});
 	}
 	return rounds;
@@ -485,13 +525,19 @@ export async function getModelRank(
 	// stored metric, and a trailing window needs every model's history, so both
 	// stay on the live path.
 	if (window === 1 && !formula.tcWeight) {
-		const stored = await rankFromStoredFields(env, {
-			modelName: meta?.model_name ?? modelName,
-			startRound,
-			endRound,
-			tournament,
-			formula
-		});
+		const stored = await rankFromStoredFields(
+			env,
+			{
+				modelName: meta?.model_name ?? modelName,
+				startRound,
+				endRound,
+				tournament,
+				formula,
+				username: meta?.username ?? username,
+				modelId: meta?.model_id ?? modelId
+			},
+			fetchOwnPerformance
+		);
 		if (stored) {
 			return {
 				modelName: meta?.model_name ?? modelName,

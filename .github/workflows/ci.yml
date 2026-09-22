@@ -11,6 +11,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The self-hosted API bridge (server/). Separate job: it shares no setup with
+  # the worker/Playwright run, and a failure here should name itself.
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # The bridge runs the worker's own handler, so the worker's dependencies
+      # must be installed for its imports to resolve.
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Typecheck server
+        working-directory: server
+        run: npx tsc --noEmit -p .
+
+      - name: Run server tests
+        working-directory: server
+        run: npm test
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20

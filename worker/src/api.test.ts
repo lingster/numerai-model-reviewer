@@ -257,3 +257,50 @@ describe('findCryptoModelByName N+1 avoidance', () => {
     expect(calls.length).toBe(1);
   });
 });
+
+describe('Numerai Authorization header', () => {
+  /** Run one Crypto fetch under `keys` and return the Authorization header sent. */
+  async function authHeaderFor(keys: Partial<Env>): Promise<string | null> {
+    let sent: Headers | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sent = new Headers(init.headers);
+        return new Response(JSON.stringify({ data: { v2RoundModelPerformances: [] } }), {
+          status: 200
+        });
+      })
+    );
+    await getModelPerformance(
+      'mymodel',
+      { ...env, ...keys } as Env,
+      'owner',
+      'model-id-123',
+      CRYPTO_TOURNAMENT
+    );
+    return sent?.get('Authorization') ?? null;
+  }
+
+  it('sends the key pair when both are set', async () => {
+    expect(await authHeaderFor({})).toBe('Token pk$sk');
+  });
+
+  it('omits the header when the keys are empty', async () => {
+    expect(
+      await authHeaderFor({ NUMERAI_PUBLIC_KEY: '', NUMERAI_SECRET_KEY: '' })
+    ).toBeNull();
+  });
+
+  it('omits the header when the keys are undefined', async () => {
+    expect(
+      await authHeaderFor({
+        NUMERAI_PUBLIC_KEY: undefined as unknown as string,
+        NUMERAI_SECRET_KEY: undefined as unknown as string
+      })
+    ).toBeNull();
+  });
+
+  it('omits the header when only one key is set', async () => {
+    expect(await authHeaderFor({ NUMERAI_SECRET_KEY: '' })).toBeNull();
+  });
+});

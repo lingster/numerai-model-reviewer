@@ -216,6 +216,44 @@ describe('models that are not part of the stored field', () => {
 		expect(withFields.result.rounds).toEqual(live.result.rounds);
 	});
 
+	it('stays on the stored fields when the model has no row at all in some rounds', async () => {
+		// A model that stopped submitting part-way through the range: precompute
+		// has no row for it in those rounds. Before, one such round sent the whole
+		// request down the live path — the production case that made a 166-round
+		// view read every staked row.
+		const target = fleetModelName(CLASSIC.tournament, 43);
+		const gapFrom = FROM + 5;
+		// The live API still has the rounds D1 lost, so snapshot them before the
+		// delete and serve those: that is what the real fetcher would return.
+		const ownBefore = await d1.measure((db) => ownScoresFromD1(db)({} as Env, { modelName: target, tournament: CLASSIC.tournament }));
+		const ownFromApi = async () => ownBefore.result;
+		await d1.execute(
+			`DELETE FROM model_performances
+			  WHERE model_name = '${target}' AND tournament = ${CLASSIC.tournament} AND round_number >= ${gapFrom}`
+		);
+		// Rebuild those rounds' stored fields, so they match the rows precompute
+		// would have seen — the field no longer contains the model either.
+		await storeFields(CLASSIC, gapFrom, TO);
+
+		const rank = (db: D1Database) =>
+			getModelRank(
+				envFor(db),
+				{ modelName: target, startRound: FROM, endRound: TO, tournament: CLASSIC.tournament, formula: FORMULA },
+				ownFromApi
+			);
+
+		const withFields = await d1.measure(rank);
+
+		await d1.execute('ALTER TABLE round_field_metrics RENAME TO round_field_metrics_away');
+		const live = await d1.measure(rank);
+		await d1.execute('ALTER TABLE round_field_metrics_away RENAME TO round_field_metrics');
+
+		// The fetcher stands in for the live API, which has the rounds D1 lacks.
+		expect(withFields.result.rounds).toEqual(live.result.rounds);
+		expect(withFields.result.rounds.some((r) => r.roundNumber >= gapFrom && r.rank !== null)).toBe(true);
+		expect(withFields.cost.rowsRead).toBeLessThan(live.cost.rowsRead / 2);
+	});
+
 	it('reports the field size for a staked model that has no score in a round', async () => {
 		const round = 1299;
 		await d1.execute(

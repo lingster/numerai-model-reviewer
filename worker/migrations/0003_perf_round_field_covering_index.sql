@@ -1,0 +1,47 @@
+-- Replace idx_perf_tournament_round (tournament, round_number) with the covering
+-- idx_perf_round_field (tournament, round_number, model_name, stake_value, corr,
+-- mmc, tc, alpha, mpc).
+--
+-- SELF-HOSTED ONLY. The self-hosted server applies this at startup. Do not run it
+-- on D1: see COST.
+--
+-- WHY
+--   Ranking reads a round's whole staked field (selectRoundField,
+--   selectRoundFieldsInRange). On (tournament, round_number) every matching index
+--   entry costs a lookup into the table by rowid, and a round's rows are scattered
+--   across the table (precompute writes model by model), so it is one random page
+--   read per row. Carrying the selected columns in the index turns that into a
+--   sequential index range scan. Measured on a copy of the self-hosted database
+--   (7.83M rows, node:sqlite 3.53, warm cache):
+--
+--     query (Classic)                          before     after
+--     SQLite time, 120-round field (~480k rows)  1113ms      67ms
+--     selectRoundFieldsInRange, 120 rounds       2330ms    ~1000ms  (rest is JS objects)
+--     selectRoundField, Crypto round               2.8ms     1.0ms
+--
+--   Leading columns are unchanged, so MIN/MAX(round_number) WHERE tournament = ?
+--   (cache-status, precompute's max round) still seek, and tournament-coverage.ts
+--   accepts either index name. model_name third makes a round's rows come back in
+--   name order — deterministic across re-imports, where rowid order was not — which
+--   only affects the listed order of models with exactly equal scores; ranks are
+--   competition ranks and do not depend on it.
+--
+-- COST
+--   Disk: ~345MB for the new index, ~97MB freed by the old: ~+250MB net on the
+--   7.83M-row table (~0.8GB -> ~1.05GB of pages).
+--   Time: ~20s to build at server startup, inside the migration's transaction; the
+--   server listens once it is done.
+--   Writes: still table + primary key + one index per stored row, only wider.
+--   On D1 building it would write one row per table row (~7.8M), far beyond the
+--   free plan's daily limit — the same reason 0001 was never applied there.
+--
+-- WHY THIS IS NOT IN schema.sql
+--   deploy-worker.yml re-applies schema.sql to production D1 on every deploy;
+--   schema-safety.test.ts keeps it cheap to re-run.
+--
+-- ORDER
+--   Create first, then drop, so a failed build leaves the old index in place.
+
+CREATE INDEX IF NOT EXISTS idx_perf_round_field
+  ON model_performances(tournament, round_number, model_name, stake_value, corr, mmc, tc, alpha, mpc);
+DROP INDEX IF EXISTS idx_perf_tournament_round;

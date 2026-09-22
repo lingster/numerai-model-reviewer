@@ -1,0 +1,3 @@
+# The SQLite database lives here; never commit it.
+*
+!.gitignore

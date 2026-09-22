@@ -110,6 +110,15 @@ export async function selectRoundField(
  *
  * The primary key leads with model_name, so this seeks rather than scanning:
  * reads are about the number of rounds returned, not the size of the field.
+ *
+ * `+tournament` keeps it that way. Without table statistics the planner rates
+ * a (tournament, round_number) index — tournament equality plus a round range —
+ * above the primary key's model_name equality plus a round range, and range-
+ * scans every model's rows in the round range instead of one row per round —
+ * ~5k times the reads at production scale, ~2s on the self-hosted server for a
+ * 166-round view. The unary plus makes the tournament term unusable by an
+ * index without changing what it matches (the tournament is always bound as a
+ * number, so affinity does not come into it).
  */
 export async function selectModelRounds(
 	db: D1Database,
@@ -123,7 +132,7 @@ export async function selectModelRounds(
 			.prepare(
 				`SELECT round_number, ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE model_name = LOWER(?) AND tournament = ? AND round_number BETWEEN ? AND ?${stakedFilter(tournament)}`
+				  WHERE model_name = LOWER(?) AND +tournament = ? AND round_number BETWEEN ? AND ?${stakedFilter(tournament)}`
 			)
 			.bind(modelName, tournament, fromRound, toRound)
 			.all<RoundPerfRow & { round_number: number }>()

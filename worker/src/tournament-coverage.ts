@@ -28,16 +28,16 @@ export interface RoundSpan {
 export class NoRoundIndexError extends Error {
 	constructor() {
 		super(
-			'model_performances has no round index (idx_perf_tournament_round or idx_perf_round); ' +
+			`model_performances has no round index (${STRATEGIES.flatMap((s) => s.indexes).join(', ')}); ` +
 				'refusing to compute the round span with a full table scan'
 		);
 		this.name = 'NoRoundIndexError';
 	}
 }
 
-/** A way to find a tournament's span that is cheap given one particular index. */
+/** A way to find a tournament's span that is cheap given any one of `indexes`. */
 interface SpanStrategy {
-	index: string;
+	indexes: readonly string[];
 	sql(tournament: number): string;
 }
 
@@ -51,9 +51,10 @@ const hasTournamentRound = (tournament: number, n: string): string =>
  */
 const STRATEGIES: readonly SpanStrategy[] = [
 	{
-		// After migrations/0001: a direct seek to each end of the tournament's rounds.
+		// After migrations/0001 (or its covering replacement, migrations/0003 — the
+		// same leading columns): a direct seek to each end of the tournament's rounds.
 		// MIN and MAX stay separate subqueries — together they scan every match.
-		index: 'idx_perf_tournament_round',
+		indexes: ['idx_perf_round_field', 'idx_perf_tournament_round'],
 		sql: (t) =>
 			`SELECT (SELECT MIN(round_number) FROM model_performances WHERE tournament = ${t}) AS earliestRound,
 			        (SELECT MAX(round_number) FROM model_performances WHERE tournament = ${t}) AS latestRound`
@@ -63,7 +64,7 @@ const STRATEGIES: readonly SpanStrategy[] = [
 		// from each end with index seeks, stopping at the first round that has this
 		// tournament. Costs a few reads per distinct round walked (~1.1k rounds at
 		// most), never a read per row (~5k rows per round).
-		index: 'idx_perf_round',
+		indexes: ['idx_perf_round'],
 		sql: (t) =>
 			`WITH RECURSIVE
 			   up(n) AS (
@@ -84,7 +85,7 @@ const STRATEGIES: readonly SpanStrategy[] = [
 	}
 ];
 
-const STRATEGY_INDEXES = STRATEGIES.map((s) => `'${s.index}'`).join(', ');
+const STRATEGY_INDEXES = STRATEGIES.flatMap((s) => s.indexes.map((index) => `'${index}'`)).join(', ');
 
 /** A span from a row holding earliestRound/latestRound, or null when either is missing. */
 function toSpan(row: Record<string, unknown> | undefined): RoundSpan | null {
@@ -98,7 +99,7 @@ function toSpan(row: Record<string, unknown> | undefined): RoundSpan | null {
 /**
  * The span of rounds stored for `tournament`, computed from model_performances
  * with whichever cheap strategy its indexes allow. Null when it has no rows.
- * @throws NoRoundIndexError when neither round index exists.
+ * @throws NoRoundIndexError when no round index exists.
  */
 export async function computeRoundSpan(query: D1Query, tournament: number): Promise<RoundSpan | null> {
 	assertTournamentId(tournament);
@@ -110,7 +111,7 @@ export async function computeRoundSpan(query: D1Query, tournament: number): Prom
 			)
 		).map((row) => row.name)
 	);
-	const strategy = STRATEGIES.find((s) => indexes.has(s.index));
+	const strategy = STRATEGIES.find((s) => s.indexes.some((index) => indexes.has(index)));
 	if (!strategy) throw new NoRoundIndexError();
 
 	const [row] = await query(strategy.sql(tournament));
