@@ -5,7 +5,18 @@
 	import { scaleTime, scaleLinear, type ScaleTime, type ScaleLinear } from 'd3-scale';
 	import { line, curveMonotoneX } from 'd3-shape';
 	import type { ModelPerformance, ChartMetric, ModelSeries, ChartDataPoint } from '$lib/types.js';
-	import { SCORE_ALPHA_WEIGHT, SCORE_MPC_WEIGHT, computeScore } from '$lib/utils/scoring.js';
+	import {
+		SCORE_ALPHA_WEIGHT,
+		SCORE_MPC_WEIGHT,
+		SIGNALS_METRIC_SETS,
+		computeScore
+	} from '$lib/utils/scoring.js';
+
+	// Alpha/MPC labels for the score-formula controls below come from the shared
+	// alpha_mpc metric set (scoring.ts) so they can't drift from the rankings
+	// page's own labels for the same pair.
+	const alphaMpcCorrLabel = SIGNALS_METRIC_SETS.alpha_mpc.corrLabel;
+	const alphaMpcMmcLabel = SIGNALS_METRIC_SETS.alpha_mpc.mmcLabel;
 
 	// Props
 	let {
@@ -813,7 +824,7 @@
 							? 'background-color: var(--retro-primary); color: white;'
 							: 'color: var(--retro-text-primary);'}
 					>
-						New (Alpha/MPC)
+						New ({alphaMpcCorrLabel}/{alphaMpcMmcLabel})
 					</button>
 				</div>
 
@@ -823,18 +834,18 @@
 						type="number"
 						step="0.1"
 						bind:value={scoreAlphaWeight}
-						aria-label="Alpha weight"
+						aria-label="{alphaMpcCorrLabel} weight"
 						class="retro-input w-16 rounded px-2 py-1 text-sm"
 					/>
-					<span class="text-sm retro-text-secondary">× Alpha +</span>
+					<span class="text-sm retro-text-secondary">× {alphaMpcCorrLabel} +</span>
 					<input
 						type="number"
 						step="0.1"
 						bind:value={scoreMpcWeight}
-						aria-label="MPC weight"
+						aria-label="{alphaMpcMmcLabel} weight"
 						class="retro-input w-16 rounded px-2 py-1 text-sm"
 					/>
-					<span class="text-sm retro-text-secondary">× MPC</span>
+					<span class="text-sm retro-text-secondary">× {alphaMpcMmcLabel}</span>
 				</div>
 			</div>
 		</div>

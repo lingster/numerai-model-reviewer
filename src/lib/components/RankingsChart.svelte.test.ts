@@ -34,4 +34,29 @@ describe('RankingsChart', () => {
 		await expect.element(page.getByText('model_a')).toBeInTheDocument();
 		await expect.element(page.getByText('model_b')).toBeInTheDocument();
 	});
+
+	// Competitor toggle (B) "vs Both": a model with two histories (one per
+	// fieldScope) must render as two separately-labelled legend entries rather
+	// than colliding on modelId.
+	it('labels a dual-scope model with its field in the legend', async () => {
+		const dualScope: ModelRankingHistory[] = [
+			{
+				modelId: 'a',
+				modelName: 'model_a',
+				username: 'alice',
+				fieldScope: 'staked',
+				rankings: [{ roundNumber: 1179, rank: 5, corr: 0.02, mmc: 0.01, customScore: 0.02, totalModels: 100 }]
+			},
+			{
+				modelId: 'a',
+				modelName: 'model_a',
+				username: 'alice',
+				fieldScope: 'all',
+				rankings: [{ roundNumber: 1179, rank: 20, corr: 0.02, mmc: 0.01, customScore: 0.02, totalModels: 400 }]
+			}
+		];
+		render(RankingsChart, { rankingHistories: dualScope, startRound: 1179, endRound: 1179 });
+		await expect.element(page.getByText('model_a (Staked field)')).toBeInTheDocument();
+		await expect.element(page.getByText('model_a (All models)')).toBeInTheDocument();
+	});
 });

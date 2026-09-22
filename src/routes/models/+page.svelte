@@ -4,7 +4,7 @@
 	import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
 	import MetricBarComparison from '$lib/components/MetricBarComparison.svelte';
 	import { NumeraiAPI } from '$lib/numerai-api.js';
-	import { computeScore } from '$lib/utils/scoring.js';
+	import { computeScore, formatMetricSetFormula, SIGNALS_METRIC_SETS } from '$lib/utils/scoring.js';
 	import { config } from '$lib/config.js';
 	import type { NumeraiUser, NumeraiModel, ModelPerformance, RoundPerformance, SavedChart } from '$lib/types.js';
 	import {
@@ -572,7 +572,7 @@
 				: 'CORR'
 	);
 	const legacyMmcLabel = $derived(
-		selectedTournament === TOURNAMENTS.SIGNALS ? 'MPC' : 'MMC'
+		selectedTournament === TOURNAMENTS.SIGNALS ? SIGNALS_METRIC_SETS.alpha_mpc.mmcLabel : 'MMC'
 	);
 
 	// Sort model performance by correlation (best performing first) within date range
@@ -1159,7 +1159,7 @@
 							negativeClass="bg-[var(--retro-accent)]"
 						/>
 						<MetricBarComparison
-							label="Score Comparison (0.3·Alpha + 0.8·MPC)"
+							label={`Score Comparison (${formatMetricSetFormula('alpha_mpc')})`}
 							entries={metricEntries((r) => computeScore(r?.alpha, r?.mpc))}
 							positiveClass="bg-[var(--retro-success)]"
 							negativeClass="bg-[var(--retro-error)]"
@@ -1241,7 +1241,7 @@
 							{#if isSignals}
 								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
 								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
-								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="0.3·Alpha + 0.8·MPC">Score</th>
+								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title={formatMetricSetFormula('alpha_mpc')}>Score</th>
 							{/if}
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">Corr20 {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">MMC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>

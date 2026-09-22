@@ -1,6 +1,7 @@
 /**
  * TypeScript types for Numerai Model Comparison app
  */
+import type { FieldScope } from '$lib/utils/field-scope.js';
 
 /**
  * Represents a Numerai user
@@ -168,6 +169,15 @@ export interface ModelRankingHistory {
 	modelId: string;
 	modelName: string;
 	username: string;
+	/**
+	 * Which competitor field this history was ranked against — 'staked' (what
+	 * payouts use) or 'all' (every model that scored). Optional (defaults to
+	 * 'staked') so existing fixtures/tests that predate the fieldScope toggle
+	 * keep compiling; set explicitly by calculateModelRankings. When the "vs
+	 * Both" toggle is active, a model produces two histories — one per scope —
+	 * so the chart can render both fields' rank lines.
+	 */
+	fieldScope?: FieldScope;
 	rankings: Array<{
 		roundNumber: number;
 		rank: number | null;
@@ -180,6 +190,14 @@ export interface ModelRankingHistory {
 		mmc: number | null;
 		customScore: number | null;
 		totalModels: number;
+		/**
+		 * Whether the model was staked for this round (what payouts use). null
+		 * means no data — predates staked-tracking, or the round is Crypto's
+		 * (tournament 12), whose stored stake is the model's CURRENT stake, not
+		 * a per-round fact, so the Worker always returns null there. Optional so
+		 * fixtures/tests written before this field existed keep compiling.
+		 */
+		staked?: boolean | null;
 	}>;
 }
 

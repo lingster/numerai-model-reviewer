@@ -20,7 +20,11 @@ import {
 	DEFAULT_CRYPTO_SCORE_FORMULA,
 	getDefaultFormulaForTournament,
 	hasRankableData,
-	latestRoundWithData
+	latestRoundWithData,
+	buildModelRankCacheKey,
+	buildTopModelsCacheKey,
+	buildRankingsResult,
+	SIGNALS_TOURNAMENT
 } from './rankings-api.js';
 import type { ModelRankingHistory, ScoreFormula } from './types.js';
 
@@ -161,6 +165,102 @@ describe('getDefaultFormulaForTournament - unit tests', () => {
 		const a = getDefaultFormulaForTournament(12);
 		const b = getDefaultFormulaForTournament(12);
 		expect(a).not.toBe(b);
+	});
+
+	it("returns the neutral Signals default (0.5*ncorr + 2*nmmc) when metricSet='neutral'", () => {
+		expect(getDefaultFormulaForTournament(SIGNALS_TOURNAMENT, 'neutral')).toEqual({
+			corrWeight: 0.5,
+			mmcWeight: 2,
+			tcWeight: 0
+		});
+	});
+
+	it("ignores metricSet for non-Signals tournaments", () => {
+		expect(getDefaultFormulaForTournament(8, 'neutral')).toEqual(DEFAULT_SCORE_FORMULA);
+		expect(getDefaultFormulaForTournament(12, 'neutral')).toEqual(DEFAULT_CRYPTO_SCORE_FORMULA);
+	});
+});
+
+describe('buildModelRankCacheKey - unit tests', () => {
+	const formula: ScoreFormula = { corrWeight: 0.75, mmcWeight: 2.25, tcWeight: 0 };
+
+	it('is stable for identical inputs', () => {
+		const a = buildModelRankCacheKey('Model_A', 1000, 1010, formula, 8, 1, 'staked', 'alpha_mpc');
+		const b = buildModelRankCacheKey('Model_A', 1000, 1010, formula, 8, 1, 'staked', 'alpha_mpc');
+		expect(a).toBe(b);
+	});
+
+	it('is case-insensitive on model name (matches the fetch cache-key convention)', () => {
+		const lower = buildModelRankCacheKey('model_a', 1000, 1010, formula, 8, 1, 'staked', 'alpha_mpc');
+		const upper = buildModelRankCacheKey('MODEL_A', 1000, 1010, formula, 8, 1, 'staked', 'alpha_mpc');
+		expect(lower).toBe(upper);
+	});
+
+	it('differs by fieldScope so toggling staked/all never serves stale data', () => {
+		const staked = buildModelRankCacheKey('model_a', 1000, 1010, formula, 8, 1, 'staked', 'alpha_mpc');
+		const all = buildModelRankCacheKey('model_a', 1000, 1010, formula, 8, 1, 'all', 'alpha_mpc');
+		expect(staked).not.toBe(all);
+	});
+
+	it('differs by metricSet so toggling alpha_mpc/neutral never serves stale data', () => {
+		const alphaMpc = buildModelRankCacheKey('model_a', 1000, 1010, formula, 11, 1, 'staked', 'alpha_mpc');
+		const neutral = buildModelRankCacheKey('model_a', 1000, 1010, formula, 11, 1, 'staked', 'neutral');
+		expect(alphaMpc).not.toBe(neutral);
+	});
+});
+
+describe('buildTopModelsCacheKey - unit tests', () => {
+	const formula: ScoreFormula = { corrWeight: 0.75, mmcWeight: 2.25, tcWeight: 0 };
+
+	it('differs by fieldScope', () => {
+		const staked = buildTopModelsCacheKey(1000, formula, 8, 0, 1, 'staked', 'alpha_mpc');
+		const all = buildTopModelsCacheKey(1000, formula, 8, 0, 1, 'all', 'alpha_mpc');
+		expect(staked).not.toBe(all);
+	});
+
+	it('differs by metricSet', () => {
+		const alphaMpc = buildTopModelsCacheKey(1000, formula, 11, 0, 1, 'staked', 'alpha_mpc');
+		const neutral = buildTopModelsCacheKey(1000, formula, 11, 0, 1, 'staked', 'neutral');
+		expect(alphaMpc).not.toBe(neutral);
+	});
+});
+
+describe('buildRankingsResult - unit tests', () => {
+	const ranked = (modelId: string, modelName: string): ModelRankingHistory => ({
+		modelId,
+		modelName,
+		username: `${modelName}_owner`,
+		rankings: [{ roundNumber: 1000, rank: 5, corr: 0.01, mmc: 0.02, customScore: 0.03, totalModels: 50 }]
+	});
+	const unranked = (modelId: string, modelName: string): ModelRankingHistory => ({
+		modelId,
+		modelName,
+		username: `${modelName}_owner`,
+		rankings: [{ roundNumber: 1000, rank: null, corr: null, mmc: null, customScore: null, totalModels: 0 }]
+	});
+
+	it('tags each ranked history with the field scope it was fetched under', () => {
+		const result = buildRankingsResult([
+			{ scope: 'staked', history: ranked('a', 'model_a') },
+			{ scope: 'all', history: ranked('a', 'model_a') }
+		]);
+		expect(result.histories).toHaveLength(2);
+		expect(result.histories.map((h) => h.fieldScope).sort()).toEqual(['all', 'staked']);
+		expect(result.unranked).toHaveLength(0);
+	});
+
+	it('single-scope mode still tags the one history it returns', () => {
+		const result = buildRankingsResult([{ scope: 'staked', history: ranked('a', 'model_a') }]);
+		expect(result.histories).toEqual([{ ...ranked('a', 'model_a'), fieldScope: 'staked' }]);
+	});
+
+	it('reports an unranked model only once even when both scopes fail to rank it', () => {
+		const result = buildRankingsResult([
+			{ scope: 'staked', history: unranked('b', 'model_b') },
+			{ scope: 'all', history: unranked('b', 'model_b') }
+		]);
+		expect(result.histories).toHaveLength(0);
+		expect(result.unranked).toEqual([{ modelName: 'model_b', username: 'model_b_owner', reason: 'no-data' }]);
 	});
 });
 
