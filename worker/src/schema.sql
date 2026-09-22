@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS model_performances (
   -- corr/mmc so a single tournament=11 row carries both regimes.
   alpha REAL,
   mpc REAL,
+  -- Signals' neutral pair (neutral correlation / neutral contribution), which
+  -- Numerai pays on from rounds opening 2026-09-25. Same source, same rounds as
+  -- alpha/mpc; see ranking.ts MetricSet. Added to existing DBs by migration 0005.
+  neutral_corr REAL,
+  neutral_mmc REAL,
   stake_value REAL,
   tournament INTEGER NOT NULL DEFAULT 8,
   updated_at INTEGER NOT NULL,
@@ -83,10 +88,13 @@ CREATE TABLE IF NOT EXISTS round_field_metrics (
   tournament INTEGER NOT NULL,
   round_number INTEGER NOT NULL,
   field_scope TEXT NOT NULL DEFAULT 'staked',
+  -- metric_set: which metric pair the field holds — 'alpha_mpc' or, for Signals,
+  -- 'neutral' (see ranking.ts MetricSet).
+  metric_set TEXT NOT NULL DEFAULT 'alpha_mpc',
   corr_values TEXT NOT NULL,
   mmc_values TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (tournament, round_number, field_scope)
+  PRIMARY KEY (tournament, round_number, field_scope, metric_set)
 );
 
 CREATE TABLE IF NOT EXISTS tournament_coverage (

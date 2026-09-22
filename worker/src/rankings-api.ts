@@ -32,11 +32,13 @@ import {
 } from './perf-queries';
 import { computeTrailingAverages } from './windowed-metrics';
 import {
+	asMetricSet,
 	pickMetrics,
 	rankAmong,
 	rankSortedScores,
 	scoreFromMetrics,
 	TRIPLE_KEYS,
+	type MetricSet,
 	type MetricTriple,
 	type ScoreFormula
 } from './ranking';
@@ -94,14 +96,15 @@ export type { MetricTriple, ScoreFormula } from './ranking';
 export function buildWindowedMetrics(
 	fields: Map<number, RoundPerfRow[]>,
 	tournament: number,
-	window: number
+	window: number,
+	metricSet: MetricSet = 'alpha_mpc'
 ): Map<string, Map<number, MetricTriple>> {
 	// Group each model's per-round metrics together.
 	const perModel = new Map<string, Array<{ round: number } & MetricTriple>>();
 	for (const [round, rows] of fields) {
 		for (const row of rows) {
 			const key = row.model_name.toLowerCase();
-			const entry = { round, ...pickMetrics(row, tournament) };
+			const entry = { round, ...pickMetrics(row, tournament, metricSet) };
 			const list = perModel.get(key);
 			if (list) list.push(entry);
 			else perModel.set(key, [entry]);
@@ -231,7 +234,8 @@ function rankRound(
 	field: RoundPerfRow[],
 	targetModelLower: string,
 	tournament: number,
-	formula: ScoreFormula
+	formula: ScoreFormula,
+	metricSet: MetricSet = 'alpha_mpc'
 ): ModelRankRoundResult | null {
 	const scored: Array<{
 		modelName: string;
@@ -243,7 +247,7 @@ function rankRound(
 	const staked = ownRow ? wasStaked(ownRow, tournament) : null;
 
 	for (const row of field) {
-		const metrics = pickMetrics(row, tournament);
+		const metrics = pickMetrics(row, tournament, metricSet);
 		const score = scoreFromMetrics(metrics, formula);
 		if (score === null) continue;
 		scored.push({
@@ -396,12 +400,14 @@ async function rankFromStoredFields(
 		tournament: number;
 		formula: ScoreFormula;
 		fieldScope: FieldScope;
+		metricSet: MetricSet;
 		username?: string;
 		modelId?: string;
 	},
 	fetchOwnPerformance: OwnPerformanceFetcher
 ): Promise<ModelRankRoundResult[] | null> {
-	const { modelName, startRound, endRound, tournament, formula, fieldScope, username, modelId } = params;
+	const { modelName, startRound, endRound, tournament, formula, fieldScope, metricSet, username, modelId } =
+		params;
 
 	let fields: Awaited<ReturnType<typeof readStoredFields>>;
 	let own: Map<number, Awaited<ReturnType<typeof selectModelRounds>>[number]>;
@@ -417,7 +423,7 @@ async function rankFromStoredFields(
 		if (from > to) return null;
 
 		const [storedFields, ownRows] = await Promise.all([
-			readStoredFields(env.DB, tournament, from, to, fieldScope),
+			readStoredFields(env.DB, tournament, from, to, fieldScope, metricSet),
 			// Unstaked rows included: they rank the model just as well, and save a
 			// live fetch. Their stake decides only whether the field already counts it.
 			selectModelRounds(env.DB, modelName, tournament, from, to, { includeUnstaked: true })
@@ -479,7 +485,7 @@ async function rankFromStoredFields(
 			continue;
 		}
 
-		const metrics = pickMetrics(ownRow, tournament);
+		const metrics = pickMetrics(ownRow, tournament, metricSet);
 		const placed = rankInField(field, metrics, formula);
 		// A model the stored field does not contain (unstaked, or absent) is ranked
 		// against it as an extra competitor, exactly as the live path's injection
@@ -525,6 +531,8 @@ export async function getModelRank(
 		window?: number;
 		/** Which competitors to rank against: the staked field, or every scorer. */
 		fieldScope?: FieldScope;
+		/** Which Signals metric pair to score on: alpha/mpc, or the neutral pair. */
+		metricSet?: MetricSet;
 		/** Owner/id hints so the unstaked-model fallback can fetch scores directly. */
 		username?: string;
 		modelId?: string;
@@ -533,6 +541,7 @@ export async function getModelRank(
 ): Promise<ModelRankResponse> {
 	const { modelName, startRound, endRound, tournament, formula, username, modelId } = params;
 	const fieldScope = asFieldScope(params.fieldScope);
+	const metricSet = asMetricSet(params.metricSet);
 	const window = Math.max(1, Math.floor(params.window ?? 1));
 	const targetLower = modelName.toLowerCase();
 
@@ -562,6 +571,7 @@ export async function getModelRank(
 				tournament,
 				formula,
 				fieldScope,
+				metricSet,
 				username: meta?.username ?? username,
 				modelId: meta?.model_id ?? modelId
 			},
@@ -590,7 +600,7 @@ export async function getModelRank(
 		// Fetch back `window-1` extra rounds so the earliest target round still has
 		// a full trailing window; average each model's (already-fetched) metrics
 		// before ranking.
-		const windowed = buildWindowedMetrics(fields, tournament, window);
+		const windowed = buildWindowedMetrics(fields, tournament, window, metricSet);
 		for (let r = startRound; r <= endRound; r++) {
 			const field = fields.get(r) ?? [];
 			rounds.push(
@@ -602,7 +612,7 @@ export async function getModelRank(
 		// front avoid a per-round N+1 that made "Last 500"/"All" take tens of seconds).
 		for (let r = startRound; r <= endRound; r++) {
 			const field = fields.get(r) ?? [];
-			const ranked = rankRound(field, targetLower, tournament, formula);
+			const ranked = rankRound(field, targetLower, tournament, formula, metricSet);
 			rounds.push(ranked ? { ...ranked, roundNumber: r } : empty(r));
 		}
 	}

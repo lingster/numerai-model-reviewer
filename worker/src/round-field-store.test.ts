@@ -98,7 +98,7 @@ describe('stored fields against a real D1', () => {
 		const { result: rows } = await d1.measure((db) => selectRoundField(db, 1300, 8));
 		const field = fieldFromRows(rows, 8);
 		const { cost } = await d1.measure((db) =>
-			db.prepare(upsertRoundFieldSql(8, 1300, 'staked', encodeFieldMetrics(field), 1_700_000_000)).run()
+			db.prepare(upsertRoundFieldSql(8, 1300, 'staked', 'alpha_mpc', encodeFieldMetrics(field), 1_700_000_000)).run()
 		);
 		// The table row plus its primary key index.
 		expect(cost.rowsWritten).toBeLessThanOrEqual(2);
@@ -108,7 +108,7 @@ describe('stored fields against a real D1', () => {
 		for (const round of [1298, 1299]) {
 			const { result: rows } = await d1.measure((db) => selectRoundField(db, round, 8));
 			await d1.measure((db) =>
-				db.prepare(upsertRoundFieldSql(8, round, 'staked', encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
+				db.prepare(upsertRoundFieldSql(8, round, 'staked', 'alpha_mpc', encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
 			);
 		}
 
@@ -130,7 +130,7 @@ describe('stored fields against a real D1', () => {
 		for (const scope of ['staked', 'all'] as const) {
 			const { result: rows } = await d1.measure((db) => selectRoundField(db, round, 8, scope));
 			await d1.measure((db) =>
-				db.prepare(upsertRoundFieldSql(8, round, scope, encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
+				db.prepare(upsertRoundFieldSql(8, round, scope, 'alpha_mpc', encodeFieldMetrics(fieldFromRows(rows, 8)), 0)).run()
 			);
 		}
 
@@ -178,7 +178,7 @@ describe('stored fields against a real D1', () => {
 		const { result: rows } = await d1.measure((db) => selectRoundField(db, 1299, 11));
 		const direct = decodeFieldMetrics(encodeFieldMetrics(fieldFromRows(rows, 11)));
 		await d1.measure((db) =>
-			db.prepare(upsertRoundFieldSql(11, 1299, 'staked', encodeFieldMetrics(fieldFromRows(rows, 11)), 0)).run()
+			db.prepare(upsertRoundFieldSql(11, 1299, 'staked', 'alpha_mpc', encodeFieldMetrics(fieldFromRows(rows, 11)), 0)).run()
 		);
 		const stored = (await d1.measure((db) => readStoredFields(db, 11, 1299, 1299))).result.get(1299)!;
 

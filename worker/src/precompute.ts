@@ -19,6 +19,7 @@
 import { readMaxRound } from './refresh-floor';
 import { refreshCoverage, type RoundSpan } from './tournament-coverage';
 import { encodeFieldMetrics, FIELD_SCOPES, type FieldScope } from './round-field';
+import { METRIC_SETS, type MetricSet } from './ranking';
 import { fieldFromRows, readStoredRounds, roundsToBackfill, upsertRoundFieldSql } from './round-field-store';
 import type { D1Query } from './d1-query';
 import type { PrecomputeTarget, SqlWriter } from './precompute-target';
@@ -508,6 +509,11 @@ export type PerformanceRound = {
   corr: number | null;
   mmc: number | null;
   tc: number | null;
+  // Signals' neutral pair (neutral correlation / neutral contribution), which
+  // Numerai pays on from rounds opening 2026-09-25. Same call as alpha/mpc, and
+  // published for the same rounds. Null for Classic (8) / Crypto (12).
+  neutralCorr?: number | null;
+  neutralMmc?: number | null;
   // Signals "new scoring" metrics, sourced from v2RoundModelPerformances.submissionScores.
   // Null for Classic (8) / Crypto (12) rows.
   alpha: number | null;
@@ -907,15 +913,9 @@ async function augmentWithAlphaMpc(
         { modelId: entry.modelId, tournament, lastNRounds }
       );
 
-      const byRound = new Map<number, { alpha: number | null; mpc: number | null }>();
+      const byRound = new Map<number, SignalsScores>();
       for (const r of result.v2RoundModelPerformances ?? []) {
-        let alpha: number | null = null;
-        let mpc: number | null = null;
-        for (const s of r.submissionScores ?? []) {
-          if (s.displayName === 'alpha') alpha = s.value;
-          if (s.displayName === 'mpc') mpc = s.value;
-        }
-        byRound.set(r.roundNumber, { alpha, mpc });
+        byRound.set(r.roundNumber, extractSignalsScores(r.submissionScores));
       }
 
       for (const round of entry.rounds) {
@@ -923,6 +923,8 @@ async function augmentWithAlphaMpc(
         if (scores) {
           round.alpha = scores.alpha;
           round.mpc = scores.mpc;
+          round.neutralCorr = scores.neutralCorr;
+          round.neutralMmc = scores.neutralMmc;
         }
       }
     } catch (e) {
@@ -935,6 +937,31 @@ async function augmentWithAlphaMpc(
       console.log(`  Augmented alpha/mpc for ${processed}/${active.length} models...`);
     }
   });
+}
+
+export interface SignalsScores {
+  alpha: number | null;
+  mpc: number | null;
+  neutralCorr: number | null;
+  neutralMmc: number | null;
+}
+
+/**
+ * Both Signals metric pairs from one round's submissionScores: alpha/mpc (what
+ * payouts use up to ~round 1362) and neutral_corr/neutral_mmc (what they use
+ * from rounds opening 2026-09-25). Numerai publishes both for the same rounds.
+ */
+export function extractSignalsScores(
+  submissionScores: Array<{ displayName: string; value: number | null }> | null
+): SignalsScores {
+  const scores: SignalsScores = { alpha: null, mpc: null, neutralCorr: null, neutralMmc: null };
+  for (const s of submissionScores ?? []) {
+    if (s.displayName === 'alpha') scores.alpha = s.value;
+    else if (s.displayName === 'mpc') scores.mpc = s.value;
+    else if (s.displayName === 'neutral_corr') scores.neutralCorr = s.value;
+    else if (s.displayName === 'neutral_mmc') scores.neutralMmc = s.value;
+  }
+  return scores;
 }
 
 /**
@@ -1066,6 +1093,16 @@ function roundsFromMemory(
   return byRound;
 }
 
+/**
+ * The stored fields a tournament needs: every scope, times every metric set it
+ * has. Only Signals has a second pair (alpha/mpc and the neutral scores), so
+ * Classic and Crypto store one field per scope.
+ */
+function fieldVariants(tournament: number): Array<{ scope: FieldScope; metricSet: MetricSet }> {
+  const metricSets = tournament === SIGNALS_TOURNAMENT ? METRIC_SETS : (['alpha_mpc'] as const);
+  return FIELD_SCOPES.flatMap((scope) => metricSets.map((metricSet) => ({ scope, metricSet })));
+}
+
 /** Rounds read back from D1, for backfilling fields we did not just fetch. */
 async function readFieldRowsFromD1(
   d1Query: D1Query,
@@ -1082,7 +1119,7 @@ async function readFieldRowsFromD1(
   for (let i = 0; i < sorted.length; i += CHUNK) {
     const chunk = sorted.slice(i, i + CHUNK);
     const rows = await d1Query(
-      `SELECT round_number, corr, mmc, tc, alpha, mpc, stake_value FROM model_performances
+      `SELECT round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, stake_value FROM model_performances
        WHERE tournament = ${tournament} AND round_number IN (${chunk.join(', ')})`
     );
     for (const row of rows) {
@@ -1094,6 +1131,8 @@ async function readFieldRowsFromD1(
         tc: toNumberOrNull(row.tc),
         alpha: toNumberOrNull(row.alpha),
         mpc: toNumberOrNull(row.mpc),
+        neutralCorr: toNumberOrNull(row.neutral_corr),
+        neutralMmc: toNumberOrNull(row.neutral_mmc),
         stakeValue: toNumberOrNull(row.stake_value)
       };
       const list = byRound.get(roundNumber);
@@ -1132,13 +1171,14 @@ async function storeRoundFields(
 ): Promise<{ fresh: number; backfilled: number }> {
   const fresh = roundsFromMemory(performanceData, minRound);
 
-  // A round counts as stored only once every scope has its field, so adding a
-  // scope backfills it over the existing history.
-  const storedPerScope = await Promise.all(
-    FIELD_SCOPES.map((scope) => readStoredRounds(d1Query, tournament, scope))
+  // A round counts as stored only once every variant has its field, so adding a
+  // scope or a metric set backfills it over the existing history.
+  const variants = fieldVariants(tournament);
+  const storedPerVariant = await Promise.all(
+    variants.map(({ scope, metricSet }) => readStoredRounds(d1Query, tournament, scope, metricSet))
   );
   const alreadyStored = new Set(
-    [...storedPerScope[0]].filter((round) => storedPerScope.every((stored) => stored.has(round)))
+    [...storedPerVariant[0]].filter((round) => storedPerVariant.every((stored) => stored.has(round)))
   );
   const missing = roundsToBackfill(coverage, new Set([...alreadyStored, ...fresh.keys()]), backfillLimit);
   const backfilled = await readFieldRowsFromD1(d1Query, tournament, missing);
@@ -1149,9 +1189,9 @@ async function storeRoundFields(
   // failing a run whose performance data stored fine.
   const write = async (round: number, rows: Array<{ round: PerformanceRound }>): Promise<boolean> => {
     try {
-      for (const scope of FIELD_SCOPES) {
-        const field = fieldFromRows(fieldRowsInScope(rows, tournament, scope), tournament);
-        await d1Query(upsertRoundFieldSql(tournament, round, scope, encodeFieldMetrics(field), now));
+      for (const { scope, metricSet } of variants) {
+        const field = fieldFromRows(fieldRowsInScope(rows, tournament, scope), tournament, metricSet);
+        await d1Query(upsertRoundFieldSql(tournament, round, scope, metricSet, encodeFieldMetrics(field), now));
       }
       return true;
     } catch (error) {
@@ -1292,9 +1332,11 @@ async function storePerformances(
       const tc = round.tc !== null ? round.tc : 'NULL';
       const alpha = round.alpha !== null ? round.alpha : 'NULL';
       const mpc = round.mpc !== null ? round.mpc : 'NULL';
+      const neutralCorr = round.neutralCorr ?? 'NULL';
+      const neutralMmc = round.neutralMmc ?? 'NULL';
       const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
       buffer.push(
-        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
+        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${neutralCorr}, ${neutralMmc}, ${stake}, ${tournament}, ${now});`
       );
       if (buffer.length >= BATCH_SIZE) await flush();
     }

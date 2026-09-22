@@ -10,7 +10,7 @@
 
 import { d1Retry } from './d1-retry';
 import type { D1Query } from './d1-query';
-import { pickMetrics } from './ranking';
+import { asMetricSet, pickMetrics, type MetricSet } from './ranking';
 import type { RoundPerfRow } from './perf-queries';
 import { assertTournamentId } from './perf-queries';
 import {
@@ -31,11 +31,15 @@ type FieldRow = Pick<RoundPerfRow, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc'>;
  * scored on alpha/mpc). Rows must already be the staked field — the same set
  * the live ranking path selects — since that is who a model is ranked against.
  */
-export function fieldFromRows(rows: ReadonlyArray<FieldRow>, tournament: number): FieldMetrics {
+export function fieldFromRows(
+	rows: ReadonlyArray<FieldRow>,
+	tournament: number,
+	metricSet: MetricSet = 'alpha_mpc'
+): FieldMetrics {
 	const corr: Array<number | null> = [];
 	const mmc: Array<number | null> = [];
 	for (const row of rows) {
-		const metrics = pickMetrics(row as RoundPerfRow, tournament);
+		const metrics = pickMetrics(row as RoundPerfRow, tournament, metricSet);
 		corr.push(metrics.corr);
 		mmc.push(metrics.mmc);
 	}
@@ -47,6 +51,7 @@ export function upsertRoundFieldSql(
 	tournament: number,
 	round: number,
 	scope: FieldScope,
+	metricSet: MetricSet,
 	encoded: EncodedFieldMetrics,
 	nowSeconds: number
 ): string {
@@ -54,20 +59,22 @@ export function upsertRoundFieldSql(
 	if (!Number.isSafeInteger(round)) {
 		throw new RangeError(`round must be an integer, got ${round}`);
 	}
-	return `INSERT OR REPLACE INTO round_field_metrics (tournament, round_number, field_scope, corr_values, mmc_values, updated_at)
-	        VALUES (${tournament}, ${round}, '${asFieldScope(scope)}', '${encoded.corr}', '${encoded.mmc}', ${Math.floor(nowSeconds)})`;
+	return `INSERT OR REPLACE INTO round_field_metrics (tournament, round_number, field_scope, metric_set, corr_values, mmc_values, updated_at)
+	        VALUES (${tournament}, ${round}, '${asFieldScope(scope)}', '${asMetricSet(metricSet)}', '${encoded.corr}', '${encoded.mmc}', ${Math.floor(nowSeconds)})`;
 }
 
 /** Every round that already has a stored field, so the backfill can skip them. */
 export async function readStoredRounds(
 	query: D1Query,
 	tournament: number,
-	scope: FieldScope = 'staked'
+	scope: FieldScope = 'staked',
+	metricSet: MetricSet = 'alpha_mpc'
 ): Promise<Set<number>> {
 	assertTournamentId(tournament);
 	const rows = await query(
 		`SELECT round_number FROM round_field_metrics
-		  WHERE tournament = ${tournament} AND field_scope = '${asFieldScope(scope)}'`
+		  WHERE tournament = ${tournament} AND field_scope = '${asFieldScope(scope)}'
+		    AND metric_set = '${asMetricSet(metricSet)}'`
 	);
 	const rounds = new Set<number>();
 	for (const row of rows) {
@@ -82,16 +89,18 @@ export async function readStoredFields(
 	tournament: number,
 	fromRound: number,
 	toRound: number,
-	scope: FieldScope = 'staked'
+	scope: FieldScope = 'staked',
+	metricSet: MetricSet = 'alpha_mpc'
 ): Promise<Map<number, DecodedFieldMetrics>> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT round_number, corr_values, mmc_values
 				   FROM round_field_metrics
-				  WHERE tournament = ? AND round_number BETWEEN ? AND ? AND field_scope = ?`
+				  WHERE tournament = ? AND round_number BETWEEN ? AND ? AND field_scope = ?
+				    AND metric_set = ?`
 			)
-			.bind(tournament, fromRound, toRound, asFieldScope(scope))
+			.bind(tournament, fromRound, toRound, asFieldScope(scope), asMetricSet(metricSet))
 			.all<{ round_number: number; corr_values: string; mmc_values: string }>()
 	);
 

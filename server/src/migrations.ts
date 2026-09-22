@@ -40,6 +40,77 @@ export function applySchema(db: SqliteD1, schemaPath: string): void {
 	}
 }
 
+/** Split a CREATE TABLE body on its top-level commas, ignoring nested parens. */
+function splitDefinitions(body: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let current = '';
+	for (const character of body) {
+		if (character === '(') depth++;
+		else if (character === ')') depth--;
+		if (character === ',' && depth === 0) {
+			parts.push(current);
+			current = '';
+			continue;
+		}
+		current += character;
+	}
+	parts.push(current);
+	return parts;
+}
+
+/**
+ * Column definitions in each `CREATE TABLE` of a schema file, by table name.
+ * Deliberately simple: schema.sql is ours, and table-level constraints are
+ * recognised by their leading keyword rather than parsed.
+ */
+function declaredColumns(schemaSql: string): Map<string, Map<string, string>> {
+	const withoutComments = schemaSql.replace(/--[^\n]*/g, '');
+	const tables = new Map<string, Map<string, string>>();
+	const CREATE = /CREATE TABLE(?: IF NOT EXISTS)? ([A-Za-z_][A-Za-z0-9_]*)\s*\(([\s\S]*?)\)\s*;/gi;
+	for (const [, table, body] of withoutComments.matchAll(CREATE)) {
+		const columns = new Map<string, string>();
+		for (const definition of splitDefinitions(body)) {
+			const [name, ...rest] = definition.trim().split(/\s+/);
+			if (!name || rest.length === 0) continue;
+			if (/^(PRIMARY|FOREIGN|UNIQUE|CHECK|CONSTRAINT)$/i.test(name)) continue;
+			columns.set(name, rest.join(' '));
+		}
+		tables.set(table, columns);
+	}
+	return tables;
+}
+
+/**
+ * Add columns that schema.sql declares but an existing table lacks, and return
+ * their `table.column` names.
+ *
+ * `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists, and
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`, so a new column could otherwise
+ * only reach an existing database through a migration — which then fails on a
+ * fresh one, where schema.sql has already created it. Doing it here keeps
+ * schema.sql the single description of the shape for both deployments.
+ *
+ * Additive only: nothing is dropped, retyped or reordered. Those belong in
+ * migrations/, where they are applied once and reviewed.
+ */
+export function syncSchemaColumns(db: SqliteD1, schemaPath: string): string[] {
+	const added: string[] = [];
+	for (const [table, columns] of declaredColumns(readFileSync(schemaPath, 'utf-8'))) {
+		const existing = new Set(
+			db.selectSync<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).map((row) => row.name)
+		);
+		if (existing.size === 0) continue; // table does not exist yet; schema.sql creates it
+		for (const [name, definition] of columns) {
+			if (existing.has(name)) continue;
+			// A default that is not constant would need a table rebuild; keep it simple.
+			db.execSync(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition.replace(/PRIMARY KEY.*/i, '').trim()}`);
+			added.push(`${table}.${name}`);
+		}
+	}
+	return added;
+}
+
 /** Migration filenames in the order they must run. */
 function pending(db: SqliteD1, migrationsPath: string): string[] {
 	const applied = new Set(

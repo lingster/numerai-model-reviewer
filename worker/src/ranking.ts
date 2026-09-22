@@ -29,12 +29,37 @@ export interface MetricTriple {
 export const TRIPLE_KEYS = ['corr', 'mmc', 'tc'] as const satisfies readonly (keyof MetricTriple)[];
 
 /**
- * Pick the (corr-like, mmc-like) metric pair for the given tournament. Signals
- * is scored on alpha/mpc, which the worker reads into the same columns.
+ * Which pair of Signals metrics a ranking is scored on.
+ *
+ * `alpha_mpc` is what payouts use up to round ~1362; `neutral` is neutral
+ * correlation and neutral contribution, which Numerai pays on from rounds
+ * opening on or after 25 September 2026. Numerai publishes both for the same
+ * rounds, so either can rank any round. Meaningless for Classic and Crypto,
+ * which have one pair.
  */
-export function pickMetrics(row: RoundPerfRow, tournament: number): MetricTriple {
+export type MetricSet = 'alpha_mpc' | 'neutral';
+
+export const METRIC_SETS: readonly MetricSet[] = ['alpha_mpc', 'neutral'];
+
+/** `value` as a MetricSet, or the default — for request parameters. */
+export function asMetricSet(value: unknown, fallback: MetricSet = 'alpha_mpc'): MetricSet {
+	return METRIC_SETS.includes(value as MetricSet) ? (value as MetricSet) : fallback;
+}
+
+/**
+ * Pick the (corr-like, mmc-like) metric pair for the given tournament. Signals
+ * is scored on alpha/mpc — or on the neutral pair — which the worker reads into
+ * the same corr/mmc slots.
+ */
+export function pickMetrics(
+	row: RoundPerfRow,
+	tournament: number,
+	metricSet: MetricSet = 'alpha_mpc'
+): MetricTriple {
 	if (tournament === SIGNALS_TOURNAMENT) {
-		return { corr: row.alpha, mmc: row.mpc, tc: null };
+		return metricSet === 'neutral'
+			? { corr: row.neutral_corr ?? null, mmc: row.neutral_mmc ?? null, tc: null }
+			: { corr: row.alpha, mmc: row.mpc, tc: null };
 	}
 	return { corr: row.corr, mmc: row.mmc, tc: row.tc };
 }

@@ -58,7 +58,7 @@ async function storeFields(slice: FleetSlice, from: number, to: number): Promise
 		await d1.measure((db) =>
 			db
 				.prepare(
-					upsertRoundFieldSql(slice.tournament, round, 'staked', encodeFieldMetrics(fieldFromRows(rows, slice.tournament)), 0)
+					upsertRoundFieldSql(slice.tournament, round, 'staked', 'alpha_mpc', encodeFieldMetrics(fieldFromRows(rows, slice.tournament)), 0)
 				)
 				.run()
 		);
@@ -230,6 +230,7 @@ describe('models that are not part of the stored field', () => {
 							CLASSIC.tournament,
 							round,
 							scope,
+							'alpha_mpc',
 							encodeFieldMetrics(fieldFromRows(rows, CLASSIC.tournament)),
 							0
 						)

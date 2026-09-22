@@ -10,13 +10,16 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteD1 } from './sqlite-d1.js';
-import { applyMigrations, applySchema } from './migrations.js';
+import { applyMigrations, applySchema, syncSchemaColumns } from './migrations.js';
 
 let directory: string;
 let migrationsPath: string;
 let db: SqliteD1;
 
 const migration = (name: string, sql: string) => writeFileSync(join(migrationsPath, name), sql);
+
+const columns = (table: string): string[] =>
+	db.selectSync<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).map((row) => row.name);
 
 beforeEach(() => {
 	directory = mkdtempSync(join(tmpdir(), 'numerai-migrations-'));
@@ -72,6 +75,46 @@ describe('applyMigrations', () => {
 
 	it('tolerates a missing migrations directory', () => {
 		expect(applyMigrations(db, join(directory, 'absent'))).toEqual([]);
+	});
+});
+
+describe('syncSchemaColumns', () => {
+	it('adds columns schema.sql declares that the table is missing', () => {
+		// schema.sql is the shape both deployments get: D1 has it re-applied on
+		// every deploy, but CREATE TABLE IF NOT EXISTS cannot add a column to a
+		// table that already exists, and SQLite has no ADD COLUMN IF NOT EXISTS.
+		db.execSync('CREATE TABLE model_performances (model_name TEXT, round_number INTEGER)');
+		const schema = join(directory, 'schema.sql');
+		writeFileSync(
+			schema,
+			`CREATE TABLE IF NOT EXISTS model_performances (
+			   model_name TEXT NOT NULL,
+			   round_number INTEGER NOT NULL,
+			   neutral_corr REAL,
+			   neutral_mmc REAL
+			 );`
+		);
+
+		expect(syncSchemaColumns(db, schema)).toEqual(['model_performances.neutral_corr', 'model_performances.neutral_mmc']);
+		expect(columns('model_performances')).toEqual(['model_name', 'round_number', 'neutral_corr', 'neutral_mmc']);
+	});
+
+	it('is a no-op on the second run', () => {
+		db.execSync('CREATE TABLE t (a TEXT)');
+		const schema = join(directory, 'schema.sql');
+		writeFileSync(schema, 'CREATE TABLE IF NOT EXISTS t (a TEXT, b REAL);');
+
+		expect(syncSchemaColumns(db, schema)).toEqual(['t.b']);
+		expect(syncSchemaColumns(db, schema)).toEqual([]);
+	});
+
+	it('leaves a table schema.sql does not mention alone', () => {
+		db.execSync('CREATE TABLE other (a TEXT)');
+		const schema = join(directory, 'schema.sql');
+		writeFileSync(schema, 'CREATE TABLE IF NOT EXISTS t (a TEXT);');
+
+		expect(syncSchemaColumns(db, schema)).toEqual([]);
+		expect(columns('other')).toEqual(['a']);
 	});
 });
 
