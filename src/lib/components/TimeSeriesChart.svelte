@@ -5,6 +5,7 @@
 	import { scaleTime, scaleLinear, type ScaleTime, type ScaleLinear } from 'd3-scale';
 	import { line, curveMonotoneX } from 'd3-shape';
 	import type { ModelPerformance, ChartMetric, ModelSeries, ChartDataPoint } from '$lib/types.js';
+	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
 	import {
 		SCORE_ALPHA_WEIGHT,
 		SCORE_MPC_WEIGHT,
@@ -523,6 +524,22 @@
 		modelVisibility = newMap;
 	}
 
+	// Bulk visibility, shared with the rankings chart (series-visibility.ts) and
+	// converted here because this chart keeps its state in a Map. Fifty models is
+	// a normal selection; picking a few of them should not be fifty clicks.
+	const modelIds = $derived(chartSeries.map((s) => s.modelId));
+	const shownCount = $derived(chartSeries.filter((s) => s.visible).length);
+
+	function setAllModels(visible: boolean) {
+		modelVisibility = new Map(Object.entries(setAllVisible(modelIds, visible)));
+	}
+
+	function invertModels() {
+		modelVisibility = new Map(
+			Object.entries(invertVisibility(modelIds, Object.fromEntries(modelVisibility)))
+		);
+	}
+
 	// Format number for tooltip
 	function formatValue(value: number | null | undefined): string {
 		if (value === null || value === undefined || typeof value !== 'number' || isNaN(value)) return 'N/A';
@@ -853,7 +870,20 @@
 	<!-- Model Legend (Interactive) - Now on top -->
 	{#if chartSeries.length > 0}
 		<div class="mb-4">
-			<span class="text-sm font-medium retro-text-primary mr-2">Models:</span>
+			<span class="text-sm font-medium retro-text-primary mr-2">
+				Models ({shownCount}/{chartSeries.length}):
+			</span>
+			<div class="mr-2 inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)] align-middle">
+				{#each [{ label: 'All', run: () => setAllModels(true) }, { label: 'None', run: () => setAllModels(false) }, { label: 'Invert', run: invertModels }] as action}
+					<button
+						onclick={action.run}
+						class="px-2.5 py-1 text-xs font-medium transition-colors"
+						style="color: var(--retro-text-primary);"
+					>
+						{action.label}
+					</button>
+				{/each}
+			</div>
 			<div class="inline-flex flex-wrap gap-2">
 				{#each chartSeries as series}
 					<button
