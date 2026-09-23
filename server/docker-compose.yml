@@ -71,6 +71,9 @@ services:
       PRECOMPUTE_TOP_N: ${PRECOMPUTE_TOP_N:-1000000}
       PRECOMPUTE_BACKFILL_ROUNDS: ${PRECOMPUTE_BACKFILL_ROUNDS:-5000}
       PRECOMPUTE_REFRESH_OVERLAP: ${PRECOMPUTE_REFRESH_OVERLAP:-70}
+      # Classic's leaderboard is ~15k models, ~11k unstaked. Capturing them costs
+      # fetch time but means ranking one does not need a live Numerai call.
+      PRECOMPUTE_INCLUDE_UNSTAKED: ${PRECOMPUTE_INCLUDE_UNSTAKED:-1}
       BACKUP_DIR: /data/backups
       BACKUP_KEEP: ${BACKUP_KEEP:-7}
       # A full backfill of Classic holds millions of rows in memory.

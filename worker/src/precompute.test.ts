@@ -5,7 +5,29 @@
  * check), so only the pure functions run here — no API calls.
  */
 import { describe, it, expect } from 'vitest';
+
+describe('leaderboard entries kept for the fleet', () => {
+	// Classic's leaderboard lists ~15k models of which ~11k are unstaked. They
+	// were skipped to bound D1's row count; without that ceiling, skipping them
+	// means a rankings request for an unstaked Classic model has no stored rows
+	// and falls back to a live Numerai fetch (~1.2s per model, per request).
+	it('keeps staked models everywhere', () => {
+		expect(keepsLeaderboardEntry(10, 8, false)).toBe(true);
+		expect(keepsLeaderboardEntry(10, 11, false)).toBe(true);
+	});
+
+	it('skips unstaked Classic models unless asked for them', () => {
+		expect(keepsLeaderboardEntry(0, 8, false)).toBe(false);
+		expect(keepsLeaderboardEntry(0, 8, true)).toBe(true);
+	});
+
+	it('always keeps unstaked Signals and Crypto entries, as it always has', () => {
+		expect(keepsLeaderboardEntry(0, 11, false)).toBe(true);
+		expect(keepsLeaderboardEntry(0, 12, false)).toBe(true);
+	});
+});
 import {
+  keepsLeaderboardEntry,
   extractCryptoMetrics,
   computeMinRound,
   computeRoundsToFetch,

@@ -54,6 +54,8 @@ interface PrecomputeConfig {
   backfillRounds: number;
   /** Already-stored rounds to re-fetch and rewrite (see --refresh-overlap below). */
   refreshOverlapRounds: number;
+  /** Capture Classic models with no stake (see keepsLeaderboardEntry). */
+  includeUnstaked: boolean;
   batchSize: number;
   rateLimitMs: number;
   concurrency: number;
@@ -66,6 +68,9 @@ const DEFAULT_CONFIG: PrecomputeConfig = {
   // budget while covering ~2,900 rounds of history in about a month.
   backfillRounds: 100,
   refreshOverlapRounds: 0,
+  // Off by default: the D1 runs in GitHub Actions cannot afford ~11k more
+  // models. The self-hosted scheduler turns it on.
+  includeUnstaked: false,
   tournament: 8,
   topN: 10000,
   // Max batchSize is 3 — higher values exceed the Numerai API rate limit
@@ -105,6 +110,7 @@ function loadYamlConfig(): Partial<PrecomputeConfig> {
         topN: parsed.topN,
         backfillRounds: parsed.backfillRounds,
         refreshOverlapRounds: parsed.refreshOverlapRounds,
+        includeUnstaked: parsed.includeUnstaked,
         batchSize: parsed.batchSize,
         rateLimitMs: parsed.rateLimitMs,
         concurrency: parsed.concurrency,
@@ -129,6 +135,7 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
   // rewritten harmlessly and new rounds/models are appended — no bulk DELETE.
   // Use --reset only for one-off migrations (e.g. changing the model source).
   const reset = args.includes('--reset');
+  const includeUnstaked = args.includes('--include-unstaked') ? true : undefined;
   const overrides: Partial<PrecomputeConfig> = {};
 
   for (let i = 0; i < args.length; i++) {
@@ -166,6 +173,7 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
     }
   }
 
+  if (includeUnstaked !== undefined) overrides.includeUnstaked = includeUnstaked;
   return { isLocal, noCache, reset, overrides };
 }
 
@@ -406,24 +414,40 @@ async function fetchModelAccountMap(
   return map;
 }
 
+/**
+ * Whether a leaderboard entry joins the fleet precompute fetches.
+ *
+ * Signals and Crypto take their leaderboards as-is. Classic's v2Leaderboard is
+ * ordered by rank and lists ~15k models, ~11k of them unstaked; those were
+ * skipped to bound D1's rows. A model that is not in the fleet has no stored
+ * rows at all, so ranking it costs a live Numerai fetch per request — which is
+ * why the self-hosted runs include them.
+ */
+export function keepsLeaderboardEntry(
+  stake: number,
+  tournament: number,
+  includeUnstaked: boolean
+): boolean {
+  const isClassic = tournament !== SIGNALS_TOURNAMENT && tournament !== CRYPTO_TOURNAMENT;
+  return !isClassic || includeUnstaked || stake > 0;
+}
+
 async function fetchTopStakedModels(
   tournament: number,
   limit: number,
-  rateLimitMs: number
+  rateLimitMs: number,
+  includeUnstaked = false
 ): Promise<Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>> {
   const models: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }> = [];
   const batchSize = 500;
   let offset = 0;
   const isSignals = tournament === SIGNALS_TOURNAMENT;
   const isCrypto = tournament === CRYPTO_TOURNAMENT;
-  const isClassic = !isSignals && !isCrypto;
 
   // All three leaderboards are model-level (one row per model, with the model's
   // own stake), so secondary staked models are captured:
   //   Classic: v2Leaderboard, Signals: signalsLeaderboard, Crypto: cryptosignalsLeaderboard.
-  // v2Leaderboard is ordered by rank (not stake) and includes many unstaked
-  // models, so for Classic we keep only stake > 0 to bound the set; Signals/Crypto
-  // take their entries as-is.
+  // Which entries are kept — see keepsLeaderboardEntry.
   const leaderboardField = isSignals
     ? 'signalsLeaderboard'
     : isCrypto
@@ -445,7 +469,7 @@ async function fetchTopStakedModels(
     for (const entry of batch) {
       if (models.length >= limit) break;
       const stake = entry.nmrStaked ? parseFloat(entry.nmrStaked) : 0;
-      if (isClassic && stake <= 0) continue; // skip unstaked models in the Classic field
+      if (!keepsLeaderboardEntry(stake, tournament, includeUnstaked)) continue;
       models.push({
         modelId: entry.id,
         modelName: entry.username, // username IS the model name on these leaderboards
@@ -1469,6 +1493,7 @@ export async function runPrecompute(
   console.log(`Models:      ${config.models.length > 0 ? config.models.join(', ') : '(none)'}`);
   console.log(`Cache:       ${noCache ? 'disabled (--no-cache)' : 'enabled'}`);
   console.log(`Overlap:     ${config.refreshOverlapRounds} stored round(s) re-fetched`);
+  console.log(`Unstaked:    ${config.includeUnstaked ? 'included' : 'skipped (Classic)'}`);
   console.log(`Target:      ${target.description}\n`);
 
   let allModels: TopModel[];
@@ -1519,7 +1544,12 @@ export async function runPrecompute(
     // cryptosignalsLeaderboard), so every staked model — including an account's
     // secondary models — is captured.
     console.log(`Step 2: Fetching top ${config.topN} staked models...`);
-    const topModels = await fetchTopStakedModels(config.tournament, config.topN, config.rateLimitMs);
+    const topModels = await fetchTopStakedModels(
+      config.tournament,
+      config.topN,
+      config.rateLimitMs,
+      config.includeUnstaked
+    );
     console.log(`  Found ${topModels.length} models\n`);
 
     // Step 3: Fetch specific user models if configured
