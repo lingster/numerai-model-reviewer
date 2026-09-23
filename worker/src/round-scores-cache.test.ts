@@ -24,7 +24,9 @@ const scores = (mmc60: number | null, alpha: number | null = null, mpc: number |
 	mmc: null,
 	mmc60,
 	alpha,
-	mpc
+	mpc,
+	neutral_corr: null,
+	neutral_mmc: null
 });
 
 const coverage = (toRound: number, updatedAt: number, fromRound = 350): Coverage => ({
@@ -111,7 +113,9 @@ describe('diffRoundScores', () => {
 	});
 
 	it('treats a round scored only on corr/mmc (Crypto) as worth a row', () => {
-		const fresh = new Map([[1104, { corr: 0.037, mmc: 0.03, mmc60: null, alpha: null, mpc: null }]]);
+		const fresh = new Map([
+			[1104, { corr: 0.037, mmc: 0.03, mmc60: null, alpha: null, mpc: null, neutral_corr: null, neutral_mmc: null }]
+		]);
 		expect(diffRoundScores(new Map(), fresh).size).toBe(1);
 	});
 

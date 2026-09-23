@@ -304,3 +304,46 @@ describe('Numerai Authorization header', () => {
     expect(await authHeaderFor({ NUMERAI_SECRET_KEY: '' })).toBeNull();
   });
 });
+
+describe('Signals neutral scores on the model performance endpoint', () => {
+	/** A Signals profile round plus its submissionScores augmentation. */
+	function mockSignalsFetch(scores: Array<{ displayName: string; value: number | null }>) {
+		let call = 0;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () => {
+				call++;
+				const data =
+					call === 1
+						? {
+								v2SignalsProfile: {
+									id: 'model-id-123',
+									username: 'mymodel',
+									accountName: 'owner',
+									roundModelPerformances: [{ roundNumber: 1350, roundResolved: true }]
+								}
+							}
+						: { v2RoundModelPerformances: [{ roundNumber: 1350, submissionScores: scores }] };
+				return new Response(JSON.stringify({ data }), { status: 200 });
+			})
+		);
+	}
+
+	it('carries neutral_corr and neutral_mmc alongside alpha and mpc', async () => {
+		// The models page scores Signals on either pair, so both must reach it.
+		mockSignalsFetch([
+			{ displayName: 'alpha', value: 0.01 },
+			{ displayName: 'mpc', value: 0.02 },
+			{ displayName: 'neutral_corr', value: 0.03 },
+			{ displayName: 'neutral_mmc', value: 0.04 }
+		]);
+
+		const result = await getModelPerformance('mymodel', env, 'owner', 'model-id-123', SIGNALS_TOURNAMENT);
+
+		const round = result?.rounds.find((r) => r.roundNumber === 1350);
+		expect(round?.alpha).toBe(0.01);
+		expect(round?.mpc).toBe(0.02);
+		expect(round?.neutralCorr).toBe(0.03);
+		expect(round?.neutralMmc).toBe(0.04);
+	});
+});

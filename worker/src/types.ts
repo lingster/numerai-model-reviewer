@@ -52,6 +52,10 @@ export interface RoundPerformance {
   // that do not expose them.
   alpha?: number | null;
   mpc?: number | null;
+  // Signals' neutral pair (neutral correlation / neutral contribution), which
+  // Numerai pays on from rounds opening 2026-09-25. Same source as alpha/mpc.
+  neutralCorr?: number | null;
+  neutralMmc?: number | null;
   corrMultiplier: number | null;
   mmcMultiplier?: number | null;
   selectedStakeValue: number | null;

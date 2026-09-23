@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS model_round_scores (
   mmc60 REAL,
   alpha REAL,
   mpc REAL,
+  -- Signals' neutral pair, from the same submissionScores call as alpha/mpc.
+  neutral_corr REAL,
+  neutral_mmc REAL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (model_id, tournament, round_number)
 );

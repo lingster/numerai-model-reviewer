@@ -27,7 +27,7 @@ import { d1Retry } from './d1-retry';
  * The submission-sourced metrics we persist per round — the union across
  * tournaments, since each scores on a different subset:
  *   Classic  mmc60        (corr/mmc come from roundModelPerformances)
- *   Signals  alpha, mpc   (ditto)
+ *   Signals  alpha, mpc, neutral_corr, neutral_mmc  (ditto)
  *   Crypto   corr, mmc    (roundModelPerformances carries no scores at all)
  * Only a tournament's own metrics are ever read or written; the rest stay null.
  */
@@ -37,10 +37,21 @@ export interface RoundScores {
 	mmc60: number | null;
 	alpha: number | null;
 	mpc: number | null;
+	/** Signals' neutral pair, named as Numerai's submissionScores name them. */
+	neutral_corr: number | null;
+	neutral_mmc: number | null;
 }
 
 /** The RoundScores members, for iterating without restating them. */
-export const SCORE_FIELDS = ['corr', 'mmc', 'mmc60', 'alpha', 'mpc'] as const satisfies readonly (keyof RoundScores)[];
+export const SCORE_FIELDS = [
+	'corr',
+	'mmc',
+	'mmc60',
+	'alpha',
+	'mpc',
+	'neutral_corr',
+	'neutral_mmc'
+] as const satisfies readonly (keyof RoundScores)[];
 
 /** The round range already fetched for a model, and when it was last topped up. */
 export interface Coverage {
@@ -81,7 +92,10 @@ interface CoverageRow {
 
 /** True when a round carries nothing worth a row. */
 function isEmpty(s: RoundScores): boolean {
-	return SCORE_FIELDS.every((f) => s[f] === null);
+	// `== null` covers undefined too: a caller built before a field existed (or a
+	// row read back from a database that predates it) leaves it missing rather
+	// than null, and an unscored round must not look scored because of that.
+	return SCORE_FIELDS.every((f) => s[f] == null);
 }
 
 /** Everything cached for a model: its scored rounds and its coverage watermark. */

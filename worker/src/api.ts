@@ -448,13 +448,13 @@ async function fetchSubmissionScoresByRound(
  */
 const SCORED_FIELDS_BY_TOURNAMENT: Record<number, readonly (keyof RoundScores)[]> = {
   [CLASSIC_TOURNAMENT]: ['mmc60'],
-  [SIGNALS_TOURNAMENT]: ['alpha', 'mpc'],
+  [SIGNALS_TOURNAMENT]: ['alpha', 'mpc', 'neutral_corr', 'neutral_mmc'],
   [CRYPTO_TOURNAMENT]: ['corr', 'mmc']
 };
 
 /** An all-null RoundScores, to be filled with just the tournament's own fields. */
 function emptyScores(): RoundScores {
-  return { corr: null, mmc: null, mmc60: null, alpha: null, mpc: null };
+  return { corr: null, mmc: null, mmc60: null, alpha: null, mpc: null, neutral_corr: null, neutral_mmc: null };
 }
 
 /**
@@ -551,6 +551,8 @@ async function augmentWithSubmissionScores(
       round.alpha = scores.alpha;
       round.mpc = scores.mpc;
       round.mmc60 = scores.mmc60;
+      round.neutralCorr = scores.neutral_corr;
+      round.neutralMmc = scores.neutral_mmc;
     }
   } catch (e) {
     // Non-fatal: these metrics just stay null if the augmentation query fails.
