@@ -1,6 +1,7 @@
 /**
  * TypeScript types for Numerai Model Comparison app
  */
+import type { FieldScope } from '$lib/utils/field-scope.js';
 
 /**
  * Represents a Numerai user
@@ -56,6 +57,14 @@ export interface RoundPerformance {
 	// New Numerai scoring (Signals): alpha + mpc
 	alpha?: number | null;
 	mpc?: number | null;
+	/**
+	 * Neutral correlation / neutral MMC — the pair Numerai pays Signals on for
+	 * rounds opening on/after 2026-09-25 (see SIGNALS_METRIC_SETS.neutral in
+	 * scoring.ts). Null for Classic/Crypto, and for Signals rounds before ~912
+	 * or not yet scored.
+	 */
+	neutralCorr?: number | null;
+	neutralMmc?: number | null;
 	corrMultiplier: number | null;
 	mmcMultiplier?: number | null;
 	selectedStakeValue: number | null;
@@ -78,7 +87,12 @@ export interface ChartDataPoint {
 	// New Numerai scoring (Signals)
 	alpha: number | null;
 	mpc: number | null;
-	// Calculated weighted score: alphaWeight*alpha + mpcWeight*mpc
+	// Neutral pair (Signals): neutral correlation + neutral MMC. See
+	// RoundPerformance.neutralCorr/neutralMmc for availability caveats.
+	ncorr: number | null;
+	nmmc: number | null;
+	// Calculated weighted score for whichever Signals metric set is active
+	// (alpha/mpc or ncorr/nmmc) — see computeChartScore in utils/scoring.ts.
 	score: number | null;
 }
 
@@ -97,7 +111,18 @@ export interface ModelSeries {
 /**
  * Available metrics for the time series chart
  */
-export type ChartMetric = 'corr20' | 'corr60' | 'mmc' | 'mmc60' | 'fnc' | 'payout' | 'alpha' | 'mpc' | 'score';
+export type ChartMetric =
+	| 'corr20'
+	| 'corr60'
+	| 'mmc'
+	| 'mmc60'
+	| 'fnc'
+	| 'payout'
+	| 'alpha'
+	| 'mpc'
+	| 'ncorr'
+	| 'nmmc'
+	| 'score';
 
 /**
  * Stake information for a model
@@ -168,6 +193,15 @@ export interface ModelRankingHistory {
 	modelId: string;
 	modelName: string;
 	username: string;
+	/**
+	 * Which competitor field this history was ranked against — 'staked' (what
+	 * payouts use) or 'all' (every model that scored). Optional (defaults to
+	 * 'staked') so existing fixtures/tests that predate the fieldScope toggle
+	 * keep compiling; set explicitly by calculateModelRankings. When the "vs
+	 * Both" toggle is active, a model produces two histories — one per scope —
+	 * so the chart can render both fields' rank lines.
+	 */
+	fieldScope?: FieldScope;
 	rankings: Array<{
 		roundNumber: number;
 		rank: number | null;
@@ -180,6 +214,14 @@ export interface ModelRankingHistory {
 		mmc: number | null;
 		customScore: number | null;
 		totalModels: number;
+		/**
+		 * Whether the model was staked for this round (what payouts use). null
+		 * means no data — predates staked-tracking, or the round is Crypto's
+		 * (tournament 12), whose stored stake is the model's CURRENT stake, not
+		 * a per-round fact, so the Worker always returns null there. Optional so
+		 * fixtures/tests written before this field existed keep compiling.
+		 */
+		staked?: boolean | null;
 	}>;
 }
 

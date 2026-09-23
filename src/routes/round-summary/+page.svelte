@@ -42,6 +42,7 @@
 		type SortKey,
 		type SortDir
 	} from '$lib/utils/round-summary-sort.js';
+	import { SIGNALS_METRIC_SETS } from '$lib/utils/scoring.js';
 	import { replaceState } from '$app/navigation';
 	import { browser } from '$app/environment';
 
@@ -51,8 +52,10 @@
 	let selectedTournament = $state<TournamentId>(TOURNAMENTS.CLASSIC);
 	const themeClass = $derived(TOURNAMENT_INFO[selectedTournament].theme);
 	const isSignals = $derived(selectedTournament === TOURNAMENTS.SIGNALS);
-	const metric1Label = $derived(isSignals ? 'Alpha' : 'CORR');
-	const metric2Label = $derived(isSignals ? 'MPC' : 'MMC');
+	// Alpha/MPC labels come from the shared alpha_mpc metric set (scoring.ts) so
+	// they can't drift from the rankings page's own labels for the same pair.
+	const metric1Label = $derived(isSignals ? SIGNALS_METRIC_SETS.alpha_mpc.corrLabel : 'CORR');
+	const metric2Label = $derived(isSignals ? SIGNALS_METRIC_SETS.alpha_mpc.mmcLabel : 'MMC');
 	const scoreFormulaDefault = $derived(getDefaultFormulaForTournament(selectedTournament));
 
 	// User + model selection

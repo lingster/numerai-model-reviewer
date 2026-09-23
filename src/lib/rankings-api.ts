@@ -15,7 +15,22 @@
  */
 import type { ModelRankingHistory, RoundModelScore, ScoreFormula } from '$lib/types.js';
 import { config } from '$lib/config.js';
-import { SCORE_ALPHA_WEIGHT, SCORE_MPC_WEIGHT } from '$lib/utils/scoring.js';
+import {
+	SCORE_ALPHA_WEIGHT,
+	SCORE_MPC_WEIGHT,
+	DEFAULT_SIGNALS_METRIC_SET,
+	METRIC_SETS,
+	defaultMetricSetForTournament,
+	getMetricSetDefinition,
+	metricSetsForTournament,
+	type MetricSet,
+} from '$lib/utils/scoring.js';
+import {
+	DEFAULT_FIELD_SCOPE,
+	resolveFieldScopes,
+	type FieldScope,
+	type FieldScopeSelection
+} from '$lib/utils/field-scope.js';
 import { swrCache } from '$lib/utils/swr-cache.svelte.js';
 
 const SIGNALS_TOURNAMENT = 11;
@@ -63,10 +78,23 @@ export const DEFAULT_SIGNALS_SCORE_FORMULA: ScoreFormula = {
 	tcWeight: 0
 };
 
-export function getDefaultFormulaForTournament(tournament: number): ScoreFormula {
-	if (tournament === SIGNALS_TOURNAMENT) return { ...DEFAULT_SIGNALS_SCORE_FORMULA };
+/**
+ * Default formula for a tournament. For Signals, the metric set selects which
+ * pair the default weights come from (alpha_mpc = today's payout pair, neutral
+ * = the pair Numerai pays on for Signals rounds opening on/after 2026-09-25);
+ * it's ignored for Classic/Crypto, which have no metric-set concept.
+ */
+export function getDefaultFormulaForTournament(
+	tournament: number,
+	metricSet: MetricSet = DEFAULT_SIGNALS_METRIC_SET
+): ScoreFormula {
 	if (tournament === CRYPTO_TOURNAMENT) return { ...DEFAULT_CRYPTO_SCORE_FORMULA };
-	return { ...DEFAULT_SCORE_FORMULA };
+	// The weighting Numerai pays on for the pair being scored. Classic's 60-day
+	// pair is 3*CORR60 + 15*MMC60; its 20-day pair keeps the older weighting.
+	const set = METRIC_SETS[metricSetsForTournament(tournament).includes(metricSet)
+		? metricSet
+		: defaultMetricSetForTournament(tournament)];
+	return { corrWeight: set.corrWeight, mmcWeight: set.mmcWeight, tcWeight: 0 };
 }
 
 export interface ModelRef {
@@ -147,6 +175,9 @@ interface ModelRankRoundResponse {
 	mmc: number | null;
 	customScore: number | null;
 	totalModels: number;
+	/** true|false|null — null for rounds with no staked data, and always null
+	 *  for Crypto (see ModelRankingHistory.rankings[].staked). */
+	staked: boolean | null;
 }
 
 interface ModelRankResponse {
@@ -262,11 +293,76 @@ export function calculateCustomScore(
 }
 
 /**
+ * Build the swrCache key for a single model-rank request. Exported so the
+ * cache key's param coverage — which is what keeps toggling a param from
+ * serving stale cached data — can be unit tested without a network call, and
+ * so future param additions have one place to update.
+ */
+export function buildModelRankCacheKey(
+	modelName: string,
+	startRound: number,
+	endRound: number,
+	formula: ScoreFormula,
+	tournament: number,
+	window: number,
+	fieldScope: FieldScope,
+	metricSet: MetricSet
+): string {
+	return `model-rank:${modelName.toLowerCase()}:t${tournament}:${startRound}-${endRound}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}:fs${fieldScope}:ms${metricSet}`;
+}
+
+/** Build the swrCache key for a single top-models request. See {@link buildModelRankCacheKey}. */
+export function buildTopModelsCacheKey(
+	roundNumber: number,
+	formula: ScoreFormula,
+	tournament: number,
+	limit: number,
+	window: number,
+	fieldScope: FieldScope,
+	metricSet: MetricSet
+): string {
+	return `top-models:r${roundNumber}:t${tournament}:l${limit}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}:fs${fieldScope}:ms${metricSet}`;
+}
+
+/** A single model-rank fetch, tagged with the field scope it was requested under. */
+interface ScopedRankResult {
+	scope: FieldScope;
+	history: ModelRankingHistory;
+}
+
+/**
+ * Merge per-(model, fieldScope) fetches into the final rankable/unranked split.
+ * Pulled out of calculateModelRankings as a pure function so the "both fields"
+ * merge logic (tagging, de-duplicated unranked reporting) is unit-testable
+ * without a network call.
+ */
+export function buildRankingsResult(results: ScopedRankResult[]): ModelRankingsResult {
+	const histories: ModelRankingHistory[] = [];
+	const unranked: UnrankedModel[] = [];
+	const unrankedNames = new Set<string>();
+	for (const { scope, history } of results) {
+		const status = classifyRankingHistory(history);
+		if (status === 'ranked') {
+			histories.push({ ...history, fieldScope: scope });
+		} else if (!unrankedNames.has(history.modelName)) {
+			// A model unranked in BOTH scopes would otherwise report twice; only
+			// the first (staked, per resolveFieldScopes' order) reason is kept.
+			unrankedNames.add(history.modelName);
+			unranked.push({ modelName: history.modelName, username: history.username, reason: status });
+		}
+	}
+	return { histories, unranked };
+}
+
+/**
  * Fetch ranking history for the selected models over [startRound, endRound].
  *
- * Calls the Worker /rankings/model-rank endpoint once per model (in batches
- * so we don't blast the API). Ranks are computed server-side against the
- * full staked field stored in D1 — the client no longer fetches a pool.
+ * Calls the Worker /rankings/model-rank endpoint once per (model, fieldScope)
+ * pair, batched BATCH_SIZE models at a time so we don't blast the API — when
+ * fieldScope is 'both' that's 2 requests per model, so a batch fires at most
+ * BATCH_SIZE*2 requests, never the whole selection twice at once. Ranks are
+ * computed server-side against the field stored in D1 — the client no longer
+ * fetches a pool.
  */
 export async function calculateModelRankings(
 	selectedModels: ModelRef[],
@@ -276,64 +372,86 @@ export async function calculateModelRankings(
 	tournament: number = 8,
 	onProgress?: (stage: string, loaded: number, total: number) => void,
 	/** Trailing round window (1 = per-round; 20/60 = MMC20/CORR60-style). */
-	window: number = 1
+	window: number = 1,
+	/** Which competitor field(s) to rank against; 'both' fetches — and later
+	 *  renders — one series per field for every model. */
+	fieldScope: FieldScopeSelection = DEFAULT_FIELD_SCOPE,
+	/** Signals-only metric pair (alpha_mpc vs neutral); ignored by the Worker
+	 *  for Classic/Crypto. */
+	metricSet: MetricSet = DEFAULT_SIGNALS_METRIC_SET
 ): Promise<ModelRankingsResult> {
 	if (selectedModels.length === 0) return { histories: [], unranked: [] };
 
-	const total = selectedModels.length;
+	const scopes = resolveFieldScopes(fieldScope);
+	const total = selectedModels.length * scopes.length;
 	if (onProgress) onProgress('Fetching model rankings', 0, total);
 
-	const results: ModelRankingHistory[] = [];
+	const results: ScopedRankResult[] = [];
 	const BATCH_SIZE = 4;
 	for (let i = 0; i < selectedModels.length; i += BATCH_SIZE) {
 		const batch = selectedModels.slice(i, i + BATCH_SIZE);
 		const batchResults = await Promise.all(
-			batch.map(async (ref) => {
-				const cacheKey = `model-rank:${ref.modelName.toLowerCase()}:t${tournament}:${startRound}-${endRound}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}`;
-				const cached = swrCache.get<ModelRankingHistory>(cacheKey);
-				if (cached.data && !cached.isStale) return cached.data;
+			batch.flatMap((ref) =>
+				scopes.map(async (scope): Promise<ScopedRankResult> => {
+					const cacheKey = buildModelRankCacheKey(
+						ref.modelName,
+						startRound,
+						endRound,
+						formula,
+						tournament,
+						window,
+						scope,
+						metricSet
+					);
+					const cached = swrCache.get<ModelRankingHistory>(cacheKey);
+					if (cached.data && !cached.isStale) return { scope, history: cached.data };
 
-				return swrCache.fetch(cacheKey, async () => {
-					const url = new URL(`${config.apiUrl}/rankings/model-rank`);
-					url.searchParams.set('modelName', ref.modelName);
-					url.searchParams.set('startRound', String(startRound));
-					url.searchParams.set('endRound', String(endRound));
-					url.searchParams.set('tournament', String(tournament));
-					url.searchParams.set('corrWeight', String(formula.corrWeight));
-					url.searchParams.set('mmcWeight', String(formula.mmcWeight));
-					url.searchParams.set('tcWeight', String(formula.tcWeight));
-					url.searchParams.set('window', String(window));
-					// Owner/id hints so the Worker can rank an unstaked model (absent from
-					// the precomputed staked field) by fetching its own scores directly.
-					if (ref.username) url.searchParams.set('username', ref.username);
-					if (ref.modelId) url.searchParams.set('modelId', ref.modelId);
+					const history = await swrCache.fetch(cacheKey, async () => {
+						const url = new URL(`${config.apiUrl}/rankings/model-rank`);
+						url.searchParams.set('modelName', ref.modelName);
+						url.searchParams.set('startRound', String(startRound));
+						url.searchParams.set('endRound', String(endRound));
+						url.searchParams.set('tournament', String(tournament));
+						url.searchParams.set('corrWeight', String(formula.corrWeight));
+						url.searchParams.set('mmcWeight', String(formula.mmcWeight));
+						url.searchParams.set('tcWeight', String(formula.tcWeight));
+						url.searchParams.set('window', String(window));
+						url.searchParams.set('fieldScope', scope);
+						url.searchParams.set('metricSet', metricSet);
+						// Owner/id hints so the Worker can rank an unstaked model (absent from
+						// the precomputed staked field) by fetching its own scores directly.
+						if (ref.username) url.searchParams.set('username', ref.username);
+						if (ref.modelId) url.searchParams.set('modelId', ref.modelId);
 
-					try {
-						const data = await getJson<ModelRankResponse>(url);
-						return {
-							modelId: data.modelId || ref.modelId || '',
-							modelName: data.modelName || ref.modelName,
-							username: data.username || ref.username || '',
-							rankings: data.rounds.map((r) => ({
-								roundNumber: r.roundNumber,
-								rank: r.rank,
-								corr: r.corr,
-								mmc: r.mmc,
-								customScore: r.customScore,
-								totalModels: r.totalModels
-							}))
-						};
-					} catch (error) {
-						console.error(`Error fetching rank for ${ref.modelName}:`, error);
-						return {
-							modelId: ref.modelId || '',
-							modelName: ref.modelName,
-							username: ref.username || '',
-							rankings: []
-						};
-					}
-				});
-			})
+						try {
+							const data = await getJson<ModelRankResponse>(url);
+							return {
+								modelId: data.modelId || ref.modelId || '',
+								modelName: data.modelName || ref.modelName,
+								username: data.username || ref.username || '',
+								rankings: data.rounds.map((r) => ({
+									roundNumber: r.roundNumber,
+									rank: r.rank,
+									corr: r.corr,
+									mmc: r.mmc,
+									customScore: r.customScore,
+									totalModels: r.totalModels,
+									staked: r.staked
+								}))
+							};
+						} catch (error) {
+							console.error(`Error fetching rank for ${ref.modelName} (${scope}):`, error);
+							return {
+								modelId: ref.modelId || '',
+								modelName: ref.modelName,
+								username: ref.username || '',
+								rankings: []
+							};
+						}
+					});
+					return { scope, history };
+				})
+			)
 		);
 
 		results.push(...batchResults);
@@ -344,17 +462,7 @@ export async function calculateModelRankings(
 	// the page can explain WHY a model is missing — not staked for the range, or
 	// no cached data for it — instead of silently dropping it. See
 	// classifyRankingHistory.
-	const histories: ModelRankingHistory[] = [];
-	const unranked: UnrankedModel[] = [];
-	for (const history of results) {
-		const status = classifyRankingHistory(history);
-		if (status === 'ranked') {
-			histories.push(history);
-		} else {
-			unranked.push({ modelName: history.modelName, username: history.username, reason: status });
-		}
-	}
-	return { histories, unranked };
+	return buildRankingsResult(results);
 }
 
 /**
@@ -370,9 +478,14 @@ export async function getTopModelsForRound(
 	tournament: number = 8,
 	limit: number = 10,
 	/** Trailing round window (1 = per-round; 20/60 = MMC20/CORR60-style). */
-	window: number = 1
+	window: number = 1,
+	/** Which competitor field this round's table lists. */
+	fieldScope: FieldScope = 'staked',
+	/** Signals-only metric pair (alpha_mpc vs neutral); ignored by the Worker
+	 *  for Classic/Crypto. */
+	metricSet: MetricSet = DEFAULT_SIGNALS_METRIC_SET
 ): Promise<RoundModelScore[]> {
-	const cacheKey = `top-models:r${roundNumber}:t${tournament}:l${limit}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}`;
+	const cacheKey = buildTopModelsCacheKey(roundNumber, formula, tournament, limit, window, fieldScope, metricSet);
 	const cached = swrCache.get<RoundModelScore[]>(cacheKey);
 	if (cached.data && !cached.isStale) return cached.data;
 
@@ -385,6 +498,8 @@ export async function getTopModelsForRound(
 		url.searchParams.set('mmcWeight', String(formula.mmcWeight));
 		url.searchParams.set('tcWeight', String(formula.tcWeight));
 		url.searchParams.set('window', String(window));
+		url.searchParams.set('fieldScope', fieldScope);
+		url.searchParams.set('metricSet', metricSet);
 
 		try {
 			const top = await getJson<TopModelResponse[]>(url);

@@ -26,6 +26,19 @@
 import { rankAmong, scoreFromMetrics, type MetricTriple, type ScoreFormula } from './ranking';
 
 /** One round's metric pairs, index-aligned: model i is (corr[i], mmc[i]). */
+/**
+ * Which competitors a stored field holds: the staked field a payout ranks
+ * against, or every model that scored in the round.
+ */
+export type FieldScope = 'staked' | 'all';
+
+export const FIELD_SCOPES: readonly FieldScope[] = ['staked', 'all'];
+
+/** `value` as a FieldScope, or the default — for request parameters. */
+export function asFieldScope(value: unknown, fallback: FieldScope = 'staked'): FieldScope {
+	return FIELD_SCOPES.includes(value as FieldScope) ? (value as FieldScope) : fallback;
+}
+
 export interface FieldMetrics {
 	corr: ReadonlyArray<number | null>;
 	mmc: ReadonlyArray<number | null>;

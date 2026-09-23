@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { effectiveModels, isUsingAllUserModels } from '$lib/utils/model-selection.js';
 	import { onMount, tick } from 'svelte';
 	import Autocomplete from '$lib/components/Autocomplete.svelte';
 	import RankingsChart from '$lib/components/RankingsChart.svelte';
@@ -32,6 +33,22 @@
 	} from '$lib/utils/ranking-display.js';
 	import { paginateModels } from '$lib/utils/paginate-models.js';
 	import { formatModelOption } from '$lib/utils/format-model-option.js';
+	import { DEFAULT_STAKED_FILTER, type StakedFilter } from '$lib/utils/round-staked-filter.js';
+	import {
+		DEFAULT_FIELD_SCOPE,
+		fieldScopeLabel,
+		resolvePrimaryFieldScope,
+		type FieldScopeSelection
+	} from '$lib/utils/field-scope.js';
+	import {
+		METRIC_SETS,
+		NEUTRAL_SCORES_FROM_ROUND,
+		defaultMetricSetForTournament,
+		formatMetricSetFormula,
+		metricSetsForTournament,
+		shouldShowNeutralStartHint,
+		type MetricSet
+	} from '$lib/utils/scoring.js';
 	import { replaceState } from '$app/navigation';
 	import { browser } from '$app/environment';
 
@@ -56,22 +73,46 @@
 	// or — when none are picked — every model of the selected user. Lets a user
 	// chart a whole account in one click without selecting each model.
 	const modelsToRank = $derived(
-		selectedModels.length > 0 ? selectedModels : selectedUser ? availableModels : []
+		effectiveModels(selectedModels, availableModels, selectedUser !== null)
 	);
 	// True when the fallback (all of the user's models) is in effect.
-	const usingAllUserModels = $derived(selectedModels.length === 0 && modelsToRank.length > 0);
+	const usingAllUserModels = $derived(isUsingAllUserModels(selectedModels, modelsToRank));
 
 	// Tournament selection (Classic and Crypto only)
 	let selectedTournament = $state<TournamentId>(TOURNAMENTS.CLASSIC);
 	const themeClass = $derived(TOURNAMENT_INFO[selectedTournament].theme);
 
-	// Metric labels are tournament-specific. Classic/Crypto score on corr+mmc;
-	// Signals scores on alpha+mpc (the worker returns alpha/mpc in the corr/mmc
-	// fields for tournament 11). The corrWeight/mmcWeight inputs drive both.
 	const isSignals = $derived(selectedTournament === TOURNAMENTS.SIGNALS);
-	const metric1Label = $derived(isSignals ? 'Alpha' : 'Corr');
-	const metric2Label = $derived(isSignals ? 'MPC' : 'MMC');
-	const scoreFormulaDefault = $derived(getDefaultFormulaForTournament(selectedTournament));
+	// Crypto's stored "staked" flag is the model's CURRENT stake, not a per-round
+	// fact, so the Worker always returns staked=null for it — the round filter
+	// toggle has nothing to filter on there.
+	const isCrypto = $derived(selectedTournament === TOURNAMENTS.CRYPTO);
+
+	// Signals metric pair (toggle C): which score/rank the Worker computes for
+	// Signals, via metricSet. Meaningless for Classic/Crypto, which have no
+	// metric-set concept. Persisted in the URL so a shared link keeps its choice.
+	let metricSet = $state<MetricSet>(defaultMetricSetForTournament(TOURNAMENTS.CLASSIC));
+	// The pairs this tournament publishes; the toggle shows only when there is a
+	// choice (Crypto has one pair).
+	const metricSetChoices = $derived(metricSetsForTournament(selectedTournament));
+
+	// Metric labels are tournament-specific. Classic/Crypto score on corr+mmc;
+	// Signals scores on the active metric set's pair (alpha_mpc: Alpha/MPC,
+	// neutral: NCORR/NMMC — the worker returns them in the corr/mmc fields for
+	// tournament 11). The corrWeight/mmcWeight inputs drive both.
+	const metric1Label = $derived(METRIC_SETS[metricSet].corrLabel);
+	const metric2Label = $derived(METRIC_SETS[metricSet].mmcLabel);
+	const scoreFormulaDefault = $derived(getDefaultFormulaForTournament(selectedTournament, metricSet));
+
+	// Competitor field toggle (toggle B): rank against the staked field, every
+	// model that scored, or both (drawing two lines per model).
+	let fieldScope = $state<FieldScopeSelection>(DEFAULT_FIELD_SCOPE);
+	// Single field the per-round table can show; 'both' falls back to staked.
+	const tableFieldScope = $derived(resolvePrimaryFieldScope(fieldScope));
+
+	// Round filter toggle (toggle A): which rounds appear in the chart, based on
+	// the per-round staked flag. Hidden/disabled for Crypto — see isCrypto.
+	let stakedFilter = $state<StakedFilter>(DEFAULT_STAKED_FILTER);
 
 	// Round range
 	let currentRound = $state(0);
@@ -156,6 +197,42 @@
 		}
 	}
 
+	// Round filter toggle (A): purely a client-side filter over already-fetched
+	// data (the staked flag comes back on every round), so no re-fetch needed.
+	function setStakedFilter(value: StakedFilter) {
+		if (value === stakedFilter) return;
+		stakedFilter = value;
+		updateUrlParams();
+	}
+
+	// Competitor field toggle (B): changes what's requested from the Worker, so
+	// switching re-ranks and reloads the round table.
+	async function setFieldScope(value: FieldScopeSelection) {
+		if (value === fieldScope) return;
+		fieldScope = value;
+		updateUrlParams();
+		if (rankingHistories.length > 0 || modelsToRank.length > 0) {
+			await loadRankings();
+		} else {
+			await loadTopModelsForRound(selectedRoundForTop10);
+		}
+	}
+
+	// Signals metric-set toggle (C): changes what the Worker scores/ranks on, so
+	// reset the formula to that set's defaults and re-rank, same as switching
+	// tournaments.
+	async function setMetricSet(value: MetricSet) {
+		if (value === metricSet) return;
+		metricSet = value;
+		scoreFormula = getDefaultFormulaForTournament(selectedTournament, metricSet);
+		updateUrlParams();
+		if (rankingHistories.length > 0 || modelsToRank.length > 0) {
+			await loadRankings();
+		} else {
+			await loadTopModelsForRound(selectedRoundForTop10);
+		}
+	}
+
 	// Rankings data
 	let rankingHistories = $state<ModelRankingHistory[]>([]);
 	let topModels = $state<RoundModelScore[]>([]);
@@ -199,8 +276,24 @@
 			selectedTournament = getSelectedTournament();
 		}
 
-		// Seed the formula with the tournament-appropriate defaults.
-		scoreFormula = getDefaultFormulaForTournament(selectedTournament);
+		// Read the three toggles from the URL before seeding the formula, so a
+		// shared link's metricSet takes effect immediately (not just on next change).
+		const metricSetParam = url.searchParams.get('metricSet');
+		if (metricSetParam === 'alpha_mpc' || metricSetParam === 'neutral') {
+			metricSet = metricSetParam;
+		}
+		const fieldScopeParam = url.searchParams.get('fieldScope');
+		if (fieldScopeParam === 'staked' || fieldScopeParam === 'all' || fieldScopeParam === 'both') {
+			fieldScope = fieldScopeParam;
+		}
+		const roundFilterParam = url.searchParams.get('roundFilter');
+		if (roundFilterParam === 'staked' || roundFilterParam === 'unstaked' || roundFilterParam === 'both') {
+			stakedFilter = roundFilterParam;
+		}
+
+		// Seed the formula with the tournament- (and, for Signals, metric-set-)
+		// appropriate defaults.
+		scoreFormula = getDefaultFormulaForTournament(selectedTournament, metricSet);
 
 		// Restore the persisted rankings display mode.
 		rankingDisplayMode = getRankingDisplayMode();
@@ -336,7 +429,9 @@
 				(stage, loaded, total) => {
 					loadingProgress = { stage, loaded, total };
 				},
-				rollingWindow
+				rollingWindow,
+				fieldScope,
+				metricSet
 			);
 			rankingHistories = result.histories;
 			unrankedModels = result.unranked;
@@ -371,8 +466,18 @@
 
 	async function loadTopModelsForRound(round: number) {
 		// limit=0 → the worker returns the whole ranked field; we page it locally.
+		// 'both' competitor mode has nothing to show two tables for, so the table
+		// always uses the single primary scope (resolvePrimaryFieldScope).
 		try {
-			topModels = await getTopModelsForRound(round, scoreFormula, selectedTournament, 0, rollingWindow);
+			topModels = await getTopModelsForRound(
+				round,
+				scoreFormula,
+				selectedTournament,
+				0,
+				rollingWindow,
+				tableFieldScope,
+				metricSet
+			);
 		} catch (error) {
 			console.error('Error loading staked models:', error);
 			topModels = [];
@@ -386,8 +491,15 @@
 		selectedTournament = tournament;
 		setSelectedTournament(tournament);
 
+		// The metric-set toggle only applies to Signals; reset it on every switch
+		// so leaving Signals doesn't leave a stale 'neutral' selection behind.
+		metricSet = defaultMetricSetForTournament(tournament);
+		// Crypto has no per-round staked flag to filter on; reset so switching
+		// away and back doesn't leave a filter that silently hides everything.
+		if (tournament === TOURNAMENTS.CRYPTO) stakedFilter = DEFAULT_STAKED_FILTER;
+
 		// Reset to tournament-appropriate scoring defaults.
-		scoreFormula = getDefaultFormulaForTournament(tournament);
+		scoreFormula = getDefaultFormulaForTournament(tournament, metricSet);
 
 		// Clear selections
 		selectedModels = [];
@@ -495,7 +607,7 @@
 	}
 
 	function resetFormula() {
-		scoreFormula = getDefaultFormulaForTournament(selectedTournament);
+		scoreFormula = getDefaultFormulaForTournament(selectedTournament, metricSet);
 	}
 
 	// URL parameter management
@@ -524,6 +636,26 @@
 			url.searchParams.set('window', rollingWindow.toString());
 		} else {
 			url.searchParams.delete('window');
+		}
+
+		// Three toggles (A/B/C): omitted from the URL at their default value so a
+		// plain link stays as short as it was before this feature existed.
+		if (stakedFilter !== DEFAULT_STAKED_FILTER) {
+			url.searchParams.set('roundFilter', stakedFilter);
+		} else {
+			url.searchParams.delete('roundFilter');
+		}
+
+		if (fieldScope !== DEFAULT_FIELD_SCOPE) {
+			url.searchParams.set('fieldScope', fieldScope);
+		} else {
+			url.searchParams.delete('fieldScope');
+		}
+
+		if (metricSet !== defaultMetricSetForTournament(selectedTournament)) {
+			url.searchParams.set('metricSet', metricSet);
+		} else {
+			url.searchParams.delete('metricSet');
 		}
 
 		replaceState(url.toString(), {});
@@ -751,6 +883,46 @@
 		{/if}
 	</div>
 
+	<!-- Signals Metric Set (toggle C): which metric pair Signals scores/ranks on.
+	     Meaningless for Classic/Crypto, so hidden there entirely. -->
+	{#if metricSetChoices.length > 1}
+		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
+			<div class="flex flex-wrap items-center gap-4">
+				<span class="text-sm font-medium retro-text-primary uppercase">Scored on:</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					{#each metricSetChoices as choice}
+						<button
+							onclick={() => setMetricSet(choice)}
+							class="px-3 py-1 text-sm font-medium transition-colors"
+							style={metricSet === choice
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{METRIC_SETS[choice].corrLabel}/{METRIC_SETS[choice].mmcLabel}{choice ===
+							defaultMetricSetForTournament(selectedTournament)
+								? ' (paid)'
+								: ''}
+						</button>
+					{/each}
+				</div>
+			</div>
+			<p class="mt-2 text-xs retro-text-secondary">
+				{formatMetricSetFormula(metricSet)} — {metricSet === 'neutral'
+					? 'the pair Numerai pays Signals on for rounds opening on/after 2026-09-25. Payouts are capped at ±3.5%; ranks here use the uncapped score.'
+					: metricSet === 'corr60_mmc60'
+						? "Classic's payout pair since 28 Aug 2026."
+						: metricSet === 'corr20_mmc'
+							? 'the 20-day pair Classic was scored on before 28 Aug 2026.'
+							: "Signals' payout pair up to 25 Sep 2026."}
+			</p>
+			{#if shouldShowNeutralStartHint(metricSet, startRound)}
+				<p class="mt-2 text-xs retro-text-warning">
+					Neutral scores start at round {NEUTRAL_SCORES_FROM_ROUND} — earlier rounds have no neutral rank.
+				</p>
+			{/if}
+		</div>
+	{/if}
+
 	<!-- Score Formula Configuration -->
 	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<div class="flex items-center justify-between mb-4">
@@ -848,6 +1020,47 @@
 		<p class="mt-2 text-xs retro-text-secondary">
 			Ranks each round on the trailing N-round average of the {metric1Label}/{metric2Label} score,
 			like Numerai's {metric2Label}20 / {metric1Label}60 leaderboard columns. "Per round" uses each round's own score.
+		</p>
+	</div>
+
+	<!-- Competitor Field (toggle B): who a rank is measured against. -->
+	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
+		<div class="flex flex-wrap items-center gap-4">
+			<span class="text-sm font-medium retro-text-primary uppercase">Rank Against:</span>
+			<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+				<button
+					onclick={() => setFieldScope('staked')}
+					class="px-3 py-1 text-sm font-medium transition-colors"
+					style={fieldScope === 'staked'
+						? 'background-color: var(--retro-primary); color: white;'
+						: 'color: var(--retro-text-primary);'}
+				>
+					vs Staked
+				</button>
+				<button
+					onclick={() => setFieldScope('all')}
+					class="px-3 py-1 text-sm font-medium transition-colors"
+					style={fieldScope === 'all'
+						? 'background-color: var(--retro-primary); color: white;'
+						: 'color: var(--retro-text-primary);'}
+				>
+					vs All
+				</button>
+				<button
+					onclick={() => setFieldScope('both')}
+					class="px-3 py-1 text-sm font-medium transition-colors"
+					style={fieldScope === 'both'
+						? 'background-color: var(--retro-primary); color: white;'
+						: 'color: var(--retro-text-primary);'}
+				>
+					Both
+				</button>
+			</div>
+		</div>
+		<p class="mt-2 text-xs retro-text-secondary">
+			{fieldScopeLabel('staked')} = only models with a stake on the round (what payouts use);
+			{fieldScopeLabel('all')} = every model that scored. The field sizes (totalModels) differ —
+			"Both" plots one line per field (solid = staked, dashed = all) so you can compare them directly.
 		</p>
 	</div>
 
@@ -974,7 +1187,10 @@
 	{#if rankingHistories.length > 0}
 		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Ranking History</h2>
-			<p class="mb-2 text-xs retro-text-secondary">Click a point to jump the table below to that round and model.</p>
+			<p class="mb-2 text-xs retro-text-secondary">
+				Click a point to focus that model (the rest grey out) and jump the table below to that
+				round; click it again to restore the other lines.
+			</p>
 			<RankingsChart
 				{rankingHistories}
 				{startRound}
@@ -984,6 +1200,9 @@
 				{metric2Label}
 				rollingWindow={rollingWindow}
 				{latestResolvedRound}
+				{stakedFilter}
+				stakedFilterEnabled={!isCrypto}
+				onStakedFilterChange={setStakedFilter}
 				onPointSelect={handleChartPointSelect}
 			/>
 		</div>
@@ -995,7 +1214,7 @@
 			<div class="px-6 py-4 border-b retro-border-secondary border-2">
 				<div class="flex items-center justify-between">
 					<h2 class="text-lg font-medium retro-text-primary uppercase">
-						Top {topModels.length} Staked Models
+						Top {topModels.length} {tableFieldScope === 'staked' ? 'Staked' : 'All'} Models
 					</h2>
 					<div class="flex items-center gap-2">
 						<label for="roundSelect" class="text-sm retro-text-secondary">Round:</label>
@@ -1033,7 +1252,8 @@
 					</div>
 				</div>
 				<p class="text-sm retro-text-secondary mt-1">
-					Staked models for Round {selectedRoundForTop10} ranked by the current score formula
+					{tableFieldScope === 'staked' ? 'Staked models' : 'All models'} for Round {selectedRoundForTop10} ranked by
+					the current score formula{fieldScope === 'both' ? ' (the chart above also plots the all-models field)' : ''}
 				</p>
 				<div class="mt-3 flex items-center gap-2">
 					<label for="modelTableSearch" class="sr-only">Search models</label>

@@ -60,6 +60,9 @@ export interface FleetSlice {
 	unstakedEvery: number;
 }
 
+/** Where a metered statement keeps the real one it wraps. */
+const REAL_STATEMENT = Symbol('real-statement');
+
 interface ResultWithMeta {
 	meta?: { rows_read?: number; rows_written?: number };
 }
@@ -119,13 +122,16 @@ export class D1CostHarness {
 		const { tournament, models, fromRound, toRound, unstakedEvery } = slice;
 		await this.raw
 			.prepare(
+				// corr60/mmc60 mirror the 20-day pair: Classic is ranked on the 60-day
+				// one, and a fleet that has only the 20-day pair would rank as nulls.
 				`WITH RECURSIVE
 				   m(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM m WHERE i < ?1 - 1),
 				   r(n) AS (SELECT ?2 UNION ALL SELECT n + 1 FROM r WHERE n < ?3)
 				 INSERT INTO model_performances
-				   (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at)
+				   (model_name, round_number, corr, mmc, tc, alpha, mpc, corr60, mmc60, stake_value, tournament, updated_at)
 				 SELECT 't' || CAST(?4 AS INTEGER) || '_m' || i, n,
 				        0.05 - i * 0.0001, 0.02 - i * 0.00005, NULL, NULL, NULL,
+				        0.05 - i * 0.0001, 0.02 - i * 0.00005,
 				        CASE WHEN i % ?5 = 0 THEN 0 ELSE 1.0 END, ?4, 0
 				   FROM m, r`
 			)
@@ -182,8 +188,14 @@ export class D1CostHarness {
 
 	/** A D1Database whose statements add their billed rows to `cost`. */
 	private metered(): D1Database {
+		// The proxy carries the statement it wraps: batch() has to hand D1 the real
+		// ones, which cannot be reconstructed from the proxy's methods.
+		const unwrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+			(statement as { [REAL_STATEMENT]?: D1PreparedStatement })[REAL_STATEMENT] ?? statement;
+
 		const meter = (statement: D1PreparedStatement): D1PreparedStatement =>
 			({
+				[REAL_STATEMENT]: statement,
 				bind: (...values: unknown[]) => meter(statement.bind(...values)),
 				all: async () => {
 					const result = await statement.all();
@@ -207,7 +219,7 @@ export class D1CostHarness {
 		return {
 			prepare: (sql: string) => meter(this.raw.prepare(sql)),
 			batch: async (statements: D1PreparedStatement[]) => {
-				const results = await this.raw.batch(statements);
+				const results = await this.raw.batch(statements.map(unwrap));
 				results.forEach((result) => this.record(result));
 				return results;
 			}

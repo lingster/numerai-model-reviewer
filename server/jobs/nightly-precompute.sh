@@ -16,6 +16,7 @@ for tournament in ${PRECOMPUTE_TOURNAMENTS:-8 11 12}; do
 		--top-n "${PRECOMPUTE_TOP_N:-1000000}" \
 		--backfill-rounds "${PRECOMPUTE_BACKFILL_ROUNDS:-5000}" \
 		--refresh-overlap "${PRECOMPUTE_REFRESH_OVERLAP:-70}" \
+		${PRECOMPUTE_INCLUDE_UNSTAKED:+--include-unstaked} \
 		|| { echo "tournament ${tournament} failed"; status=1; }
 done
 exit "${status}"

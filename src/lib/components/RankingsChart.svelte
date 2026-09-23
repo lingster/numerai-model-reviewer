@@ -14,6 +14,10 @@
 		passesResolutionFilter,
 		type ResolutionFilter
 	} from '$lib/utils/round-resolution.js';
+	import { passesStakedFilter, type StakedFilter } from '$lib/utils/round-staked-filter.js';
+	import { fieldScopeLabel, type FieldScope } from '$lib/utils/field-scope.js';
+	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
+	import { focusedSeriesColor, orderForFocus, toggleFocus } from '$lib/utils/series-focus.js';
 
 	// Props
 	let {
@@ -25,6 +29,9 @@
 		metric2Label = 'MMC',
 		rollingWindow = 1,
 		latestResolvedRound = null,
+		stakedFilter = 'both',
+		stakedFilterEnabled = true,
+		onStakedFilterChange,
 		onPointSelect
 	}: {
 		rankingHistories: ModelRankingHistory[];
@@ -42,6 +49,14 @@
 		/** Latest fully-resolved round; rounds after it are "resolving" (scored but
 		 *  not final) and get shaded. null = boundary unknown, treat all as resolved. */
 		latestResolvedRound?: number | null;
+		/** Staked/Unstaked/Both round filter. The control sits in this panel, beside
+		 *  the data it filters, but the value stays with the page so it can be part
+		 *  of the shareable URL state. 'both' = unfiltered. */
+		stakedFilter?: StakedFilter;
+		/** False for Crypto, whose per-round staked flag is unknown: the control is
+		 *  shown disabled rather than hidden, so it does not move about per tournament. */
+		stakedFilterEnabled?: boolean;
+		onStakedFilterChange?: (filter: StakedFilter) => void;
 		/** Fired when a data point is clicked, with its round and model name. */
 		onPointSelect?: (round: number, modelName: string) => void;
 	} = $props();
@@ -49,6 +64,22 @@
 	// Resolved/resolving filter (chart-owned, mirrors the metric-overlay toggles).
 	// 'both' preserves the prior behaviour (all rounds shown, resolving shaded).
 	let resolutionFilter = $state<ResolutionFilter>('both');
+
+	// Identifies one plotted series. A model normally has one history; the "vs
+	// Both" competitor toggle gives it two (one per fieldScope), which must not
+	// collide in the visibility/colour maps keyed below.
+	function seriesKey(h: ModelRankingHistory): string {
+		return `${h.modelId}:${h.fieldScope ?? 'staked'}`;
+	}
+
+	// True when the same model appears under more than one field scope — i.e.
+	// the "vs Both" competitor toggle produced two series for it. Used to decide
+	// whether the legend/tooltip need to spell out which field a line is.
+	const hasDualScope = $derived(
+		rankingHistories.some(
+			(h, i) => rankingHistories.findIndex((other) => other.modelId === h.modelId) !== i
+		)
+	);
 
 	const isPercentile = $derived(displayMode === 'percentile');
 
@@ -108,8 +139,13 @@
 		'#009688'  // Teal
 	];
 
-	// Model visibility state
+	// Model visibility state, keyed by seriesKey (not modelId) so the two lines
+	// a "vs Both" model produces can be toggled independently.
 	let modelVisibility = $state<Record<string, boolean>>({});
+	// The model singled out by clicking one of its points, and what was visible
+	// before that — see focusModel.
+	let focusedModelId = $state<string | null>(null);
+	let visibilityBeforeFocus: Record<string, boolean> | null = null;
 
 	// Initialize visibility when histories change.
 	// Depend ONLY on rankingHistories: the read+write of modelVisibility is
@@ -122,7 +158,8 @@
 			const newVisibility: Record<string, boolean> = {};
 			for (const history of histories) {
 				// Preserve existing visibility or default to true
-				newVisibility[history.modelId] = modelVisibility[history.modelId] ?? true;
+				const key = seriesKey(history);
+				newVisibility[key] = modelVisibility[key] ?? true;
 			}
 			modelVisibility = newVisibility;
 		});
@@ -130,8 +167,25 @@
 
 	// Filter visible models
 	const visibleHistories = $derived(
-		rankingHistories.filter(h => modelVisibility[h.modelId])
+		rankingHistories.filter(h => modelVisibility[seriesKey(h)])
 	);
+	// Painting order: the focused model last, so the greyed lines cannot
+	// overdraw the one being studied. Keyed by model, so a focused model's two
+	// field-scope lines both come to the front.
+	const historiesInDrawOrder = $derived(
+		orderForFocus(visibleHistories, focusedModelId, (h) => h.modelId)
+	);
+
+	// Unique model ids in first-seen order, used to assign each MODEL (not each
+	// series) a stable colour — so a model's staked and all-field lines share a
+	// colour and are only told apart by dash style.
+	const uniqueModelIds = $derived.by(() => {
+		const ids: string[] = [];
+		for (const h of rankingHistories) {
+			if (!ids.includes(h.modelId)) ids.push(h.modelId);
+		}
+		return ids;
+	});
 
 	// Calculate data range
 	const roundRange = $derived.by(() => {
@@ -176,21 +230,21 @@
 			.curve(d3Shape.curveMonotoneX)
 	);
 
-	// ── Resolved vs resolving ───────────────────────────────────────────────────
-	// Filter each model's rounds ONCE per (filter, boundary, data) change, keyed by
-	// modelId, rather than re-filtering in the template for every line/point/overlay
-	// pass. Iterating visibleHistories (not copies) keeps object identity so the
-	// per-model colour lookup still works.
+	// ── Resolved vs resolving, and staked vs unstaked ──────────────────────────
+	// Filter each model's rounds ONCE per (filter, boundary, data) change, keyed
+	// by seriesKey, rather than re-filtering in the template for every
+	// line/point/overlay pass. Iterating visibleHistories (not copies) keeps
+	// object identity so the per-model colour lookup still works.
 	const displayedRankingsById = $derived.by(() => {
 		const byId = new Map<string, ModelRankingHistory['rankings']>();
 		for (const h of visibleHistories) {
 			byId.set(
-				h.modelId,
-				resolutionFilter === 'both'
-					? h.rankings
-					: h.rankings.filter(r =>
-							passesResolutionFilter(r.roundNumber, latestResolvedRound, resolutionFilter)
-						)
+				seriesKey(h),
+				h.rankings.filter(
+					(r) =>
+						passesResolutionFilter(r.roundNumber, latestResolvedRound, resolutionFilter) &&
+						passesStakedFilter(r.staked, stakedFilter)
+				)
 			);
 		}
 		return byId;
@@ -275,16 +329,50 @@
 		return ticks;
 	});
 
-	// Get color for model
-	function getModelColor(index: number): string {
-		return colors[index % colors.length];
+	// Colour by MODEL (not series), so a model's staked/all-field lines match.
+	// Under a focus, every other model is greyed — see focusModel.
+	function getModelColor(modelId: string): string {
+		const index = uniqueModelIds.indexOf(modelId);
+		const color = colors[(index < 0 ? 0 : index) % colors.length];
+		return focusedSeriesColor(color, modelId, focusedModelId);
 	}
 
-	// Toggle model visibility
-	function toggleModelVisibility(modelId: string) {
+	/**
+	 * Clicking a point singles that model out and clicking it again puts the
+	 * chart back, remembering what was visible on the way in. Same behaviour as
+	 * the performance chart, so the two read the same way.
+	 */
+	function focusModel(modelId: string) {
+		const next = toggleFocus(focusedModelId, modelId);
+		if (next === null) {
+			if (visibilityBeforeFocus) modelVisibility = { ...visibilityBeforeFocus };
+			visibilityBeforeFocus = null;
+		} else if (focusedModelId === null) {
+			visibilityBeforeFocus = { ...modelVisibility };
+		}
+		focusedModelId = next;
+	}
+
+	// Dash pattern by field scope: solid for the staked field (or single-scope
+	// mode), dashed for "all models" — the same convention as the metric overlay
+	// legend ("dashed"/"dotted") uses for its own lines.
+	function lineDashArray(h: ModelRankingHistory): string {
+		return (h.fieldScope ?? 'staked') === 'all' ? '7,4' : 'none';
+	}
+
+	/** Every plotted series, in legend order — what the bulk controls act on. */
+	const seriesKeys = $derived(rankingHistories.map(seriesKey));
+
+	const showAll = () => (modelVisibility = setAllVisible(seriesKeys, true));
+	const hideAll = () => (modelVisibility = setAllVisible(seriesKeys, false));
+	const invertAll = () => (modelVisibility = invertVisibility(seriesKeys, modelVisibility));
+	const shownCount = $derived(seriesKeys.filter((key) => modelVisibility[key] ?? true).length);
+
+	// Toggle one series' visibility (keyed by seriesKey, not modelId — see above).
+	function toggleModelVisibility(key: string) {
 		modelVisibility = {
 			...modelVisibility,
-			[modelId]: !modelVisibility[modelId]
+			[key]: !modelVisibility[key]
 		};
 	}
 
@@ -294,6 +382,7 @@
 		x: number;
 		y: number;
 		modelName: string;
+		fieldScope: FieldScope;
 		round: number;
 		rank: number | null;
 		totalModels: number;
@@ -306,6 +395,7 @@
 		x: 0,
 		y: 0,
 		modelName: '',
+		fieldScope: 'staked',
 		round: 0,
 		rank: null,
 		totalModels: 0,
@@ -338,6 +428,7 @@
 			x: parseFloat(circle.getAttribute('cx') ?? '0') + margin.left,
 			y: parseFloat(circle.getAttribute('cy') ?? '0') + margin.top,
 			modelName: history.modelName,
+			fieldScope: history.fieldScope ?? 'staked',
 			round: dataPoint.roundNumber,
 			rank: dataPoint.rank,
 			totalModels: dataPoint.totalModels,
@@ -390,22 +481,79 @@
 			<p class="retro-text-secondary">Select models and load rankings to display the chart</p>
 		</div>
 	{:else}
-		<!-- Model Legend/Toggles -->
+		<!-- Chart controls: what the chart plots (round filter) and which of its
+		     series are visible. Both sit here, beside the chart they act on, rather
+		     than with the query controls that decide what is fetched. -->
+		<div class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+			<div
+				class="flex items-center gap-2"
+				class:opacity-50={!stakedFilterEnabled}
+				title={stakedFilterEnabled
+					? undefined
+					: "Crypto's staked flag reflects the model's current stake, not a per-round fact, so this filter has nothing to act on."}
+			>
+				<span class="text-xs font-medium retro-text-secondary uppercase">Rounds</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					{#each [{ v: 'staked', label: 'Staked' }, { v: 'unstaked', label: 'Unstaked' }, { v: 'both', label: 'Both' }] as opt}
+						<button
+							onclick={() => onStakedFilterChange?.(opt.v as StakedFilter)}
+							disabled={!stakedFilterEnabled}
+							class="px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed"
+							style={stakedFilter === opt.v
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{opt.label}
+						</button>
+					{/each}
+				</div>
+			</div>
+
+			<div class="flex items-center gap-2">
+				<span class="text-xs font-medium retro-text-secondary uppercase">
+					Models ({shownCount}/{seriesKeys.length})
+				</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					{#each [{ label: 'All', run: showAll }, { label: 'None', run: hideAll }, { label: 'Invert', run: invertAll }] as action}
+						<button
+							onclick={action.run}
+							class="px-2.5 py-1 text-xs font-medium transition-colors"
+							style="color: var(--retro-text-primary);"
+						>
+							{action.label}
+						</button>
+					{/each}
+				</div>
+			</div>
+		</div>
+
+		<!-- Model Legend/Toggles. Each history is its own toggle — when the "vs Both"
+		     competitor toggle is active a model has two (staked + all), shown here
+		     as separate chips sharing a colour but naming their field. -->
 		<div class="mb-4 flex flex-wrap gap-2">
-			{#each rankingHistories as history, index}
+			{#each rankingHistories as history (seriesKey(history))}
+				{@const color = getModelColor(history.modelId)}
+				{@const key = seriesKey(history)}
 				<button
-					onclick={() => toggleModelVisibility(history.modelId)}
-					class="flex items-center gap-2 px-3 py-1 rounded-full text-sm transition-all {modelVisibility[history.modelId] ? 'opacity-100' : 'opacity-40'}"
-					style="background-color: {getModelColor(index)}20; border: 2px solid {getModelColor(index)};"
+					onclick={() => toggleModelVisibility(key)}
+					class="flex items-center gap-2 px-3 py-1 rounded-full text-sm transition-all {modelVisibility[key] ? 'opacity-100' : 'opacity-40'}"
+					style="background-color: {color}20; border: 2px solid {color};"
 				>
 					<span
 						class="w-3 h-3 rounded-full"
-						style="background-color: {getModelColor(index)};"
+						style="background-color: {color};"
 					></span>
-					<span class="retro-text-primary">{history.modelName}</span>
+					<span class="retro-text-primary">
+						{history.modelName}{hasDualScope ? ` (${fieldScopeLabel(history.fieldScope ?? 'staked')})` : ''}
+					</span>
 				</button>
 			{/each}
 		</div>
+		{#if hasDualScope}
+			<p class="mb-4 text-xs retro-text-secondary">
+				Solid line = staked field, dashed line = all models (vs Both competitor toggle).
+			</p>
+		{/if}
 
 		<!-- Raw-metric overlay toggles. Overlay the per-round (or windowed) metric
 		     values on a secondary right axis, alongside the rank line. -->
@@ -604,9 +752,9 @@
 					<!-- Metric overlay lines (drawn under the rank line/points so the rank
 					     stays the focal series). Dashed = metric1 (corr), dotted = metric2. -->
 					{#if anyMetricOverlay}
-						{#each visibleHistories as history}
-							{@const color = getModelColor(rankingHistories.indexOf(history))}
-							{@const rankings = displayedRankingsById.get(history.modelId) ?? history.rankings}
+						{#each historiesInDrawOrder as history (seriesKey(history))}
+							{@const color = getModelColor(history.modelId)}
+							{@const rankings = displayedRankingsById.get(seriesKey(history)) ?? history.rankings}
 							{#if showMetric1}
 								{@const corrPath = corrLine(rankings)}
 								{#if corrPath}
@@ -636,18 +784,21 @@
 						{/each}
 					{/if}
 
-					<!-- Data lines -->
-					{#each visibleHistories as history, index}
-						{@const rankings = displayedRankingsById.get(history.modelId) ?? history.rankings}
+					<!-- Data lines. Solid = staked field (or single-scope mode); dashed = all
+					     models — see lineDashArray. A model's two "vs Both" lines share a
+					     colour (getModelColor keys off modelId, not the series). -->
+					{#each historiesInDrawOrder as history (seriesKey(history))}
+						{@const rankings = displayedRankingsById.get(seriesKey(history)) ?? history.rankings}
 						{@const pathData = line(rankings)}
 						{#if pathData}
 							<path
 								d={pathData}
 								fill="none"
-								stroke={getModelColor(rankingHistories.indexOf(history))}
+								stroke={getModelColor(history.modelId)}
 								stroke-width="2.5"
 								stroke-linecap="round"
 								stroke-linejoin="round"
+								stroke-dasharray={lineDashArray(history)}
 							/>
 						{/if}
 
@@ -658,7 +809,7 @@
 								cx={xScale(dataPoint.roundNumber)}
 								cy={yScale(plotValue(dataPoint)!)}
 								r="4"
-								fill={getModelColor(rankingHistories.indexOf(history))}
+								fill={getModelColor(history.modelId)}
 								fill-opacity={resolving ? 0.4 : 1}
 								stroke="var(--retro-bg-dark)"
 								stroke-width="1.5"
@@ -667,15 +818,19 @@
 								tabindex="0"
 								aria-label={isPercentile
 									? `Round ${dataPoint.roundNumber}, ${history.modelName}, percentile ${formatPercentile(plotValue(dataPoint)!)}`
-									: `Round ${dataPoint.roundNumber}, ${history.modelName}, rank ${dataPoint.rank}`}
+									: `Round ${dataPoint.roundNumber}, ${history.modelName}, rank ${dataPoint.rank} of ${dataPoint.totalModels} (${fieldScopeLabel(history.fieldScope ?? 'staked')})`}
 								onmouseenter={(e) => setTooltipFromCircle(e.currentTarget, history, dataPoint)}
 								onmouseleave={hideTooltip}
 								onfocus={(e) => setTooltipFromCircle(e.currentTarget, history, dataPoint)}
 								onblur={hideTooltip}
-								onclick={() => onPointSelect?.(dataPoint.roundNumber, history.modelName)}
+								onclick={() => {
+									focusModel(history.modelId);
+									onPointSelect?.(dataPoint.roundNumber, history.modelName);
+								}}
 								onkeydown={(e) => {
 									if (e.key === 'Enter' || e.key === ' ') {
 										e.preventDefault();
+										focusModel(history.modelId);
 										onPointSelect?.(dataPoint.roundNumber, history.modelName);
 									}
 								}}
@@ -706,6 +861,11 @@
 						{:else}
 							<div class="text-xs">Rank: #{tooltip.rank}</div>
 						{/if}
+						<!-- totalModels differs between the staked field and all models, so the
+						     denominator's source must always be spelled out — never left implicit. -->
+						<div class="text-xs">
+							Out of {tooltip.totalModels} ({fieldScopeLabel(tooltip.fieldScope)})
+						</div>
 					{:else}
 						<div class="text-xs">Not ranked (no stake)</div>
 					{/if}
@@ -724,7 +884,7 @@
 
 		<!-- Chart info -->
 		<div class="mt-4 text-xs retro-text-secondary">
-			<p>Showing ranks for {visibleHistories.length} of {rankingHistories.length} models</p>
+			<p>Showing ranks for {visibleHistories.length} of {rankingHistories.length} {hasDualScope ? 'series (staked + all-models lines)' : 'models'}</p>
 			<p>Round range: {roundRange[0]} - {roundRange[1]}</p>
 		</div>
 	{/if}

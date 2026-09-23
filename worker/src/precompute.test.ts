@@ -5,7 +5,35 @@
  * check), so only the pure functions run here — no API calls.
  */
 import { describe, it, expect } from 'vitest';
+
+describe('leaderboard entries kept for the fleet', () => {
+	// Classic's leaderboard lists ~15k models of which ~11k are unstaked. They
+	// were skipped to bound D1's row count; without that ceiling, skipping them
+	// means a rankings request for an unstaked Classic model has no stored rows
+	// and falls back to a live Numerai fetch (~1.2s per model, per request).
+	it('keeps staked models everywhere', () => {
+		expect(keepsLeaderboardEntry(10, 8, false)).toBe(true);
+		expect(keepsLeaderboardEntry(10, 11, false)).toBe(true);
+	});
+
+	it('skips unstaked Classic models unless asked for them', () => {
+		expect(keepsLeaderboardEntry(0, 8, false)).toBe(false);
+		expect(keepsLeaderboardEntry(0, 8, true)).toBe(true);
+	});
+
+	it('always keeps unstaked Signals and Crypto entries, as it always has', () => {
+		expect(keepsLeaderboardEntry(0, 11, false)).toBe(true);
+		expect(keepsLeaderboardEntry(0, 12, false)).toBe(true);
+	});
+});
 import {
+  extractClassicScores,
+  keepsLeaderboardEntry,
+  performanceCsvChunks,
+  performanceCsvHeader,
+  performanceCsvRow,
+  parsePerformanceCsv,
+  type PerformanceRound,
   extractCryptoMetrics,
   computeMinRound,
   computeRoundsToFetch,
@@ -150,4 +178,64 @@ describe('computeBackoffMs (exponential from 30s, respects Retry-After)', () => 
   it('caps an oversized Retry-After', () => {
     expect(computeBackoffMs(0, 999_999_999)).toBe(RETRY_CAP_MS);
   });
+});
+
+describe('performance CSV cache', () => {
+	const round = (n: number): PerformanceRound => ({
+		roundNumber: n,
+		corr: 0.01,
+		mmc: 0.02,
+		tc: null,
+		alpha: 0.03,
+		mpc: 0.04,
+		neutralCorr: 0.05,
+		neutralMmc: 0.06,
+		corr60: 0.07,
+		mmc60: 0.08,
+		stakeValue: 7
+	});
+
+	it('round-trips every metric, including the neutral pair', () => {
+		const lines = [performanceCsvHeader(), performanceCsvRow('m1', round(1300))];
+		expect(parsePerformanceCsv(lines).get('m1')).toEqual([round(1300)]);
+	});
+
+	it('still reads a cache written before the neutral pair existed', () => {
+		const legacy = [
+			'modelName,roundNumber,corr,mmc,tc,alpha,mpc,stakeValue',
+			'm1,1300,0.01,0.02,,0.03,0.04,7'
+		];
+		expect(parsePerformanceCsv(legacy).get('m1')).toEqual([
+			{ ...round(1300), neutralCorr: null, neutralMmc: null, corr60: null, mmc60: null }
+		]);
+	});
+
+	it('emits the rows in chunks, so a big run never builds one oversized string', () => {
+		// 20.2M records overflowed V8's maximum string length and killed a run
+		// after 16 minutes of fetching.
+		const data = new Map([['m1', Array.from({ length: 2500 }, (_, i) => round(1000 + i))]]);
+		const chunks = [...performanceCsvChunks(data, 1000)];
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.join('').trimEnd().split('\n')).toHaveLength(2501); // header + rows
+	});
+});
+
+describe('extractClassicScores', () => {
+	it('pulls mmc60 out of a Classic round, which the profile query has no field for', () => {
+		expect(
+			extractClassicScores([
+				{ displayName: 'corr20', value: 0.01 },
+				{ displayName: 'mmc60', value: 0.004 },
+				{ displayName: 'fnc', value: 0.02 }
+			])
+		).toEqual({ mmc60: 0.004 });
+	});
+
+	it('keeps an explicit null (an unresolved round) rather than inventing a value', () => {
+		expect(extractClassicScores([{ displayName: 'mmc60', value: null }])).toEqual({ mmc60: null });
+	});
+
+	it('handles a round with no scores at all', () => {
+		expect(extractClassicScores(null)).toEqual({ mmc60: null });
+	});
 });

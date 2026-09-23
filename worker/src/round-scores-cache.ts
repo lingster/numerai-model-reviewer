@@ -27,7 +27,7 @@ import { d1Retry } from './d1-retry';
  * The submission-sourced metrics we persist per round — the union across
  * tournaments, since each scores on a different subset:
  *   Classic  mmc60        (corr/mmc come from roundModelPerformances)
- *   Signals  alpha, mpc   (ditto)
+ *   Signals  alpha, mpc, neutral_corr, neutral_mmc  (ditto)
  *   Crypto   corr, mmc    (roundModelPerformances carries no scores at all)
  * Only a tournament's own metrics are ever read or written; the rest stay null.
  */
@@ -37,10 +37,21 @@ export interface RoundScores {
 	mmc60: number | null;
 	alpha: number | null;
 	mpc: number | null;
+	/** Signals' neutral pair, named as Numerai's submissionScores name them. */
+	neutral_corr: number | null;
+	neutral_mmc: number | null;
 }
 
 /** The RoundScores members, for iterating without restating them. */
-export const SCORE_FIELDS = ['corr', 'mmc', 'mmc60', 'alpha', 'mpc'] as const satisfies readonly (keyof RoundScores)[];
+export const SCORE_FIELDS = [
+	'corr',
+	'mmc',
+	'mmc60',
+	'alpha',
+	'mpc',
+	'neutral_corr',
+	'neutral_mmc'
+] as const satisfies readonly (keyof RoundScores)[];
 
 /** The round range already fetched for a model, and when it was last topped up. */
 export interface Coverage {
@@ -64,24 +75,33 @@ export const MUTABLE_ROUND_WINDOW = 70;
 /** How long a cached tail is served before the mutable rounds are refreshed. */
 export const TAIL_REFRESH_SECONDS = 900;
 
-interface RoundScoreRow {
-	round_number: number;
-	corr: number | null;
-	mmc: number | null;
-	mmc60: number | null;
-	alpha: number | null;
-	mpc: number | null;
-}
+/** A model_round_scores row: the round, plus every score field. Derived from
+ *  RoundScores so the two cannot drift when a metric is added. */
+type RoundScoreRow = { round_number: number } & RoundScores;
 
 interface CoverageRow {
 	covered_from_round: number;
 	covered_to_round: number;
 	updated_at: number;
+	/** The SCORE_FIELDS the rows were written with; see readCachedRoundScores. */
+	score_fields: string | null;
 }
 
+/** A RoundScores with every field null, to be filled with a tournament's own. */
+export function emptyRoundScores(): RoundScores {
+	return { corr: null, mmc: null, mmc60: null, alpha: null, mpc: null, neutral_corr: null, neutral_mmc: null };
+}
+
+/** The score fields a cached row holds, as recorded with its coverage. */
+const storedFieldList = (): string => SCORE_FIELDS.join(',');
+
 /** True when a round carries nothing worth a row. */
+
 function isEmpty(s: RoundScores): boolean {
-	return SCORE_FIELDS.every((f) => s[f] === null);
+	// `== null` covers undefined too: a caller built before a field existed (or a
+	// row read back from a database that predates it) leaves it missing rather
+	// than null, and an unscored round must not look scored because of that.
+	return SCORE_FIELDS.every((f) => s[f] == null);
 }
 
 /** Everything cached for a model: its scored rounds and its coverage watermark. */
@@ -94,7 +114,7 @@ export async function readCachedRoundScores(
 		d1Retry(() =>
 			db
 				.prepare(
-					`SELECT round_number, corr, mmc, mmc60, alpha, mpc
+					`SELECT round_number, ${SCORE_FIELDS.join(', ')}
 					 FROM model_round_scores
 					 WHERE model_id = ? AND tournament = ?`
 				)
@@ -104,7 +124,7 @@ export async function readCachedRoundScores(
 		d1Retry(() =>
 			db
 				.prepare(
-					`SELECT covered_from_round, covered_to_round, updated_at
+					`SELECT covered_from_round, covered_to_round, updated_at, score_fields
 					 FROM model_score_coverage
 					 WHERE model_id = ? AND tournament = ?`
 				)
@@ -115,18 +135,19 @@ export async function readCachedRoundScores(
 
 	const scores = new Map<number, RoundScores>();
 	for (const row of scoreRows.results ?? []) {
-		scores.set(row.round_number, {
-			corr: row.corr,
-			mmc: row.mmc,
-			mmc60: row.mmc60,
-			alpha: row.alpha,
-			mpc: row.mpc
-		});
+		const entry = emptyRoundScores();
+		for (const field of SCORE_FIELDS) entry[field] = row[field] ?? null;
+		scores.set(row.round_number, entry);
 	}
+
+	// Coverage written under a different set of score fields is not coverage of
+	// today's: its rows can never hold a metric added since, and nothing would
+	// ever refetch them. Ignoring it makes the next read fill them in.
+	const current = coverageRow !== null && coverageRow.score_fields === storedFieldList();
 
 	return {
 		scores,
-		coverage: coverageRow
+		coverage: current
 			? {
 					fromRound: coverageRow.covered_from_round,
 					toRound: coverageRow.covered_to_round,
@@ -197,10 +218,11 @@ export async function writeRoundScores(
 	changed: ReadonlyMap<number, RoundScores>,
 	coverage: Coverage
 ): Promise<void> {
+	const placeholders = SCORE_FIELDS.map(() => '?').join(', ');
 	const scoreStatement = db.prepare(
 		`INSERT OR REPLACE INTO model_round_scores
-		   (model_id, tournament, round_number, corr, mmc, mmc60, alpha, mpc, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		   (model_id, tournament, round_number, ${SCORE_FIELDS.join(', ')}, updated_at)
+		 VALUES (?, ?, ?, ${placeholders}, ?)`
 	);
 
 	const statements = [...changed].map(([round, s]) =>
@@ -208,11 +230,7 @@ export async function writeRoundScores(
 			modelId,
 			tournament,
 			round,
-			s.corr,
-			s.mmc,
-			s.mmc60,
-			s.alpha,
-			s.mpc,
+			...SCORE_FIELDS.map((field) => s[field] ?? null),
 			coverage.updatedAt
 		)
 	);
@@ -221,10 +239,17 @@ export async function writeRoundScores(
 		db
 			.prepare(
 				`INSERT OR REPLACE INTO model_score_coverage
-				   (model_id, tournament, covered_from_round, covered_to_round, updated_at)
-				 VALUES (?, ?, ?, ?, ?)`
+				   (model_id, tournament, covered_from_round, covered_to_round, updated_at, score_fields)
+				 VALUES (?, ?, ?, ?, ?, ?)`
 			)
-			.bind(modelId, tournament, coverage.fromRound, coverage.toRound, coverage.updatedAt)
+			.bind(
+				modelId,
+				tournament,
+				coverage.fromRound,
+				coverage.toRound,
+				coverage.updatedAt,
+				storedFieldList()
+			)
 	);
 
 	await d1Retry(() => db.batch(statements));

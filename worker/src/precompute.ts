@@ -18,13 +18,20 @@
 
 import { readMaxRound } from './refresh-floor';
 import { refreshCoverage, type RoundSpan } from './tournament-coverage';
-import { encodeFieldMetrics } from './round-field';
-import { fieldFromRows, readStoredRounds, roundsToBackfill, upsertRoundFieldSql } from './round-field-store';
+import { encodeFieldMetrics, FIELD_SCOPES, type FieldScope } from './round-field';
+import { metricSetsFor, type MetricSet } from './ranking';
+import {
+  fieldFromRows,
+  readStoredRounds,
+  roundsToBackfill,
+  upsertRoundFieldSql,
+  type FieldRow
+} from './round-field-store';
 import type { D1Query } from './d1-query';
 import type { PrecomputeTarget, SqlWriter } from './precompute-target';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
 import { execFileSync, execSync } from 'child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
@@ -47,6 +54,8 @@ interface PrecomputeConfig {
   backfillRounds: number;
   /** Already-stored rounds to re-fetch and rewrite (see --refresh-overlap below). */
   refreshOverlapRounds: number;
+  /** Capture Classic models with no stake (see keepsLeaderboardEntry). */
+  includeUnstaked: boolean;
   batchSize: number;
   rateLimitMs: number;
   concurrency: number;
@@ -59,6 +68,9 @@ const DEFAULT_CONFIG: PrecomputeConfig = {
   // budget while covering ~2,900 rounds of history in about a month.
   backfillRounds: 100,
   refreshOverlapRounds: 0,
+  // Off by default: the D1 runs in GitHub Actions cannot afford ~11k more
+  // models. The self-hosted scheduler turns it on.
+  includeUnstaked: false,
   tournament: 8,
   topN: 10000,
   // Max batchSize is 3 — higher values exceed the Numerai API rate limit
@@ -98,6 +110,7 @@ function loadYamlConfig(): Partial<PrecomputeConfig> {
         topN: parsed.topN,
         backfillRounds: parsed.backfillRounds,
         refreshOverlapRounds: parsed.refreshOverlapRounds,
+        includeUnstaked: parsed.includeUnstaked,
         batchSize: parsed.batchSize,
         rateLimitMs: parsed.rateLimitMs,
         concurrency: parsed.concurrency,
@@ -122,6 +135,7 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
   // rewritten harmlessly and new rounds/models are appended — no bulk DELETE.
   // Use --reset only for one-off migrations (e.g. changing the model source).
   const reset = args.includes('--reset');
+  const includeUnstaked = args.includes('--include-unstaked') ? true : undefined;
   const overrides: Partial<PrecomputeConfig> = {};
 
   for (let i = 0; i < args.length; i++) {
@@ -159,6 +173,7 @@ function parseCliArgs(): { isLocal: boolean; noCache: boolean; reset: boolean; o
     }
   }
 
+  if (includeUnstaked !== undefined) overrides.includeUnstaked = includeUnstaked;
   return { isLocal, noCache, reset, overrides };
 }
 
@@ -399,24 +414,40 @@ async function fetchModelAccountMap(
   return map;
 }
 
+/**
+ * Whether a leaderboard entry joins the fleet precompute fetches.
+ *
+ * Signals and Crypto take their leaderboards as-is. Classic's v2Leaderboard is
+ * ordered by rank and lists ~15k models, ~11k of them unstaked; those were
+ * skipped to bound D1's rows. A model that is not in the fleet has no stored
+ * rows at all, so ranking it costs a live Numerai fetch per request — which is
+ * why the self-hosted runs include them.
+ */
+export function keepsLeaderboardEntry(
+  stake: number,
+  tournament: number,
+  includeUnstaked: boolean
+): boolean {
+  const isClassic = tournament !== SIGNALS_TOURNAMENT && tournament !== CRYPTO_TOURNAMENT;
+  return !isClassic || includeUnstaked || stake > 0;
+}
+
 async function fetchTopStakedModels(
   tournament: number,
   limit: number,
-  rateLimitMs: number
+  rateLimitMs: number,
+  includeUnstaked = false
 ): Promise<Array<{ modelId: string; modelName: string; username: string; stakeValue: number }>> {
   const models: Array<{ modelId: string; modelName: string; username: string; stakeValue: number }> = [];
   const batchSize = 500;
   let offset = 0;
   const isSignals = tournament === SIGNALS_TOURNAMENT;
   const isCrypto = tournament === CRYPTO_TOURNAMENT;
-  const isClassic = !isSignals && !isCrypto;
 
   // All three leaderboards are model-level (one row per model, with the model's
   // own stake), so secondary staked models are captured:
   //   Classic: v2Leaderboard, Signals: signalsLeaderboard, Crypto: cryptosignalsLeaderboard.
-  // v2Leaderboard is ordered by rank (not stake) and includes many unstaked
-  // models, so for Classic we keep only stake > 0 to bound the set; Signals/Crypto
-  // take their entries as-is.
+  // Which entries are kept — see keepsLeaderboardEntry.
   const leaderboardField = isSignals
     ? 'signalsLeaderboard'
     : isCrypto
@@ -438,7 +469,7 @@ async function fetchTopStakedModels(
     for (const entry of batch) {
       if (models.length >= limit) break;
       const stake = entry.nmrStaked ? parseFloat(entry.nmrStaked) : 0;
-      if (isClassic && stake <= 0) continue; // skip unstaked models in the Classic field
+      if (!keepsLeaderboardEntry(stake, tournament, includeUnstaked)) continue;
       models.push({
         modelId: entry.id,
         modelName: entry.username, // username IS the model name on these leaderboards
@@ -508,6 +539,15 @@ export type PerformanceRound = {
   corr: number | null;
   mmc: number | null;
   tc: number | null;
+  // Signals' neutral pair (neutral correlation / neutral contribution), which
+  // Numerai pays on from rounds opening 2026-09-25. Same call as alpha/mpc, and
+  // published for the same rounds. Null for Classic (8) / Crypto (12).
+  neutralCorr?: number | null;
+  neutralMmc?: number | null;
+  // Classic's 60-day pair: corr60 from the profile query, mmc60 from the
+  // per-model submissionScores augmentation (Numerai exposes it nowhere else).
+  corr60?: number | null;
+  mmc60?: number | null;
   // Signals "new scoring" metrics, sourced from v2RoundModelPerformances.submissionScores.
   // Null for Classic (8) / Crypto (12) rows.
   alpha: number | null;
@@ -654,6 +694,71 @@ function cacheIsValid(config: PrecomputeConfig): boolean {
   }
 }
 
+/** Header for performances.csv. Column names drive parsing, so adding one is safe. */
+export function performanceCsvHeader(): string {
+  return 'modelName,roundNumber,corr,mmc,tc,alpha,mpc,neutralCorr,neutralMmc,corr60,mmc60,stakeValue';
+}
+
+export function performanceCsvRow(modelName: string, r: PerformanceRound): string {
+  return `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.neutralCorr ?? ''},${r.neutralMmc ?? ''},${r.corr60 ?? ''},${r.mmc60 ?? ''},${r.stakeValue ?? ''}`;
+}
+
+/**
+ * performances.csv in pieces of `linesPerChunk` rows.
+ *
+ * One string for the whole file overflowed V8's maximum string length on a
+ * 20.2M-record Classic run — after sixteen minutes of fetching — so the file is
+ * written a chunk at a time and never held whole in memory.
+ */
+export function* performanceCsvChunks(
+  performanceData: ReadonlyMap<string, PerformanceRound[]>,
+  linesPerChunk = 50_000
+): Generator<string> {
+  let lines: string[] = [performanceCsvHeader()];
+  for (const [modelName, rounds] of performanceData) {
+    for (const r of rounds) {
+      lines.push(performanceCsvRow(modelName, r));
+      if (lines.length >= linesPerChunk) {
+        yield lines.join('\n') + '\n';
+        lines = [];
+      }
+    }
+  }
+  if (lines.length > 0) yield lines.join('\n') + '\n';
+}
+
+/** Parse performances.csv rows, tolerating caches written with fewer columns. */
+export function parsePerformanceCsv(lines: ReadonlyArray<string>): Map<string, PerformanceRound[]> {
+  const header = csvParseLine(lines[0] ?? '');
+  const at = (name: string): number => header.indexOf(name);
+  const num = (fields: string[], index: number): number | null =>
+    index >= 0 && fields[index] !== undefined && fields[index] !== '' ? parseFloat(fields[index]) : null;
+
+  const performanceData = new Map<string, PerformanceRound[]>();
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].length === 0) continue;
+    const fields = csvParseLine(lines[i]);
+    const modelName = fields[at('modelName')];
+    const round: PerformanceRound = {
+      roundNumber: parseInt(fields[at('roundNumber')], 10),
+      corr: num(fields, at('corr')),
+      mmc: num(fields, at('mmc')),
+      tc: num(fields, at('tc')),
+      alpha: num(fields, at('alpha')),
+      mpc: num(fields, at('mpc')),
+      neutralCorr: num(fields, at('neutralCorr')),
+      neutralMmc: num(fields, at('neutralMmc')),
+      corr60: num(fields, at('corr60')),
+      mmc60: num(fields, at('mmc60')),
+      stakeValue: num(fields, at('stakeValue'))
+    };
+    const existing = performanceData.get(modelName);
+    if (existing) existing.push(round);
+    else performanceData.set(modelName, [round]);
+  }
+  return performanceData;
+}
+
 function saveCache(
   allModels: TopModel[],
   performanceData: Map<string, PerformanceRound[]>,
@@ -670,16 +775,11 @@ function saveCache(
   }
   writeFileSync(CACHE_TOP_MODELS, modelLines.join('\n'), 'utf-8');
 
-  // Write performances.csv (with alpha/mpc for Signals)
-  const perfLines = ['modelName,roundNumber,corr,mmc,tc,alpha,mpc,stakeValue'];
-  for (const [modelName, rounds] of performanceData) {
-    for (const r of rounds) {
-      perfLines.push(
-        `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.stakeValue ?? ''}`
-      );
-    }
+  // performances.csv a chunk at a time — see performanceCsvChunks.
+  writeFileSync(CACHE_PERFORMANCES, '', 'utf-8');
+  for (const chunk of performanceCsvChunks(performanceData)) {
+    appendFileSync(CACHE_PERFORMANCES, chunk, 'utf-8');
   }
-  writeFileSync(CACHE_PERFORMANCES, perfLines.join('\n'), 'utf-8');
 
   // Write meta.json
   writeFileSync(CACHE_META, JSON.stringify(cacheConfigFingerprint(config), null, 2), 'utf-8');
@@ -700,40 +800,9 @@ function loadCache(): { allModels: TopModel[]; performanceData: Map<string, Perf
     });
   }
 
-  // Parse performances.csv. Tolerate the legacy 6-column format
-  // (no alpha/mpc) for caches written before this change.
-  const perfContent = readFileSync(CACHE_PERFORMANCES, 'utf-8');
-  const perfLines = perfContent.split('\n').filter(l => l.length > 0);
-  const headerCols = csvParseLine(perfLines[0] ?? '');
-  const hasAlphaMpc = headerCols.includes('alpha') && headerCols.includes('mpc');
-  const performanceData = new Map<string, PerformanceRound[]>();
-  for (let i = 1; i < perfLines.length; i++) {
-    const fields = csvParseLine(perfLines[i]);
-    const modelName = fields[0];
-    const round: PerformanceRound = hasAlphaMpc
-      ? {
-          roundNumber: parseInt(fields[1], 10),
-          corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
-          mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
-          tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
-          alpha: fields[5] !== '' ? parseFloat(fields[5]) : null,
-          mpc: fields[6] !== '' ? parseFloat(fields[6]) : null,
-          stakeValue: fields[7] !== '' ? parseFloat(fields[7]) : null
-        }
-      : {
-          roundNumber: parseInt(fields[1], 10),
-          corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
-          mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
-          tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
-          alpha: null,
-          mpc: null,
-          stakeValue: fields[5] !== '' ? parseFloat(fields[5]) : null
-        };
-    if (!performanceData.has(modelName)) {
-      performanceData.set(modelName, []);
-    }
-    performanceData.get(modelName)!.push(round);
-  }
+  // performances.csv, parsed by column name so an older cache still loads.
+  const perfLines = readFileSync(CACHE_PERFORMANCES, 'utf-8').split('\n');
+  const performanceData = parsePerformanceCsv(perfLines);
 
   return { allModels, performanceData };
 }
@@ -774,7 +843,7 @@ async function fetchBatchedPerformance(
       return `m${idx}: ${profileQuery}(modelName: ${JSON.stringify(name)}) {
         id username accountName
         roundModelPerformances {
-          roundNumber corr corr20V2 corrV4 mmc mmc20d tc fncV4
+          roundNumber corr corr20V2 corr60 corrV4 mmc mmc20d tc fncV4
           selectedStakeValue roundResolved
         }
       }`;
@@ -791,6 +860,7 @@ async function fetchBatchedPerformance(
           roundNumber: number;
           corr: number | null;
           corr20V2: number | null;
+          corr60: number | null;
           corrV4: number | null;
           mmc: number | null;
           mmc20d: number | null;
@@ -838,6 +908,7 @@ async function fetchBatchedPerformance(
             tc: r.tc,
             alpha: null,
             mpc: null,
+            corr60: isSignals ? null : r.corr60,
             stakeValue: r.selectedStakeValue
           }));
 
@@ -874,19 +945,21 @@ async function fetchBatchedPerformance(
  * in place. Best-effort: a failure on one model leaves its alpha/mpc null but
  * doesn't stop the rest.
  */
-async function augmentWithAlphaMpc(
+async function augmentFromSubmissionScores(
   byModel: Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>,
   tournament: number,
   concurrency: number,
   lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<void> {
-  // Option C: alpha/mpc are only needed for rounds we actually (re)fetched, so
+  const isSignals = tournament === SIGNALS_TOURNAMENT;
+  const what = isSignals ? 'alpha/mpc + neutral' : 'mmc60';
+  // Option C: these are only needed for rounds we actually (re)fetched, so
   // skip models with no new rounds. With the incremental round filter upstream,
   // that's every model idle since the last run — a big cut on steady-state days.
   const active = [...byModel.entries()].filter(([, e]) => e.modelId && e.rounds.length > 0);
   const skipped = byModel.size - active.length;
   if (skipped > 0) {
-    console.log(`  Skipping ${skipped}/${byModel.size} models with no new rounds (alpha/mpc)`);
+    console.log(`  Skipping ${skipped}/${byModel.size} models with no new rounds (${what})`);
   }
   let processed = 0;
   let lastLogged = 0;
@@ -907,34 +980,72 @@ async function augmentWithAlphaMpc(
         { modelId: entry.modelId, tournament, lastNRounds }
       );
 
-      const byRound = new Map<number, { alpha: number | null; mpc: number | null }>();
+      const byRound = new Map<number, Array<{ displayName: string; value: number | null }> | null>();
       for (const r of result.v2RoundModelPerformances ?? []) {
-        let alpha: number | null = null;
-        let mpc: number | null = null;
-        for (const s of r.submissionScores ?? []) {
-          if (s.displayName === 'alpha') alpha = s.value;
-          if (s.displayName === 'mpc') mpc = s.value;
-        }
-        byRound.set(r.roundNumber, { alpha, mpc });
+        byRound.set(r.roundNumber, r.submissionScores);
       }
 
       for (const round of entry.rounds) {
-        const scores = byRound.get(round.roundNumber);
-        if (scores) {
-          round.alpha = scores.alpha;
-          round.mpc = scores.mpc;
+        if (!byRound.has(round.roundNumber)) continue;
+        const scores = byRound.get(round.roundNumber) ?? null;
+        if (isSignals) {
+          const signals = extractSignalsScores(scores);
+          round.alpha = signals.alpha;
+          round.mpc = signals.mpc;
+          round.neutralCorr = signals.neutralCorr;
+          round.neutralMmc = signals.neutralMmc;
+        } else {
+          round.mmc60 = extractClassicScores(scores).mmc60;
         }
       }
     } catch (e) {
-      console.error(`  Warning: alpha/mpc fetch failed for ${modelKey}:`, e instanceof Error ? e.message : e);
+      console.error(`  Warning: ${what} fetch failed for ${modelKey}:`, e instanceof Error ? e.message : e);
     }
 
     processed++;
     if (processed - lastLogged >= 50 || processed === active.length) {
       lastLogged = processed;
-      console.log(`  Augmented alpha/mpc for ${processed}/${active.length} models...`);
+      console.log(`  Augmented ${what} for ${processed}/${active.length} models...`);
     }
   });
+}
+
+export interface SignalsScores {
+  alpha: number | null;
+  mpc: number | null;
+  neutralCorr: number | null;
+  neutralMmc: number | null;
+}
+
+/**
+ * Both Signals metric pairs from one round's submissionScores: alpha/mpc (what
+ * payouts use up to ~round 1362) and neutral_corr/neutral_mmc (what they use
+ * from rounds opening 2026-09-25). Numerai publishes both for the same rounds.
+ */
+export function extractSignalsScores(
+  submissionScores: Array<{ displayName: string; value: number | null }> | null
+): SignalsScores {
+  const scores: SignalsScores = { alpha: null, mpc: null, neutralCorr: null, neutralMmc: null };
+  for (const s of submissionScores ?? []) {
+    if (s.displayName === 'alpha') scores.alpha = s.value;
+    else if (s.displayName === 'mpc') scores.mpc = s.value;
+    else if (s.displayName === 'neutral_corr') scores.neutralCorr = s.value;
+    else if (s.displayName === 'neutral_mmc') scores.neutralMmc = s.value;
+  }
+  return scores;
+}
+
+/**
+ * Classic's mmc60 from one round's submissionScores — the only place Numerai
+ * publishes it (the profile query has corr60 but no 60-day mmc).
+ */
+export function extractClassicScores(
+  submissionScores: Array<{ displayName: string; value: number | null }> | null
+): { mmc60: number | null } {
+  for (const s of submissionScores ?? []) {
+    if (s.displayName === 'mmc60') return { mmc60: s.value };
+  }
+  return { mmc60: null };
 }
 
 /**
@@ -1035,15 +1146,37 @@ async function fetchCryptoPerformance(
  * model with a positive stake, or every model at all for Crypto, which has no
  * stake data.
  */
-function stakedFieldRows(
+function fieldRowsInScope(
   rounds: Array<{ round: PerformanceRound }>,
-  tournament: number
-): Array<Pick<PerformanceRound, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc'>> {
+  tournament: number,
+  scope: FieldScope
+): FieldRow[] {
   return rounds
     .filter(({ round }) =>
-      tournament === CRYPTO_TOURNAMENT ? true : round.stakeValue !== null && round.stakeValue > 0
+      scope === 'all' || tournament === CRYPTO_TOURNAMENT
+        ? true
+        : round.stakeValue !== null && round.stakeValue > 0
     )
-    .map(({ round }) => round);
+    .map(({ round }) => toFieldRow(round));
+}
+
+/**
+ * A fetched round in the shape the stored field reads. The pipeline names the
+ * neutral pair neutralCorr/neutralMmc and the database neutral_corr/neutral_mmc,
+ * so the translation happens here, once.
+ */
+function toFieldRow(round: PerformanceRound): FieldRow {
+  return {
+    corr: round.corr,
+    mmc: round.mmc,
+    tc: round.tc,
+    alpha: round.alpha,
+    mpc: round.mpc,
+    neutral_corr: round.neutralCorr ?? null,
+    neutral_mmc: round.neutralMmc ?? null,
+    corr60: round.corr60 ?? null,
+    mmc60: round.mmc60 ?? null
+  };
 }
 
 /** Group the in-memory performance data by round, for rounds at or after `minRound`. */
@@ -1063,6 +1196,17 @@ function roundsFromMemory(
   return byRound;
 }
 
+/**
+ * The stored fields a tournament needs: every scope, times every metric set it
+ * has. Only Signals has a second pair (alpha/mpc and the neutral scores), so
+ * Classic and Crypto store one field per scope.
+ */
+function fieldVariants(tournament: number): Array<{ scope: FieldScope; metricSet: MetricSet }> {
+  return FIELD_SCOPES.flatMap((scope) =>
+    metricSetsFor(tournament).map((metricSet) => ({ scope, metricSet }))
+  );
+}
+
 /** Rounds read back from D1, for backfilling fields we did not just fetch. */
 async function readFieldRowsFromD1(
   d1Query: D1Query,
@@ -1079,7 +1223,7 @@ async function readFieldRowsFromD1(
   for (let i = 0; i < sorted.length; i += CHUNK) {
     const chunk = sorted.slice(i, i + CHUNK);
     const rows = await d1Query(
-      `SELECT round_number, corr, mmc, tc, alpha, mpc, stake_value FROM model_performances
+      `SELECT round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, corr60, mmc60, stake_value FROM model_performances
        WHERE tournament = ${tournament} AND round_number IN (${chunk.join(', ')})`
     );
     for (const row of rows) {
@@ -1091,6 +1235,10 @@ async function readFieldRowsFromD1(
         tc: toNumberOrNull(row.tc),
         alpha: toNumberOrNull(row.alpha),
         mpc: toNumberOrNull(row.mpc),
+        neutralCorr: toNumberOrNull(row.neutral_corr),
+        neutralMmc: toNumberOrNull(row.neutral_mmc),
+        corr60: toNumberOrNull(row.corr60),
+        mmc60: toNumberOrNull(row.mmc60),
         stakeValue: toNumberOrNull(row.stake_value)
       };
       const list = byRound.get(roundNumber);
@@ -1129,7 +1277,15 @@ async function storeRoundFields(
 ): Promise<{ fresh: number; backfilled: number }> {
   const fresh = roundsFromMemory(performanceData, minRound);
 
-  const alreadyStored = await readStoredRounds(d1Query, tournament);
+  // A round counts as stored only once every variant has its field, so adding a
+  // scope or a metric set backfills it over the existing history.
+  const variants = fieldVariants(tournament);
+  const storedPerVariant = await Promise.all(
+    variants.map(({ scope, metricSet }) => readStoredRounds(d1Query, tournament, scope, metricSet))
+  );
+  const alreadyStored = new Set(
+    [...storedPerVariant[0]].filter((round) => storedPerVariant.every((stored) => stored.has(round)))
+  );
   const missing = roundsToBackfill(coverage, new Set([...alreadyStored, ...fresh.keys()]), backfillLimit);
   const backfilled = await readFieldRowsFromD1(d1Query, tournament, missing);
 
@@ -1139,8 +1295,10 @@ async function storeRoundFields(
   // failing a run whose performance data stored fine.
   const write = async (round: number, rows: Array<{ round: PerformanceRound }>): Promise<boolean> => {
     try {
-      const field = fieldFromRows(stakedFieldRows(rows, tournament), tournament);
-      await d1Query(upsertRoundFieldSql(tournament, round, encodeFieldMetrics(field), now));
+      for (const { scope, metricSet } of variants) {
+        const field = fieldFromRows(fieldRowsInScope(rows, tournament, scope), tournament, metricSet);
+        await d1Query(upsertRoundFieldSql(tournament, round, scope, metricSet, encodeFieldMetrics(field), now));
+      }
       return true;
     } catch (error) {
       console.warn(`  Could not store the field for round ${round}; leaving it for a later run:`, error);
@@ -1280,9 +1438,13 @@ async function storePerformances(
       const tc = round.tc !== null ? round.tc : 'NULL';
       const alpha = round.alpha !== null ? round.alpha : 'NULL';
       const mpc = round.mpc !== null ? round.mpc : 'NULL';
+      const neutralCorr = round.neutralCorr ?? 'NULL';
+      const neutralMmc = round.neutralMmc ?? 'NULL';
+      const corr60 = round.corr60 ?? 'NULL';
+      const mmc60 = round.mmc60 ?? 'NULL';
       const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
       buffer.push(
-        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${stake}, ${tournament}, ${now});`
+        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, corr60, mmc60, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${neutralCorr}, ${neutralMmc}, ${corr60}, ${mmc60}, ${stake}, ${tournament}, ${now});`
       );
       if (buffer.length >= BATCH_SIZE) await flush();
     }
@@ -1392,6 +1554,7 @@ export async function runPrecompute(
   console.log(`Models:      ${config.models.length > 0 ? config.models.join(', ') : '(none)'}`);
   console.log(`Cache:       ${noCache ? 'disabled (--no-cache)' : 'enabled'}`);
   console.log(`Overlap:     ${config.refreshOverlapRounds} stored round(s) re-fetched`);
+  console.log(`Unstaked:    ${config.includeUnstaked ? 'included' : 'skipped (Classic)'}`);
   console.log(`Target:      ${target.description}\n`);
 
   let allModels: TopModel[];
@@ -1442,7 +1605,12 @@ export async function runPrecompute(
     // cryptosignalsLeaderboard), so every staked model — including an account's
     // secondary models — is captured.
     console.log(`Step 2: Fetching top ${config.topN} staked models...`);
-    const topModels = await fetchTopStakedModels(config.tournament, config.topN, config.rateLimitMs);
+    const topModels = await fetchTopStakedModels(
+      config.tournament,
+      config.topN,
+      config.rateLimitMs,
+      config.includeUnstaked
+    );
     console.log(`  Found ${topModels.length} models\n`);
 
     // Step 3: Fetch specific user models if configured
@@ -1499,10 +1667,14 @@ export async function runPrecompute(
     // Step 4b: For Signals, fetch alpha/mpc from submissionScores. This is a
     // per-model query so it's slow on large fleets — keep topN modest for
     // Signals runs (config.topN drives it).
-    if (config.tournament === SIGNALS_TOURNAMENT) {
-      console.log(`Step 4b: Augmenting ${fetched.size} Signals models with alpha/mpc...`);
-      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.concurrency, roundsToFetch);
-      console.log('  Alpha/mpc augmentation complete\n');
+    // Step 4b: the metrics only submissionScores carries — Signals' alpha/mpc
+    // and neutral pair, Classic's mmc60 (its payout half since 28 Aug 2026).
+    // One call per model, so it is the slow part of a run on a large fleet.
+    if (config.tournament !== CRYPTO_TOURNAMENT) {
+      const what = config.tournament === SIGNALS_TOURNAMENT ? 'alpha/mpc + neutral' : 'mmc60';
+      console.log(`Step 4b: Augmenting ${fetched.size} models with ${what}...`);
+      await augmentFromSubmissionScores(fetched, config.tournament, config.concurrency, roundsToFetch);
+      console.log(`  ${what} augmentation complete\n`);
     }
 
     // Step 4c: Crypto's leaderboard/perf queries expose only the model name, so
@@ -1542,10 +1714,16 @@ export async function runPrecompute(
     }
     console.log(`  Fetched ${totalRounds} total round records\n`);
 
-    // Save to CSV cache
-    console.log('Saving data to cache...');
-    saveCache(allModels, performanceData, config);
-    console.log(`  Cache written to ${CACHE_DIR}\n`);
+    // Save to CSV cache. --no-cache means this run neither reads nor writes one:
+    // the nightly scheduler passes it, and a full Classic fleet is millions of
+    // rows nobody will reuse.
+    if (noCache) {
+      console.log('Cache disabled (--no-cache); not writing one\n');
+    } else {
+      console.log('Saving data to cache...');
+      saveCache(allModels, performanceData, config);
+      console.log(`  Cache written to ${CACHE_DIR}\n`);
+    }
   }
 
   let totalRounds = 0;

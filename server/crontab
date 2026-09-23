@@ -2,7 +2,9 @@
 # service (docker-compose.yml). Times are UTC. supercronic never starts a job
 # while its previous run is still going.
 
-# Snapshot the database before the night's writes; keeps BACKUP_KEEP copies.
+# Snapshot the database before the night's writes: one daily copy, plus a
+# weekly one on Sundays. The data is a cache of Numerai's, so it is recoverable
+# by re-running the precompute — these just save that wait.
 0 3 * * * cd /app/server && node_modules/.bin/tsx src/backup.ts
 
 # New and still-resolving rounds, after Numerai's daily resolution (~04:00 UTC).

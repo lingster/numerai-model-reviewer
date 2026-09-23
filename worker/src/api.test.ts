@@ -7,7 +7,7 @@
  * (MAX_ROUNDS_HISTORY) rather than a short window that truncates older rounds.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModelPerformance, findCryptoModelByName, clearUserModelsCache, type Env } from './api';
+import { getModelPerformance, findCryptoModelByName, searchUsers, clearUserModelsCache, type Env } from './api';
 import { MAX_ROUNDS_HISTORY, CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 
 const env = {
@@ -303,4 +303,83 @@ describe('Numerai Authorization header', () => {
   it('omits the header when only one key is set', async () => {
     expect(await authHeaderFor({ NUMERAI_SECRET_KEY: '' })).toBeNull();
   });
+});
+
+describe('Signals neutral scores on the model performance endpoint', () => {
+	/** A Signals profile round plus its submissionScores augmentation. */
+	function mockSignalsFetch(scores: Array<{ displayName: string; value: number | null }>) {
+		let call = 0;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () => {
+				call++;
+				const data =
+					call === 1
+						? {
+								v2SignalsProfile: {
+									id: 'model-id-123',
+									username: 'mymodel',
+									accountName: 'owner',
+									roundModelPerformances: [{ roundNumber: 1350, roundResolved: true }]
+								}
+							}
+						: { v2RoundModelPerformances: [{ roundNumber: 1350, submissionScores: scores }] };
+				return new Response(JSON.stringify({ data }), { status: 200 });
+			})
+		);
+	}
+
+	it('carries neutral_corr and neutral_mmc alongside alpha and mpc', async () => {
+		// The models page scores Signals on either pair, so both must reach it.
+		mockSignalsFetch([
+			{ displayName: 'alpha', value: 0.01 },
+			{ displayName: 'mpc', value: 0.02 },
+			{ displayName: 'neutral_corr', value: 0.03 },
+			{ displayName: 'neutral_mmc', value: 0.04 }
+		]);
+
+		const result = await getModelPerformance('mymodel', env, 'owner', 'model-id-123', SIGNALS_TOURNAMENT);
+
+		const round = result?.rounds.find((r) => r.roundNumber === 1350);
+		expect(round?.alpha).toBe(0.01);
+		expect(round?.mpc).toBe(0.02);
+		expect(round?.neutralCorr).toBe(0.03);
+		expect(round?.neutralMmc).toBe(0.04);
+	});
+});
+
+describe('searchUsers cost', () => {
+	/** An env whose D1 returns `usernames` for the staked-model search. */
+	function envWithMatches(usernames: string[]) {
+		return {
+			...env,
+			DB: {
+				prepare: () => ({
+					bind: () => ({
+						all: async () => ({ results: usernames.map((username) => ({ username })) })
+					})
+				})
+			}
+		} as unknown as Env;
+	}
+
+	it('answers from the database alone when it has matches', async () => {
+		// Every keystroke used to cost a live Numerai round-trip for an exact
+		// username match, even when the database had already matched the term.
+		const calls = mockFetch([{}]);
+
+		const users = await searchUsers('fis', envWithMatches(['fish_n_chips', 'fisher']), 20);
+
+		expect(users.map((u) => u.username)).toEqual(['fish_n_chips', 'fisher']);
+		expect(calls).toHaveLength(0);
+	});
+
+	it('still asks Numerai when the database has nothing', async () => {
+		const calls = mockFetch([{ accountProfile: { id: 'id-1', username: 'newcomer' } }]);
+
+		const users = await searchUsers('newcomer', envWithMatches([]), 20);
+
+		expect(users.map((u) => u.username)).toEqual(['newcomer']);
+		expect(calls.length).toBeGreaterThan(0);
+	});
 });

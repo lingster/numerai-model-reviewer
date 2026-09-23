@@ -15,7 +15,17 @@ import {
 
 /** Build an own-scores row for the injection fetcher. */
 function ownRow(corr: number, mmc: number) {
-	return { model_name: 'target', corr, mmc, tc: null, alpha: null, mpc: null, stake_value: null };
+	return {
+		model_name: 'target',
+		corr,
+		mmc,
+		tc: null,
+		alpha: null,
+		mpc: null,
+		corr60: corr,
+		mmc60: mmc,
+		stake_value: null
+	};
 }
 
 describe('computeLatestResolvedRound', () => {
@@ -55,6 +65,8 @@ type Row = {
 	tc: number | null;
 	alpha: number | null;
 	mpc: number | null;
+	corr60?: number | null;
+	mmc60?: number | null;
 	stake_value: number | null;
 };
 
@@ -100,8 +112,24 @@ function mockEnv(rows: Row[]) {
 
 type Env = Parameters<typeof getModelRank>[0];
 
+/**
+ * A Classic row. Classic is ranked on its 60-day pair (what Numerai pays on
+ * since 28 Aug 2026), so a row carries the same values in both pairs unless a
+ * test is specifically about the difference.
+ */
 function row(round: number, model: string, corr: number, mmc: number): Row {
-	return { round_number: round, model_name: model, corr, mmc, tc: null, alpha: null, mpc: null, stake_value: 1 };
+	return {
+		round_number: round,
+		model_name: model,
+		corr,
+		mmc,
+		tc: null,
+		alpha: null,
+		mpc: null,
+		corr60: corr,
+		mmc60: mmc,
+		stake_value: 1
+	};
 }
 
 describe('getModelRank D1 access pattern', () => {
@@ -223,6 +251,28 @@ describe('getModelRank unstaked-model support', () => {
 
 		expect(res.rounds.find((r) => r.roundNumber === 100)?.rank).toBe(1);
 		expect(res.rounds.find((r) => r.roundNumber === 101)?.rank).toBe(2);
+	});
+
+	it('reports whether the model was staked in each round', async () => {
+		// The chart filters rounds by stake, so each round has to say which it was.
+		// Round 100: staked and in the field. Round 101: absent, injected from its
+		// own scores, so it was not staked.
+		const rows = [
+			row(100, 'target', 0.5, 0.5),
+			row(100, 'b', 0.1, 0.1),
+			row(101, 'b', 0.3, 0.3)
+		];
+		const { env } = mockEnv(rows);
+		const fetchOwn: OwnPerformanceFetcher = async () => new Map([[101, ownRow(0.25, 0.25)]]);
+
+		const res = await getModelRank(
+			env,
+			{ modelName: 'target', startRound: 100, endRound: 101, tournament: 8, formula: FORMULA },
+			fetchOwn
+		);
+
+		expect(res.rounds.find((r) => r.roundNumber === 100)?.staked).toBe(true);
+		expect(res.rounds.find((r) => r.roundNumber === 101)?.staked).toBe(false);
 	});
 
 	it('ranks an injected unstaked model under windowed averaging', async () => {

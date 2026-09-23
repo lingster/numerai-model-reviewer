@@ -5,7 +5,31 @@
 	import { scaleTime, scaleLinear, type ScaleTime, type ScaleLinear } from 'd3-scale';
 	import { line, curveMonotoneX } from 'd3-shape';
 	import type { ModelPerformance, ChartMetric, ModelSeries, ChartDataPoint } from '$lib/types.js';
-	import { SCORE_ALPHA_WEIGHT, SCORE_MPC_WEIGHT, computeScore } from '$lib/utils/scoring.js';
+	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
+	import { focusedSeriesColor, orderForFocus, toggleFocus } from '$lib/utils/series-focus.js';
+	import { getDefaultFormulaForTournament } from '$lib/rankings-api.js';
+	import { TOURNAMENTS } from '$lib/utils/storage.js';
+	import {
+		SCORE_ALPHA_WEIGHT,
+		SCORE_MPC_WEIGHT,
+		SIGNALS_METRIC_SETS,
+		NEUTRAL_SCORES_FROM_ROUND,
+		CLASSIC_SIXTY_DAY_FORMULA,
+		computeChartScore,
+		resolveScoringMode,
+		scoringModesFor,
+		hasNoNeutralData,
+		getMetricSetDefinition,
+		type ChartScoringMode
+	} from '$lib/utils/scoring.js';
+
+	// Alpha/MPC and Neutral labels for the score-formula controls below come
+	// from the shared metric sets (scoring.ts) so they can't drift from the
+	// rankings page's own labels for the same pairs.
+	const alphaMpcCorrLabel = SIGNALS_METRIC_SETS.alpha_mpc.corrLabel;
+	const alphaMpcMmcLabel = SIGNALS_METRIC_SETS.alpha_mpc.mmcLabel;
+	const neutralCorrLabel = SIGNALS_METRIC_SETS.neutral.corrLabel;
+	const neutralMmcLabel = SIGNALS_METRIC_SETS.neutral.mmcLabel;
 
 	// Props
 	let {
@@ -64,9 +88,13 @@
 		mmc60: { label: 'MMC60', axis: 'left', color: '#ff7f00' },
 		fnc: { label: 'FNC', axis: 'left', color: '#984ea3' },
 		payout: { label: 'Payout', axis: 'right', color: '#a65628' },
-		// New Numerai scoring (Signals)
-		alpha: { label: 'Alpha', axis: 'left', color: '#00c0d0' },
-		mpc: { label: 'MPC', axis: 'left', color: '#ffb300' },
+		// New Numerai scoring (Signals): alpha/mpc (today's payout pair) and
+		// ncorr/nmmc (the neutral pair Numerai pays on from 2026-09-25). Labels
+		// come from SIGNALS_METRIC_SETS so they can't drift from scoring.ts.
+		alpha: { label: alphaMpcCorrLabel, axis: 'left', color: '#00c0d0' },
+		mpc: { label: alphaMpcMmcLabel, axis: 'left', color: '#ffb300' },
+		ncorr: { label: neutralCorrLabel, axis: 'left', color: '#c0ca33' },
+		nmmc: { label: neutralMmcLabel, axis: 'left', color: '#5c6bc0' },
 		score: { label: 'Score', axis: 'left', color: '#e91e63' }
 	};
 
@@ -80,18 +108,35 @@
 	// the 20-day to the 60-day window on 28 Aug, so Corr60/MMC60 are the default
 	// pair; the 20-day series stay available as individual toggles.
 	const CLASSIC_METRICS: ChartMetric[] = ['corr60', 'mmc60'];
-	const NEW_METRICS: ChartMetric[] = ['alpha', 'mpc', 'score'];
+	const ALPHA_MPC_METRICS: ChartMetric[] = ['alpha', 'mpc', 'score'];
+	const NEUTRAL_METRICS: ChartMetric[] = ['ncorr', 'nmmc', 'score'];
+	// Metrics that only apply to Signals — hidden from the generic metric-toggle
+	// row entirely unless hasNewMetrics (below) says this data is Signals.
+	const SIGNALS_ONLY_METRICS: ChartMetric[] = ['alpha', 'mpc', 'ncorr', 'nmmc'];
 
 	// State for metric toggles - default to the Classic (60-day) pair.
 	let activeMetrics = $state<Set<ChartMetric>>(new Set(CLASSIC_METRICS));
 
-	// Calculated score weights (default Numerai Signals: 0.3*alpha + 0.8*mpc).
+	// Which scoring mode is selected: 'classic' has no weighted score of its
+	// own, so its Score (when toggled on) and the weight editor below both fall
+	// back to the alpha_mpc pair, matching this chart's long-standing default.
+	let scoringMode = $state<ChartScoringMode>('classic');
+
+
+	// Calculated score weights — default to the active mode's Numerai Signals
+	// weights (0.3*alpha + 0.8*mpc, or 0.5*ncorr + 2*nmmc for neutral).
 	// Adjustable so the score can track future scoring-rule changes.
-	let scoreAlphaWeight = $state(SCORE_ALPHA_WEIGHT);
-	let scoreMpcWeight = $state(SCORE_MPC_WEIGHT);
+	let scoreCorrWeight = $state(SCORE_ALPHA_WEIGHT);
+	let scoreMmcWeight = $state(SCORE_MPC_WEIGHT);
+
+	// Labels for whichever pair currently drives the Score metric and its
 
 	// State for model visibility
 	let modelVisibility = $state<Map<string, boolean>>(new Map());
+	// The model singled out by clicking one of its points, and what was visible
+	// before that — see focusModel.
+	let focusedModelId = $state<string | null>(null);
+	let visibilityBeforeFocus: Map<string, boolean> | null = null;
 
 	// Toggle unresolved rounds
 	let showUnresolved = $state(false);
@@ -116,6 +161,8 @@
 		roundNumber: number;
 		date: Date;
 		resolved: boolean;
+		/** The metric whose line the pointer is on — highlighted in the list below. */
+		hoveredMetric: ChartMetric;
 		metrics: Record<string, number | null>;
 	} | null>(null);
 
@@ -186,7 +233,9 @@
 							|| round.fnc !== null
 							|| round.payout !== null
 							|| round.alpha != null
-							|| round.mpc != null;
+							|| round.mpc != null
+							|| round.neutralCorr != null
+							|| round.neutralMmc != null;
 						if (!hasMetric) return false;
 					}
 
@@ -201,8 +250,25 @@
 				.map(round => {
 					const alpha = toNumber(round.alpha);
 					const mpc = toNumber(round.mpc);
-					// Weighted score; null only when both components are absent.
-					const score = computeScore(alpha, mpc, scoreAlphaWeight, scoreMpcWeight);
+					const ncorr = toNumber(round.neutralCorr);
+					const nmmc = toNumber(round.neutralMmc);
+					// Weighted score for whichever mode is selected; null only when
+					// both of that mode's components are absent.
+					const score = computeChartScore(
+						scoringMode,
+						{
+							alpha,
+							mpc,
+							ncorr,
+							nmmc,
+							corr20: toNumber(round.correlation),
+							mmc: toNumber(round.mmc),
+							corr60: toNumber(round.corr60),
+							mmc60: toNumber(round.mmc60)
+						},
+						scoreCorrWeight,
+						scoreMmcWeight
+					);
 					return {
 						roundNumber: round.roundNumber,
 						date: round.roundOpenTime ? new Date(round.roundOpenTime) : new Date(),
@@ -215,6 +281,8 @@
 						payout: toNumber(round.payout),
 						alpha,
 						mpc,
+						ncorr,
+						nmmc,
 						score
 					};
 				})
@@ -271,9 +339,58 @@
 	});
 
 	// New scoring (alpha/mpc) is only present for Signals models — used to gate
-	// the Classic/New toggle and the score-weight controls.
+	// the Classic/New/Neutral toggle and the score-weight controls. Neutral
+	// scores ride along on the same gate rather than a tournament prop, so
+	// they only appear where the existing Alpha/MPC set does.
 	const hasNewMetrics = $derived(
 		allDataPoints.some(p => p.alpha !== null || p.mpc !== null)
+	);
+
+	// Crypto publishes no 60-day figures, so its base score (and the weight
+	// editor beside it) is named after the pair it actually uses — see
+	// computeChartScore's 'classic' branch, which falls back the same way.
+	const hasSixtyDayMetrics = $derived(
+		allDataPoints.some(p => p.corr60 !== null || p.mmc60 !== null)
+	);
+	const basePairLabels = $derived(
+		hasSixtyDayMetrics
+			? { corrLabel: metricConfig.corr60.label, mmcLabel: metricConfig.mmc60.label }
+			: { corrLabel: metricConfig.corr20.label, mmcLabel: metricConfig.mmc.label }
+	);
+
+
+	// weight editor — the pair the selected mode actually scores on, so the
+	// editor never shows one pair's numbers scoring another.
+	const activeScoreLabels = $derived(
+		scoringMode === 'neutral'
+			? SIGNALS_METRIC_SETS.neutral
+			: scoringMode === 'classic'
+				? basePairLabels
+				: SIGNALS_METRIC_SETS.alpha_mpc
+	);	// Which modes this data offers, and their labels. Signals is not scored on
+	// corr60/mmc60, so Classic is not offered there — see scoringModesFor.
+	const scoringModes = $derived(scoringModesFor(hasNewMetrics));
+	const scoringModeLabels: Record<ChartScoringMode, string> = {
+		get classic() {
+			return `Score (${basePairLabels.corrLabel}/${basePairLabels.mmcLabel})`;
+		},
+		alpha_mpc: `New (${alphaMpcCorrLabel}/${alphaMpcMmcLabel})`,
+		neutral: `Neutral (${neutralCorrLabel}/${neutralMmcLabel})`
+	};
+
+	// Selecting models of another tournament changes which modes exist; never
+	// leave the chart on one its toggle no longer shows.
+	$effect(() => {
+		const resolved = resolveScoringMode(scoringMode, hasNewMetrics);
+		if (resolved !== scoringMode) setScoringMode(resolved);
+	});
+
+	// Empty-data honesty: only warn when Neutral is selected AND the visible
+	// range genuinely has no neutral values (rather than assuming from the
+	// round-number cutoff, which the chart's zoomed/date-filtered view may not
+	// reflect).
+	const showNeutralDataHint = $derived(
+		scoringMode === 'neutral' && hasNoNeutralData(allDataPoints)
 	);
 
 	// True when any right-axis metric is active — gates the whole right axis.
@@ -410,13 +527,27 @@
 		return regions;
 	});
 
-	// Switch the active metric set between Classic (corr60/mmc60) and New (alpha/mpc/score).
-	function setScoringMode(mode: 'classic' | 'new') {
-		activeMetrics = new Set<ChartMetric>(mode === 'classic' ? CLASSIC_METRICS : NEW_METRICS);
+	// Switch the active metric set between Classic (corr60/mmc60), New
+	// (alpha/mpc/score) and Neutral (ncorr/nmmc/score). Switching into a
+	// Signals metric set also resets the score weights to that set's defaults
+	// (mirrors getDefaultFormulaForTournament on the rankings page), so the
+	// weight editor never silently shows one pair's numbers scoring another.
+	function setScoringMode(mode: ChartScoringMode) {
+		activeMetrics = new Set<ChartMetric>(
+			mode === 'classic' ? CLASSIC_METRICS : mode === 'neutral' ? NEUTRAL_METRICS : ALPHA_MPC_METRICS
+		);
+		scoringMode = mode;
+		// The weighting Numerai pays on for the pair this mode scores: Classic's
+		// 3*CORR60 + 15*MMC60 where the 60-day pair exists, Crypto's otherwise.
+		const weights =
+			mode === 'classic'
+				? hasSixtyDayMetrics
+					? CLASSIC_SIXTY_DAY_FORMULA
+					: getDefaultFormulaForTournament(TOURNAMENTS.CRYPTO)
+				: getMetricSetDefinition(mode);
+		scoreCorrWeight = weights.corrWeight;
+		scoreMmcWeight = weights.mmcWeight;
 	}
-
-	// True when the New (alpha/mpc/score) metric set is currently shown.
-	const newScoringActive = $derived(NEW_METRICS.some(m => activeMetrics.has(m)));
 
 	// Toggle metric
 	function toggleMetric(metric: ChartMetric) {
@@ -436,6 +567,31 @@
 		modelVisibility = newMap;
 	}
 
+	// Bulk visibility, shared with the rankings chart (series-visibility.ts) and
+	// converted here because this chart keeps its state in a Map. Fifty models is
+	// a normal selection; picking a few of them should not be fifty clicks.
+	const modelIds = $derived(chartSeries.map((s) => s.modelId));
+	// Painting order for the plot: the focused model last, so the greyed lines
+	// cannot overdraw the one being studied.
+	const seriesInDrawOrder = $derived(
+		orderForFocus(
+			chartSeriesDisplay.filter((s) => s.visible),
+			focusedModelId,
+			(s) => s.modelId
+		)
+	);
+	const shownCount = $derived(chartSeries.filter((s) => s.visible).length);
+
+	function setAllModels(visible: boolean) {
+		modelVisibility = new Map(Object.entries(setAllVisible(modelIds, visible)));
+	}
+
+	function invertModels() {
+		modelVisibility = new Map(
+			Object.entries(invertVisibility(modelIds, Object.fromEntries(modelVisibility)))
+		);
+	}
+
 	// Format number for tooltip
 	function formatValue(value: number | null | undefined): string {
 		if (value === null || value === undefined || typeof value !== 'number' || isNaN(value)) return 'N/A';
@@ -448,11 +604,36 @@
 	}
 
 	function getLineColor(series: ExtendedModelSeries, metric: ChartMetric): string {
-		return useMetricColors ? metricConfig[metric].color : series.color;
+		const base = useMetricColors ? metricConfig[metric].color : series.color;
+		// One place decides colour, so focusing greys the lines and their points
+		// together without either forgetting.
+		return focusedSeriesColor(base, series.modelId, focusedModelId);
+	}
+
+	/**
+	 * Clicking a point singles that model out; clicking it again puts the chart
+	 * back as it was. The visible set is remembered on the way in, so legend
+	 * changes made while focused do not survive the trip back — what returns is
+	 * what the person was looking at before.
+	 */
+	function focusModel(modelId: string) {
+		const next = toggleFocus(focusedModelId, modelId);
+		if (next === null) {
+			if (visibilityBeforeFocus) modelVisibility = new Map(visibilityBeforeFocus);
+			visibilityBeforeFocus = null;
+		} else if (focusedModelId === null) {
+			visibilityBeforeFocus = new Map(modelVisibility);
+		}
+		focusedModelId = next;
 	}
 
 	// Tooltip handlers
-	function showTooltip(event: MouseEvent, series: ExtendedModelSeries, point: ChartDataPoint) {
+	function showTooltip(
+		event: MouseEvent,
+		series: ExtendedModelSeries,
+		point: ChartDataPoint,
+		hoveredMetric: ChartMetric
+	) {
 		if (!chartContainer) return;
 		const containerRect = chartContainer.getBoundingClientRect();
 		const rawX = event.clientX - containerRect.left;
@@ -481,6 +662,9 @@
 			roundNumber: point.roundNumber,
 			date: point.date,
 			resolved: point.resolved,
+			// Which line the pointer is actually on, so the tooltip can say which of
+			// its rows the reader came for.
+			hoveredMetric,
 			metrics: Object.fromEntries(ALL_METRICS.map(m => [m, point[m]]))
 		};
 	}
@@ -766,7 +950,20 @@
 	<!-- Model Legend (Interactive) - Now on top -->
 	{#if chartSeries.length > 0}
 		<div class="mb-4">
-			<span class="text-sm font-medium retro-text-primary mr-2">Models:</span>
+			<span class="text-sm font-medium retro-text-primary mr-2">
+				Models ({shownCount}/{chartSeries.length}):
+			</span>
+			<div class="mr-2 inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)] align-middle">
+				{#each [{ label: 'All', run: () => setAllModels(true) }, { label: 'None', run: () => setAllModels(false) }, { label: 'Invert', run: invertModels }] as action}
+					<button
+						onclick={action.run}
+						class="px-2.5 py-1 text-xs font-medium transition-colors"
+						style="color: var(--retro-text-primary);"
+					>
+						{action.label}
+					</button>
+				{/each}
+			</div>
 			<div class="inline-flex flex-wrap gap-2">
 				{#each chartSeries as series}
 					<button
@@ -791,30 +988,24 @@
 		</div>
 	{/if}
 
-	<!-- Scoring mode toggle + score weights (Signals: new alpha/mpc scoring) -->
-	{#if hasNewMetrics}
+	<!-- Scoring mode toggle + score weights. Shown for every tournament: Classic
+	     scores on corr60/mmc60, Signals on alpha/mpc or the neutral pair. -->
+	{#if chartSeries.length > 0}
 		<div class="mb-4 rounded-md border-2 border-[var(--retro-primary)] p-3">
 			<div class="flex flex-wrap items-center gap-4">
 				<span class="text-sm font-medium retro-text-primary">Scoring:</span>
 				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
-					<button
-						onclick={() => setScoringMode('classic')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={!newScoringActive
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						Classic (Corr60/MMC60)
-					</button>
-					<button
-						onclick={() => setScoringMode('new')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={newScoringActive
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						New (Alpha/MPC)
-					</button>
+					{#each scoringModes as mode}
+						<button
+							onclick={() => setScoringMode(mode)}
+							class="px-3 py-1 text-sm font-medium transition-colors"
+							style={scoringMode === mode
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{scoringModeLabels[mode]}
+						</button>
+					{/each}
 				</div>
 
 				<div class="flex items-center gap-2">
@@ -822,21 +1013,26 @@
 					<input
 						type="number"
 						step="0.1"
-						bind:value={scoreAlphaWeight}
-						aria-label="Alpha weight"
+						bind:value={scoreCorrWeight}
+						aria-label="{activeScoreLabels.corrLabel} weight"
 						class="retro-input w-16 rounded px-2 py-1 text-sm"
 					/>
-					<span class="text-sm retro-text-secondary">× Alpha +</span>
+					<span class="text-sm retro-text-secondary">× {activeScoreLabels.corrLabel} +</span>
 					<input
 						type="number"
 						step="0.1"
-						bind:value={scoreMpcWeight}
-						aria-label="MPC weight"
+						bind:value={scoreMmcWeight}
+						aria-label="{activeScoreLabels.mmcLabel} weight"
 						class="retro-input w-16 rounded px-2 py-1 text-sm"
 					/>
-					<span class="text-sm retro-text-secondary">× MPC</span>
+					<span class="text-sm retro-text-secondary">× {activeScoreLabels.mmcLabel}</span>
 				</div>
 			</div>
+			{#if showNeutralDataHint}
+				<p class="mt-2 text-xs retro-text-warning">
+					Neutral scores start at round {NEUTRAL_SCORES_FROM_ROUND} — none of the selected range has neutral data yet.
+				</p>
+			{/if}
 		</div>
 	{/if}
 
@@ -845,7 +1041,7 @@
 		<span class="text-sm font-medium retro-text-primary mr-2">Metrics:</span>
 		<div class="inline-flex flex-wrap gap-2">
 			{#each Object.entries(metricConfig) as [metric, config]}
-				{#if hasNewMetrics || !NEW_METRICS.includes(metric as ChartMetric)}
+				{#if hasNewMetrics || !SIGNALS_ONLY_METRICS.includes(metric as ChartMetric)}
 					<button
 						onclick={() => toggleMetric(metric as ChartMetric)}
 						class="px-3 py-1 text-sm rounded-md border-2 transition-colors"
@@ -933,9 +1129,18 @@
 							<div class="border-t border-gray-700 pt-1 mt-1">
 								{#each Object.entries(tooltipData.metrics) as [metric, value]}
 									{#if value !== null}
-										<div class="flex justify-between">
-											<span class="text-gray-400">{metric}:</span>
-											<span class="font-mono {value > 0 ? 'text-green-400' : value < 0 ? 'text-red-400' : 'text-white'}">{formatValue(value)}</span>
+										{@const hovered = metric === tooltipData.hoveredMetric}
+										<!-- The row for the line under the pointer is the one the reader
+										     came for; the rest are context. -->
+										<div class="flex justify-between {hovered ? 'rounded-sm bg-white/10 px-1 -mx-1' : ''}">
+											<span class="{hovered ? 'font-semibold text-white' : 'text-gray-400'}">{metric}:</span>
+											<span
+												class="font-mono {hovered ? 'font-semibold ' : ''}{value > 0
+													? 'text-green-400'
+													: value < 0
+														? 'text-red-400'
+														: 'text-white'}">{formatValue(value)}</span
+											>
 										</div>
 									{/if}
 								{/each}
@@ -1123,7 +1328,7 @@
 
 					<!-- Lines for each model and metric combination (clipped to chart area) -->
 					<g clip-path="url(#chart-clip)">
-						{#each chartSeriesDisplay.filter(s => s.visible) as series}
+						{#each seriesInDrawOrder as series}
 							{#each [...activeMetrics] as metric}
 								{@const isRightAxis = metricConfig[metric].axis === 'right'}
 								{@const yScale = isRightAxis ? yScaleRight : yScaleLeft}
@@ -1156,7 +1361,8 @@
 
 								<!-- Data points with hover -->
 								{#each validData as point}
-									<!-- svelte-ignore a11y_no_static_element_interactions -->
+									<!-- A point is a control now: clicking (or Enter/Space on it) focuses
+									     its model, so it carries the button role and keyboard handling. -->
 									<circle
 										cx={xScale(point.date)}
 										cy={yScale(point[metric] ?? 0)}
@@ -1165,10 +1371,22 @@
 										stroke={getLineColor(series, metric)}
 										stroke-width={point.resolved ? 1 : 2}
 										class="cursor-pointer transition-all hover:r-6"
-										role="img"
-										aria-label="{series.modelName} Round {point.roundNumber}: {metric} = {formatValue(point[metric])}"
-										onmouseenter={(e) => showTooltip(e, series, point)}
+										role="button"
+										tabindex="0"
+										aria-label="{focusedModelId === series.modelId
+											? 'Stop focusing'
+											: 'Focus'} {series.modelName} — round {point.roundNumber}: {metric} = {formatValue(
+											point[metric]
+										)}"
+										onmouseenter={(e) => showTooltip(e, series, point, metric)}
 										onmouseleave={hideTooltip}
+										onclick={() => focusModel(series.modelId)}
+										onkeydown={(e) => {
+											if (e.key === 'Enter' || e.key === ' ') {
+												e.preventDefault();
+												focusModel(series.modelId);
+											}
+										}}
 									/>
 								{/each}
 							{/each}
@@ -1254,7 +1472,7 @@
 				/>
 
 				<!-- Mini chart lines for overview -->
-				{#each chartSeriesDisplay.filter(s => s.visible) as series}
+				{#each seriesInDrawOrder as series}
 					{#each [...activeMetrics].filter(m => metricConfig[m].axis === 'left') as metric}
 						{@const validData = series.data.filter(d => typeof d[metric] === 'number' && Number.isFinite(d[metric] as number))}
 						{@const brushLineGenerator = line<ChartDataPoint>()

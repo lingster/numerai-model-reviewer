@@ -6,13 +6,16 @@
  * only fetching rounds we don't have, and (b) only writing rows that changed.
  * These tests pin both.
  */
-import { describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { D1CostHarness } from './test-support/d1-cost-harness';
 import {
 	computeFetchWindow,
 	diffRoundScores,
 	MUTABLE_ROUND_WINDOW,
 	TAIL_REFRESH_SECONDS,
 	type Coverage,
+	readCachedRoundScores,
+	writeRoundScores,
 	type RoundScores
 } from './round-scores-cache';
 
@@ -24,7 +27,9 @@ const scores = (mmc60: number | null, alpha: number | null = null, mpc: number |
 	mmc: null,
 	mmc60,
 	alpha,
-	mpc
+	mpc,
+	neutral_corr: null,
+	neutral_mmc: null
 });
 
 const coverage = (toRound: number, updatedAt: number, fromRound = 350): Coverage => ({
@@ -111,7 +116,9 @@ describe('diffRoundScores', () => {
 	});
 
 	it('treats a round scored only on corr/mmc (Crypto) as worth a row', () => {
-		const fresh = new Map([[1104, { corr: 0.037, mmc: 0.03, mmc60: null, alpha: null, mpc: null }]]);
+		const fresh = new Map([
+			[1104, { corr: 0.037, mmc: 0.03, mmc60: null, alpha: null, mpc: null, neutral_corr: null, neutral_mmc: null }]
+		]);
 		expect(diffRoundScores(new Map(), fresh).size).toBe(1);
 	});
 
@@ -119,5 +126,58 @@ describe('diffRoundScores', () => {
 		const cached = new Map([[1344, scores(null, 0.01, 0.02)]]);
 		const fresh = new Map([[1344, scores(null, 0.01, 0.03)]]);
 		expect(diffRoundScores(cached, fresh).size).toBe(1);
+	});
+});
+
+describe('the cache against a real D1', () => {
+	let d1: D1CostHarness;
+	const MODEL = 'model-1';
+	const TOURNAMENT = 11;
+	const full = (n: number): RoundScores => ({
+		corr: null,
+		mmc: null,
+		mmc60: null,
+		alpha: n,
+		mpc: n * 2,
+		neutral_corr: n * 3,
+		neutral_mmc: n * 4
+	});
+
+	beforeAll(async () => {
+		d1 = await D1CostHarness.create();
+	}, 60_000);
+
+	afterAll(async () => d1?.dispose());
+
+	it('reads back every score field it wrote, including ones added later', async () => {
+		await d1.measure((db) =>
+			writeRoundScores(db, MODEL, TOURNAMENT, new Map([[1300, full(0.01)]]), {
+				fromRound: 1300,
+				toRound: 1300,
+				updatedAt: NOW
+			})
+		);
+
+		const { result } = await d1.measure((db) => readCachedRoundScores(db, MODEL, TOURNAMENT));
+		expect(result.scores.get(1300)).toEqual(full(0.01));
+	});
+
+	it('ignores coverage recorded before a score field existed, so the round is refetched', async () => {
+		// Otherwise rows written when the field set was narrower are served forever
+		// with the new metric null: exactly what happened when the Signals neutral
+		// pair was added and cached Signals rounds kept coming back without it.
+		await d1.measure((db) =>
+			writeRoundScores(db, 'stale-model', TOURNAMENT, new Map([[1300, full(0.02)]]), {
+				fromRound: 1300,
+				toRound: 1300,
+				updatedAt: NOW
+			})
+		);
+		await d1.execute(
+			`UPDATE model_score_coverage SET score_fields = 'corr,mmc,mmc60,alpha,mpc' WHERE model_id = 'stale-model'`
+		);
+
+		const { result } = await d1.measure((db) => readCachedRoundScores(db, 'stale-model', TOURNAMENT));
+		expect(result.coverage).toBeNull();
 	});
 });

@@ -4,7 +4,8 @@
 	import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
 	import MetricBarComparison from '$lib/components/MetricBarComparison.svelte';
 	import { NumeraiAPI } from '$lib/numerai-api.js';
-	import { computeScore } from '$lib/utils/scoring.js';
+	import { computeScore, formatMetricSetFormula, SIGNALS_METRIC_SETS } from '$lib/utils/scoring.js';
+	import { effectiveModels, isUsingAllUserModels } from '$lib/utils/model-selection.js';
 	import { config } from '$lib/config.js';
 	import type { NumeraiUser, NumeraiModel, ModelPerformance, RoundPerformance, SavedChart } from '$lib/types.js';
 	import {
@@ -43,6 +44,12 @@
 
 	// Selected models and data
 	let selectedModels = $state<NumeraiModel[]>([]);
+	// What "Load Performance Data" acts on: the picked models, or — when none are
+	// picked — every model of the selected user, as the rankings page does.
+	const modelsToChart = $derived(
+		effectiveModels(selectedModels, availableModels, selectedUser !== null)
+	);
+	const usingAllUserModels = $derived(isUsingAllUserModels(selectedModels, modelsToChart));
 	let modelPerformance = $state<ModelPerformance[]>([]);
 	let loadingPerformance = $state(false);
 	let performanceError = $state<string | null>(null);
@@ -232,19 +239,19 @@
 	}
 
 	async function loadModelPerformance() {
-		if (selectedModels.length === 0) return;
+		if (modelsToChart.length === 0) return;
 
 		loadingPerformance = true;
 		performanceError = null;
 		try {
-			modelPerformance = await numeraiApi.getModelPerformanceFromModels(selectedModels);
+			modelPerformance = await numeraiApi.getModelPerformanceFromModels(modelsToChart);
 
 			// Check if we got any data
 			if (modelPerformance.length === 0) {
 				performanceError = 'No performance data was retrieved. The models may not be accessible or may not have performance data yet.';
 			} else {
 				// Update URL - use model names instead of IDs for compatibility with v3UserProfile API
-				const modelNames = selectedModels.map(m => m.name);
+				const modelNames = modelsToChart.map(m => m.name);
 				updateUrlWithChart({
 					models: modelNames,
 					startDate,
@@ -264,7 +271,7 @@
 				// Track recent chart
 				addRecentChart({
 					name: chartName,
-					models: selectedModels.map(m => m.name),
+					models: modelsToChart.map(m => m.name),
 					startDate,
 					endDate
 				});
@@ -572,7 +579,7 @@
 				: 'CORR'
 	);
 	const legacyMmcLabel = $derived(
-		selectedTournament === TOURNAMENTS.SIGNALS ? 'MPC' : 'MMC'
+		selectedTournament === TOURNAMENTS.SIGNALS ? SIGNALS_METRIC_SETS.alpha_mpc.mmcLabel : 'MMC'
 	);
 
 	// Sort model performance by correlation (best performing first) within date range
@@ -1081,10 +1088,14 @@
 			<button
 				id="btn-load-performance"
 				onclick={loadModelPerformance}
-				disabled={selectedModels.length === 0 || loadingPerformance}
+				disabled={modelsToChart.length === 0 || loadingPerformance}
 				class="retro-button rounded-md px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
 			>
-				{loadingPerformance ? 'Loading...' : 'Load Performance Data'}
+				{loadingPerformance
+					? 'Loading...'
+					: usingAllUserModels
+						? `Load Performance Data (all ${modelsToChart.length} of ${selectedUser?.username ?? 'user'}'s models)`
+						: 'Load Performance Data'}
 			</button>
 
 			<button
@@ -1159,7 +1170,7 @@
 							negativeClass="bg-[var(--retro-accent)]"
 						/>
 						<MetricBarComparison
-							label="Score Comparison (0.3·Alpha + 0.8·MPC)"
+							label={`Score Comparison (${formatMetricSetFormula('alpha_mpc')})`}
 							entries={metricEntries((r) => computeScore(r?.alpha, r?.mpc))}
 							positiveClass="bg-[var(--retro-success)]"
 							negativeClass="bg-[var(--retro-error)]"
@@ -1241,7 +1252,7 @@
 							{#if isSignals}
 								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">Alpha</th>
 								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary">MPC</th>
-								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title="0.3·Alpha + 0.8·MPC">Score</th>
+								<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider retro-text-primary" title={formatMetricSetFormula('alpha_mpc')}>Score</th>
 							{/if}
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">Corr20 {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>
 							<th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider {isSignals ? 'retro-text-secondary' : 'retro-text-primary'}">MMC {#if isSignals}<span class="normal-case">(deprecated)</span>{/if}</th>

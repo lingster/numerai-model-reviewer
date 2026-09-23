@@ -16,7 +16,8 @@ import { selectRoundField } from './perf-queries';
 import { encodeFieldMetrics } from './round-field';
 import { fieldFromRows, upsertRoundFieldSql } from './round-field-store';
 import { refreshCoverage } from './tournament-coverage';
-import { getModelRank, type Env, type ScoreFormula } from './rankings-api';
+import { getModelRank, getTopModelsForRound, type Env, type ScoreFormula } from './rankings-api';
+import { defaultMetricSetFor } from './ranking';
 
 const CLASSIC: FleetSlice = { tournament: 8, models: 120, fromRound: 1200, toRound: 1300, unstakedEvery: 10 };
 const SIGNALS: FleetSlice = { tournament: 11, models: 60, fromRound: 1250, toRound: 1300, unstakedEvery: 10 };
@@ -58,7 +59,16 @@ async function storeFields(slice: FleetSlice, from: number, to: number): Promise
 		await d1.measure((db) =>
 			db
 				.prepare(
-					upsertRoundFieldSql(slice.tournament, round, encodeFieldMetrics(fieldFromRows(rows, slice.tournament)), 0)
+					upsertRoundFieldSql(
+						slice.tournament,
+						round,
+						'staked',
+						defaultMetricSetFor(slice.tournament),
+						encodeFieldMetrics(
+							fieldFromRows(rows, slice.tournament, defaultMetricSetFor(slice.tournament))
+						),
+						0
+					)
 				)
 				.run()
 		);
@@ -156,6 +166,57 @@ describe('getModelRank with stored fields', () => {
 	});
 });
 
+describe('getTopModelsForRound honours the same toggles as the chart', () => {
+	// The table and the chart sit on the same page: if the table ignores the
+	// competitor field or the metric set, it silently ranks a different
+	// population from the lines above it, under the toggle's own label.
+	it('ranks against every scorer when the all-models field is asked for', async () => {
+		const staked = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), { round: TO, tournament: CLASSIC.tournament, formula: FORMULA, limit: 0 })
+		);
+		const all = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), {
+				round: TO,
+				tournament: CLASSIC.tournament,
+				formula: FORMULA,
+				limit: 0,
+				fieldScope: 'all'
+			})
+		);
+
+		expect(all.result.length).toBeGreaterThan(staked.result.length);
+		expect(all.result.length).toBe(CLASSIC.models);
+	});
+
+	it('scores Signals on the metric set it is given', async () => {
+		const round = SIGNALS.toRound;
+		// Every model ties on alpha/mpc; the neutral pair varies per model, so only
+		// the neutral set can order them.
+		await d1.execute(
+			`UPDATE model_performances
+			    SET alpha = 0.01, mpc = 0.01, neutral_corr = (rowid % 50 + 1) * 0.001, neutral_mmc = 0
+			  WHERE tournament = ${SIGNALS.tournament} AND round_number = ${round}`
+		);
+
+		const alphaMpc = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), { round, tournament: SIGNALS.tournament, formula: FORMULA, limit: 3 })
+		);
+		const neutral = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), {
+				round,
+				tournament: SIGNALS.tournament,
+				formula: FORMULA,
+				limit: 3,
+				metricSet: 'neutral'
+			})
+		);
+
+		expect(alphaMpc.result.every((m) => m.corr === 0.01)).toBe(true);
+		expect(neutral.result[0].corr).toBeGreaterThan(0);
+		expect(neutral.result.map((m) => m.corr)).not.toEqual(alphaMpc.result.map((m) => m.corr));
+	});
+});
+
 describe('when the stored fields cannot be read', () => {
 	it('still returns the live ranks rather than failing the request', async () => {
 		const target = fleetModelName(CLASSIC.tournament, 7);
@@ -178,7 +239,7 @@ describe('models that are not part of the stored field', () => {
 		async (_env: Env, params: { modelName: string; tournament: number }) => {
 			const rows = await db
 				.prepare(
-					`SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, stake_value
+					`SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, corr60, mmc60, stake_value
 					   FROM model_performances
 					  WHERE model_name = ? AND tournament = ?`
 				)
@@ -214,6 +275,72 @@ describe('models that are not part of the stored field', () => {
 		await d1.execute('ALTER TABLE round_field_metrics_hidden RENAME TO round_field_metrics');
 
 		expect(withFields.result.rounds).toEqual(live.result.rounds);
+	});
+
+	it('ranks against every model that scored when asked for the all-models field', async () => {
+		// Same model, same round: against the staked field it competes with ~108
+		// models; against everyone who scored, with all 120.
+		const target = fleetModelName(CLASSIC.tournament, 15);
+		const round = TO;
+		for (const scope of ['staked', 'all'] as const) {
+			const { result: rows } = await d1.measure((db) => selectRoundField(db, round, CLASSIC.tournament, scope));
+			await d1.measure((db) =>
+				db
+					.prepare(
+						upsertRoundFieldSql(
+							CLASSIC.tournament,
+							round,
+							scope,
+							defaultMetricSetFor(CLASSIC.tournament),
+							encodeFieldMetrics(
+								fieldFromRows(rows, CLASSIC.tournament, defaultMetricSetFor(CLASSIC.tournament))
+							),
+							0
+						)
+					)
+					.run()
+			);
+		}
+
+		const rank = (fieldScope: 'staked' | 'all') =>
+			d1.measure((db) =>
+				getModelRank(
+					envFor(db),
+					{
+						modelName: target,
+						startRound: round,
+						endRound: round,
+						tournament: CLASSIC.tournament,
+						formula: FORMULA,
+						fieldScope
+					},
+					noLiveFetch
+				)
+			);
+
+		const staked = (await rank('staked')).result.rounds[0];
+		const all = (await rank('all')).result.rounds[0];
+
+		expect(all.totalModels).toBeGreaterThan(staked.totalModels);
+		expect(all.totalModels).toBe(CLASSIC.models);
+	});
+
+	it('ranks an unstaked model from its stored rows, without a live fetch', async () => {
+		// Its rows are in model_performances, just not in the staked field. Fetching
+		// them from Numerai instead cost a round-trip per request: ~0.65s each for
+		// the 25 unstaked models one rankings page asks about.
+		const unstaked = fleetModelName(CLASSIC.tournament, 20);
+
+		const { result } = await d1.measure((db) =>
+			getModelRank(
+				envFor(db),
+				{ modelName: unstaked, startRound: FROM, endRound: TO, tournament: CLASSIC.tournament, formula: FORMULA },
+				noLiveFetch
+			)
+		);
+
+		expect(result.rounds).toHaveLength(ROUNDS);
+		expect(result.rounds.every((r) => r.rank !== null)).toBe(true);
 	});
 
 	it('stays on the stored fields when the model has no row at all in some rounds', async () => {

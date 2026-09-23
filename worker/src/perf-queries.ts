@@ -9,6 +9,7 @@
 
 import { d1Retry } from './d1-retry';
 import { CRYPTO_TOURNAMENT } from './mappers';
+import type { FieldScope } from './round-field';
 
 /** A model's identity as stored in top_staked_models. */
 export interface TopModelRow {
@@ -25,6 +26,12 @@ export interface RoundPerfRow {
 	tc: number | null;
 	alpha: number | null;
 	mpc: number | null;
+	/** Signals' neutral pair; null for Classic and Crypto, and for rows stored before migration 0005. */
+	neutral_corr?: number | null;
+	neutral_mmc?: number | null;
+	/** Classic's 60-day pair, what it is paid on since 28 Aug 2026. Null elsewhere. */
+	corr60?: number | null;
+	mmc60?: number | null;
 	stake_value: number | null;
 }
 
@@ -51,10 +58,36 @@ export function maxRoundSql(tournament: number): string {
  * The "staked field" filter. Crypto rows carry no stake data, so every Crypto
  * row counts; Classic and Signals count only rows with a positive stake.
  */
+/** The rows a field of this scope contains: only staked ones, or all of them. */
+const scopeFilter = (tournament: number, scope: FieldScope): string =>
+	scope === 'all' ? '' : stakedFilter(tournament);
+
 const stakedFilter = (tournament: number): string =>
 	tournament === CRYPTO_TOURNAMENT ? '' : ' AND stake_value IS NOT NULL AND stake_value > 0';
 
-const ROUND_PERF_COLUMNS = 'model_name, corr, mmc, tc, alpha, mpc, stake_value';
+/** The same condition as {@link stakedFilter}, in TypeScript. */
+export const isStakedRow = (row: { stake_value: number | null }): boolean =>
+	row.stake_value !== null && row.stake_value > 0;
+
+/**
+ * Whether a row belongs to the round's staked field — what selectRoundField
+ * returns, and so what a rank is measured against.
+ */
+export const inStakedField = (row: { stake_value: number | null }, tournament: number): boolean =>
+	tournament === CRYPTO_TOURNAMENT || isStakedRow(row);
+
+/**
+ * Was the model staked in this round? Null for Crypto, whose rows carry the
+ * model's current stake rather than the round's, so the answer is unknown.
+ */
+export const wasStaked = (row: { stake_value: number | null }, tournament: number): boolean | null =>
+	tournament === CRYPTO_TOURNAMENT ? null : isStakedRow(row);
+
+// neutral_corr/neutral_mmc are Signals' new payout pair (see ranking.ts
+// MetricSet). Listed here so both pairs travel together and migration 0005's
+// index still covers every column a field read needs.
+const ROUND_PERF_COLUMNS =
+	'model_name, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, corr60, mmc60, stake_value';
 
 /**
  * Look up a model's id and owner, case-insensitively by name.
@@ -83,18 +116,19 @@ export async function selectTopModelByName(
 	return row ?? null;
 }
 
-/** Every staked model's scores for one round. */
+/** Every model's scores for one round, within the given field scope. */
 export async function selectRoundField(
 	db: D1Database,
 	round: number,
-	tournament: number
+	tournament: number,
+	scope: FieldScope = 'staked'
 ): Promise<RoundPerfRow[]> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE round_number = ? AND tournament = ?${stakedFilter(tournament)}`
+				  WHERE round_number = ? AND tournament = ?${scopeFilter(tournament, scope)}`
 			)
 			.bind(round, tournament)
 			.all<RoundPerfRow>()
@@ -125,14 +159,17 @@ export async function selectModelRounds(
 	modelName: string,
 	tournament: number,
 	fromRound: number,
-	toRound: number
+	toRound: number,
+	{ includeUnstaked = false }: { includeUnstaked?: boolean } = {}
 ): Promise<Array<RoundPerfRow & { round_number: number }>> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT round_number, ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE model_name = LOWER(?) AND +tournament = ? AND round_number BETWEEN ? AND ?${stakedFilter(tournament)}`
+				  WHERE model_name = LOWER(?) AND +tournament = ? AND round_number BETWEEN ? AND ?${
+					includeUnstaked ? '' : stakedFilter(tournament)
+				}`
 			)
 			.bind(modelName, tournament, fromRound, toRound)
 			.all<RoundPerfRow & { round_number: number }>()
@@ -140,19 +177,20 @@ export async function selectModelRounds(
 	return result.results ?? [];
 }
 
-/** Every staked model's scores for each round in [fromRound, toRound]. */
+/** Every model's scores for each round in [fromRound, toRound], within the scope. */
 export async function selectRoundFieldsInRange(
 	db: D1Database,
 	fromRound: number,
 	toRound: number,
-	tournament: number
+	tournament: number,
+	scope: FieldScope = 'staked'
 ): Promise<Array<RoundPerfRow & { round_number: number }>> {
 	const result = await d1Retry(() =>
 		db
 			.prepare(
 				`SELECT round_number, ${ROUND_PERF_COLUMNS}
 				   FROM model_performances
-				  WHERE round_number BETWEEN ? AND ? AND tournament = ?${stakedFilter(tournament)}`
+				  WHERE round_number BETWEEN ? AND ? AND tournament = ?${scopeFilter(tournament, scope)}`
 			)
 			.bind(fromRound, toRound, tournament)
 			.all<RoundPerfRow & { round_number: number }>()

@@ -36,7 +36,7 @@ and data directory as the API (UTC):
 
 | When | Job | What it does |
 |---|---|---|
-| 03:00 | `src/backup.ts` | `VACUUM INTO` a dated copy under `/data/backups`, keeping `BACKUP_KEEP` (7) |
+| 03:00 | `src/backup.ts` | `VACUUM INTO` `/data/backups`: one daily copy, plus a weekly one on Sundays |
 | 04:30 | `jobs/nightly-precompute.sh` | Precompute tournaments 8, 11, 12 into SQLite, then `PRAGMA optimize` |
 
 The precompute is the worker's own pipeline (`worker/src/precompute.ts`) with a SQLite target
@@ -45,14 +45,25 @@ only for D1's free plan: every leaderboard model (`--top-n 1000000`), full store
 (`--backfill-rounds 5000`), and a 70-round `--refresh-overlap`, so still-resolving Signals and
 Crypto rounds are rewritten until they settle.
 
+Stored fields are written by precompute as it fetches, and only for rounds that
+have none. A field stored wrongly, or a scope/metric set added after the history
+was built, is rebuilt from the database alone — no Numerai calls, ~25s for all
+three tournaments:
+
+```bash
+docker compose exec scheduler sh -c 'cd /app/server && node_modules/.bin/tsx src/rebuild-fields.ts'
+```
+
 ```bash
 docker compose logs -f scheduler                                        # job output
 docker compose exec scheduler /app/server/jobs/nightly-precompute.sh    # run now
 docker compose exec api sqlite3 /data/numerai-cache.sqlite              # inspect
 ```
 
-Restore a backup: stop both services, copy `backups/numerai-cache-<date>.sqlite` over
-`numerai-cache.sqlite` (removing its `-wal`/`-shm`) as the data directory's owner, start again.
+Restore a backup: stop both services, copy `backups/numerai-cache-daily.sqlite` (or the weekly
+one) over `numerai-cache.sqlite` (removing its `-wal`/`-shm`) as the data directory's owner,
+start again. Losing both costs a rebuild, not data: the database is a cache of Numerai's API,
+and `jobs/nightly-precompute.sh` with a wide `--refresh-overlap` refills it.
 
 Build from the repository root, since the image needs both source trees:
 
@@ -91,7 +102,7 @@ sudo install -d -o numerdiff -g numerdiff -m 750 /data/numerai/numerdiff
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `100` / `60` | In-memory here (no KV) |
 | `MAX_REQUEST_BODY_BYTES` | `1048576` | Bodies over this get 413. Every route is a GET |
 | `PRECOMPUTE_CACHE_DIR` | `./.cache` | Precompute's CSV cache; `/data/.precompute-cache` in Docker |
-| `BACKUP_DIR` / `BACKUP_KEEP` | `./data/backups` / `7` | Backup job |
+| `BACKUP_DIR` | `./data/backups` | Backup job: `numerai-cache-daily.sqlite`, `numerai-cache-weekly.sqlite` |
 
 Numeric variables are validated at startup: a non-integer, a negative or (for the rate limit) a
 zero is a startup failure rather than a silently wrong setting.

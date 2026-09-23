@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS model_performances (
   -- corr/mmc so a single tournament=11 row carries both regimes.
   alpha REAL,
   mpc REAL,
+  -- Signals' neutral pair (neutral correlation / neutral contribution), which
+  -- Numerai pays on from rounds opening 2026-09-25. Same source, same rounds as
+  -- alpha/mpc; see ranking.ts MetricSet. Added to existing DBs by migration 0005.
+  neutral_corr REAL,
+  neutral_mmc REAL,
+  -- Classic's 60-day pair, what it is paid on since 28 Aug 2026 (3*CORR60 +
+  -- 15*MMC60). corr60 comes from the profile query, mmc60 from submissionScores.
+  corr60 REAL,
+  mmc60 REAL,
   stake_value REAL,
   tournament INTEGER NOT NULL DEFAULT 8,
   updated_at INTEGER NOT NULL,
@@ -76,13 +85,20 @@ CREATE INDEX IF NOT EXISTS idx_cache_ttl ON graphql_cache(created_at, ttl_second
 -- 15xMMC60) and the UI varies the weights per request, so stored scores would
 -- invalidate history. Model names are not stored; a model's own metrics come
 -- from its own model_performances rows. See round-field.ts.
+-- field_scope: which competitors the stored field holds — 'staked' (the staked
+-- field, what payouts rank against) or 'all' (every model that scored, staked or
+-- not). One row per round per scope; see round-field.ts.
 CREATE TABLE IF NOT EXISTS round_field_metrics (
   tournament INTEGER NOT NULL,
   round_number INTEGER NOT NULL,
+  field_scope TEXT NOT NULL DEFAULT 'staked',
+  -- metric_set: which metric pair the field holds — 'alpha_mpc' or, for Signals,
+  -- 'neutral' (see ranking.ts MetricSet).
+  metric_set TEXT NOT NULL DEFAULT 'alpha_mpc',
   corr_values TEXT NOT NULL,
   mmc_values TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (tournament, round_number)
+  PRIMARY KEY (tournament, round_number, field_scope, metric_set)
 );
 
 CREATE TABLE IF NOT EXISTS tournament_coverage (
@@ -106,6 +122,9 @@ CREATE TABLE IF NOT EXISTS model_round_scores (
   mmc60 REAL,
   alpha REAL,
   mpc REAL,
+  -- Signals' neutral pair, from the same submissionScores call as alpha/mpc.
+  neutral_corr REAL,
+  neutral_mmc REAL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (model_id, tournament, round_number)
 );
@@ -119,5 +138,9 @@ CREATE TABLE IF NOT EXISTS model_score_coverage (
   covered_from_round INTEGER NOT NULL,
   covered_to_round INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  -- Which score columns the cached rows were written with. Coverage recorded
+  -- under a different set is ignored, so rows written before a metric existed
+  -- are refetched rather than served without it (see round-scores-cache.ts).
+  score_fields TEXT,
   PRIMARY KEY (model_id, tournament)
 );
