@@ -139,8 +139,9 @@ export function resolveScoringMode(
 
 /**
  * The weighted "score" the time-series chart plots for whichever scoring mode
- * is selected — corr60/mmc60 for 'classic', alpha/mpc for 'alpha_mpc',
- * ncorr/nmmc for 'neutral'.
+ * is selected — the tournament's own pair for 'classic' (corr60/mmc60, or
+ * corr/mmc where there is no 60-day figure, as on Crypto), alpha/mpc for
+ * 'alpha_mpc', ncorr/nmmc for 'neutral'.
  * Pulled out of the component so it's covered by a plain (non-browser) vitest
  * run: the chart itself only wires this to its weight-editor state.
  */
@@ -151,6 +152,8 @@ export function computeChartScore(
 		mpc: number | null | undefined;
 		ncorr: number | null | undefined;
 		nmmc: number | null | undefined;
+		corr20: number | null | undefined;
+		mmc: number | null | undefined;
 		corr60: number | null | undefined;
 		mmc60: number | null | undefined;
 	},
@@ -161,9 +164,13 @@ export function computeChartScore(
 		return computeScore(values.ncorr, values.nmmc, corrWeight, mmcWeight);
 	}
 	if (mode === 'classic') {
-		// Classic's own pair: it has no alpha/mpc, and has been paid on the 60-day
-		// window since 28 Aug 2026.
-		return computeScore(values.corr60, values.mmc60, corrWeight, mmcWeight);
+		// The tournament's own pair. Classic has been paid on the 60-day window
+		// since 28 Aug 2026; Crypto publishes no 60-day figures at all, so it falls
+		// back to plain corr/mmc rather than having no score to plot.
+		const hasSixtyDay = values.corr60 != null || values.mmc60 != null;
+		return hasSixtyDay
+			? computeScore(values.corr60, values.mmc60, corrWeight, mmcWeight)
+			: computeScore(values.corr20, values.mmc, corrWeight, mmcWeight);
 	}
 	return computeScore(values.alpha, values.mpc, corrWeight, mmcWeight);
 }

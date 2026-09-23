@@ -126,7 +126,7 @@ describe('hasNoNeutralData', () => {
 });
 
 describe('computeChartScore', () => {
-	const values = { alpha: 0.02, mpc: 0.03, ncorr: 0.05, nmmc: 0.01, corr60: 0.011, mmc60: 0.004 };
+	const values = { alpha: 0.02, mpc: 0.03, ncorr: 0.05, nmmc: 0.01, corr20: 0.9, mmc: 0.9, corr60: 0.011, mmc60: 0.004 };
 
 	it("scores corr60/mmc60 for 'classic', which is what Classic is paid on", () => {
 		// Classic has no alpha/mpc at all, so scoring it on that pair produced
@@ -145,11 +145,32 @@ describe('computeChartScore', () => {
 		expect(computeChartScore('neutral', values, 0.5, 2)).toBeCloseTo(0.5 * 0.05 + 2 * 0.01, 12);
 	});
 
+	it("scores Crypto's corr/mmc, which has no 60-day pair at all", () => {
+		// Crypto rounds carry corr and mmc only. Scoring them on corr60/mmc60 gave
+		// null, so Crypto had no Score line to compare unstaked models with.
+		const crypto = {
+			alpha: null,
+			mpc: null,
+			ncorr: null,
+			nmmc: null,
+			corr20: 0.02,
+			mmc: 0.01,
+			corr60: null,
+			mmc60: null
+		};
+		expect(computeChartScore('classic', crypto, 1, 2)).toBeCloseTo(1 * 0.02 + 2 * 0.01, 12);
+	});
+
+	it('prefers the 60-day pair when the tournament has one', () => {
+		const classic = { alpha: null, mpc: null, ncorr: null, nmmc: null, corr20: 0.9, mmc: 0.9, corr60: 0.011, mmc60: 0.004 };
+		expect(computeChartScore('classic', classic, 0.75, 2.25)).toBeCloseTo(0.75 * 0.011 + 2.25 * 0.004, 12);
+	});
+
 	it('returns null when both relevant components are absent', () => {
-		expect(computeChartScore('neutral', { alpha: 1, mpc: 1, ncorr: null, nmmc: null, corr60: 1, mmc60: 1 }, 0.5, 2)).toBeNull();
-		expect(computeChartScore('alpha_mpc', { alpha: null, mpc: null, ncorr: 1, nmmc: 1, corr60: 1, mmc60: 1 }, 0.3, 0.8)).toBeNull();
+		expect(computeChartScore('neutral', { alpha: 1, mpc: 1, ncorr: null, nmmc: null, corr20: 1, mmc: 1, corr60: 1, mmc60: 1 }, 0.5, 2)).toBeNull();
+		expect(computeChartScore('alpha_mpc', { alpha: null, mpc: null, ncorr: 1, nmmc: 1, corr20: 1, mmc: 1, corr60: 1, mmc60: 1 }, 0.3, 0.8)).toBeNull();
 		expect(
-			computeChartScore('classic', { alpha: 1, mpc: 1, ncorr: 1, nmmc: 1, corr60: null, mmc60: null }, 0.75, 2.25)
+			computeChartScore('classic', { alpha: 1, mpc: 1, ncorr: 1, nmmc: 1, corr20: null, mmc: null, corr60: null, mmc60: null }, 0.75, 2.25)
 		).toBeNull();
 	});
 });

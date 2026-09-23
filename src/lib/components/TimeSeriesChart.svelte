@@ -129,15 +129,6 @@
 	let scoreMmcWeight = $state(SCORE_MPC_WEIGHT);
 
 	// Labels for whichever pair currently drives the Score metric and its
-	// weight editor — the pair the selected mode actually scores on, so the
-	// editor never shows one pair's numbers scoring another.
-	const activeScoreLabels = $derived(
-		scoringMode === 'neutral'
-			? SIGNALS_METRIC_SETS.neutral
-			: scoringMode === 'classic'
-				? { corrLabel: metricConfig.corr60.label, mmcLabel: metricConfig.mmc60.label }
-				: SIGNALS_METRIC_SETS.alpha_mpc
-	);
 
 	// State for model visibility
 	let modelVisibility = $state<Map<string, boolean>>(new Map());
@@ -264,7 +255,16 @@
 					// both of that mode's components are absent.
 					const score = computeChartScore(
 						scoringMode,
-						{ alpha, mpc, ncorr, nmmc, corr60: toNumber(round.corr60), mmc60: toNumber(round.mmc60) },
+						{
+							alpha,
+							mpc,
+							ncorr,
+							nmmc,
+							corr20: toNumber(round.correlation),
+							mmc: toNumber(round.mmc),
+							corr60: toNumber(round.corr60),
+							mmc60: toNumber(round.mmc60)
+						},
 						scoreCorrWeight,
 						scoreMmcWeight
 					);
@@ -344,11 +344,35 @@
 	const hasNewMetrics = $derived(
 		allDataPoints.some(p => p.alpha !== null || p.mpc !== null)
 	);
-	// Which modes this data offers, and their labels. Signals is not scored on
+
+	// Crypto publishes no 60-day figures, so its base score (and the weight
+	// editor beside it) is named after the pair it actually uses — see
+	// computeChartScore's 'classic' branch, which falls back the same way.
+	const hasSixtyDayMetrics = $derived(
+		allDataPoints.some(p => p.corr60 !== null || p.mmc60 !== null)
+	);
+	const basePairLabels = $derived(
+		hasSixtyDayMetrics
+			? { corrLabel: metricConfig.corr60.label, mmcLabel: metricConfig.mmc60.label }
+			: { corrLabel: metricConfig.corr20.label, mmcLabel: metricConfig.mmc.label }
+	);
+
+
+	// weight editor — the pair the selected mode actually scores on, so the
+	// editor never shows one pair's numbers scoring another.
+	const activeScoreLabels = $derived(
+		scoringMode === 'neutral'
+			? SIGNALS_METRIC_SETS.neutral
+			: scoringMode === 'classic'
+				? basePairLabels
+				: SIGNALS_METRIC_SETS.alpha_mpc
+	);	// Which modes this data offers, and their labels. Signals is not scored on
 	// corr60/mmc60, so Classic is not offered there — see scoringModesFor.
 	const scoringModes = $derived(scoringModesFor(hasNewMetrics));
 	const scoringModeLabels: Record<ChartScoringMode, string> = {
-		classic: 'Classic (Corr60/MMC60)',
+		get classic() {
+			return `Score (${basePairLabels.corrLabel}/${basePairLabels.mmcLabel})`;
+		},
 		alpha_mpc: `New (${alphaMpcCorrLabel}/${alphaMpcMmcLabel})`,
 		neutral: `Neutral (${neutralCorrLabel}/${neutralMmcLabel})`
 	};
@@ -514,7 +538,9 @@
 		scoringMode = mode;
 		const weights =
 			mode === 'classic'
-				? getDefaultFormulaForTournament(TOURNAMENTS.CLASSIC)
+				? getDefaultFormulaForTournament(
+						hasSixtyDayMetrics ? TOURNAMENTS.CLASSIC : TOURNAMENTS.CRYPTO
+					)
 				: getMetricSetDefinition(mode);
 		scoreCorrWeight = weights.corrWeight;
 		scoreMmcWeight = weights.mmcWeight;
