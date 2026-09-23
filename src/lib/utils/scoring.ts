@@ -114,6 +114,30 @@ export function computeScore(
 export type ChartScoringMode = 'classic' | SignalsMetricSet;
 
 /**
+ * The scoring modes the chart offers for the data it is showing.
+ *
+ * Signals is scored on alpha/mpc (and, from rounds opening 2026-09-25, the
+ * neutral pair) — never on Classic's corr60/mmc60 — so Classic is not offered
+ * there. Everything else has only Classic.
+ */
+export function scoringModesFor(hasSignalsMetrics: boolean): ChartScoringMode[] {
+	return hasSignalsMetrics ? ['alpha_mpc', 'neutral'] : ['classic'];
+}
+
+/**
+ * `mode` if the data still offers it, else that data's first mode — so
+ * switching between tournaments can never leave the chart on a mode its own
+ * toggle no longer shows.
+ */
+export function resolveScoringMode(
+	mode: ChartScoringMode,
+	hasSignalsMetrics: boolean
+): ChartScoringMode {
+	const available = scoringModesFor(hasSignalsMetrics);
+	return available.includes(mode) ? mode : available[0];
+}
+
+/**
  * The weighted "score" the time-series chart plots for whichever scoring mode
  * is selected — alpha/mpc for 'classic'/'alpha_mpc', ncorr/nmmc for 'neutral'.
  * Pulled out of the component so it's covered by a plain (non-browser) vitest

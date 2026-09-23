@@ -5,6 +5,8 @@ import {
 	SIGNALS_METRIC_SETS,
 	DEFAULT_SIGNALS_METRIC_SET,
 	NEUTRAL_SCORES_FROM_ROUND,
+	resolveScoringMode,
+	scoringModesFor,
 	computeScore,
 	computeChartScore,
 	formatMetricSetFormula,
@@ -141,5 +143,32 @@ describe('computeChartScore', () => {
 	it('returns null when both relevant components are absent', () => {
 		expect(computeChartScore('neutral', { alpha: 1, mpc: 1, ncorr: null, nmmc: null }, 0.5, 2)).toBeNull();
 		expect(computeChartScore('alpha_mpc', { alpha: null, mpc: null, ncorr: 1, nmmc: 1 }, 0.3, 0.8)).toBeNull();
+	});
+});
+
+describe('scoringModesFor', () => {
+	it('offers Classic only where there are no Signals metrics', () => {
+		expect(scoringModesFor(false)).toEqual(['classic']);
+	});
+
+	it('drops Classic for Signals, which is no longer scored on corr60/mmc60', () => {
+		expect(scoringModesFor(true)).toEqual(['alpha_mpc', 'neutral']);
+	});
+});
+
+describe('resolveScoringMode', () => {
+	it('keeps a mode the data still offers', () => {
+		expect(resolveScoringMode('neutral', true)).toBe('neutral');
+		expect(resolveScoringMode('classic', false)).toBe('classic');
+	});
+
+	it('moves off Classic when the data turns out to be Signals', () => {
+		// Selecting a model of another tournament must not leave the chart on a
+		// mode its own toggle no longer shows.
+		expect(resolveScoringMode('classic', true)).toBe('alpha_mpc');
+	});
+
+	it('falls back to Classic when Signals metrics disappear', () => {
+		expect(resolveScoringMode('neutral', false)).toBe('classic');
 	});
 });

@@ -11,6 +11,8 @@
 		SIGNALS_METRIC_SETS,
 		NEUTRAL_SCORES_FROM_ROUND,
 		computeChartScore,
+		resolveScoringMode,
+		scoringModesFor,
 		hasNoNeutralData,
 		getMetricSetDefinition,
 		type ChartScoringMode
@@ -114,6 +116,7 @@
 	// own, so its Score (when toggled on) and the weight editor below both fall
 	// back to the alpha_mpc pair, matching this chart's long-standing default.
 	let scoringMode = $state<ChartScoringMode>('classic');
+
 
 	// Calculated score weights — default to the active mode's Numerai Signals
 	// weights (0.3*alpha + 0.8*mpc, or 0.5*ncorr + 2*nmmc for neutral).
@@ -327,6 +330,21 @@
 	const hasNewMetrics = $derived(
 		allDataPoints.some(p => p.alpha !== null || p.mpc !== null)
 	);
+	// Which modes this data offers, and their labels. Signals is not scored on
+	// corr60/mmc60, so Classic is not offered there — see scoringModesFor.
+	const scoringModes = $derived(scoringModesFor(hasNewMetrics));
+	const scoringModeLabels: Record<ChartScoringMode, string> = {
+		classic: 'Classic (Corr60/MMC60)',
+		alpha_mpc: `New (${alphaMpcCorrLabel}/${alphaMpcMmcLabel})`,
+		neutral: `Neutral (${neutralCorrLabel}/${neutralMmcLabel})`
+	};
+
+	// Selecting models of another tournament changes which modes exist; never
+	// leave the chart on one its toggle no longer shows.
+	$effect(() => {
+		const resolved = resolveScoringMode(scoringMode, hasNewMetrics);
+		if (resolved !== scoringMode) setScoringMode(resolved);
+	});
 
 	// Empty-data honesty: only warn when Neutral is selected AND the visible
 	// range genuinely has no neutral values (rather than assuming from the
@@ -866,33 +884,17 @@
 			<div class="flex flex-wrap items-center gap-4">
 				<span class="text-sm font-medium retro-text-primary">Scoring:</span>
 				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
-					<button
-						onclick={() => setScoringMode('classic')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={scoringMode === 'classic'
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						Classic (Corr60/MMC60)
-					</button>
-					<button
-						onclick={() => setScoringMode('alpha_mpc')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={scoringMode === 'alpha_mpc'
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						New ({alphaMpcCorrLabel}/{alphaMpcMmcLabel})
-					</button>
-					<button
-						onclick={() => setScoringMode('neutral')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={scoringMode === 'neutral'
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						Neutral ({neutralCorrLabel}/{neutralMmcLabel})
-					</button>
+					{#each scoringModes as mode}
+						<button
+							onclick={() => setScoringMode(mode)}
+							class="px-3 py-1 text-sm font-medium transition-colors"
+							style={scoringMode === mode
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{scoringModeLabels[mode]}
+						</button>
+					{/each}
 				</div>
 
 				<div class="flex items-center gap-2">
