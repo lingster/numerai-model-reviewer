@@ -126,10 +126,15 @@ describe('hasNoNeutralData', () => {
 });
 
 describe('computeChartScore', () => {
-	const values = { alpha: 0.02, mpc: 0.03, ncorr: 0.05, nmmc: 0.01 };
+	const values = { alpha: 0.02, mpc: 0.03, ncorr: 0.05, nmmc: 0.01, corr60: 0.011, mmc60: 0.004 };
 
-	it("scores alpha/mpc for 'classic' (the chart's long-standing default score)", () => {
-		expect(computeChartScore('classic', values, 0.3, 0.8)).toBeCloseTo(0.3 * 0.02 + 0.8 * 0.03, 12);
+	it("scores corr60/mmc60 for 'classic', which is what Classic is paid on", () => {
+		// Classic has no alpha/mpc at all, so scoring it on that pair produced
+		// nothing — there was no Score to plot on a Classic chart.
+		expect(computeChartScore('classic', values, 0.75, 2.25)).toBeCloseTo(
+			0.75 * 0.011 + 2.25 * 0.004,
+			12
+		);
 	});
 
 	it("scores alpha/mpc for 'alpha_mpc'", () => {
@@ -141,8 +146,11 @@ describe('computeChartScore', () => {
 	});
 
 	it('returns null when both relevant components are absent', () => {
-		expect(computeChartScore('neutral', { alpha: 1, mpc: 1, ncorr: null, nmmc: null }, 0.5, 2)).toBeNull();
-		expect(computeChartScore('alpha_mpc', { alpha: null, mpc: null, ncorr: 1, nmmc: 1 }, 0.3, 0.8)).toBeNull();
+		expect(computeChartScore('neutral', { alpha: 1, mpc: 1, ncorr: null, nmmc: null, corr60: 1, mmc60: 1 }, 0.5, 2)).toBeNull();
+		expect(computeChartScore('alpha_mpc', { alpha: null, mpc: null, ncorr: 1, nmmc: 1, corr60: 1, mmc60: 1 }, 0.3, 0.8)).toBeNull();
+		expect(
+			computeChartScore('classic', { alpha: 1, mpc: 1, ncorr: 1, nmmc: 1, corr60: null, mmc60: null }, 0.75, 2.25)
+		).toBeNull();
 	});
 });
 

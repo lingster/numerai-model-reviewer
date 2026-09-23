@@ -24,3 +24,22 @@ export function focusedSeriesColor(
 	if (focused === null || focused === modelId) return color;
 	return MUTED_SERIES_COLOR;
 }
+
+/**
+ * The same series, with the focused one last.
+ *
+ * SVG paints in document order, so a focused line drawn early is overdrawn by
+ * the greyed ones wherever they cross — exactly where the line matters most.
+ * Relative order is otherwise untouched, so colours (assigned by position)
+ * do not shuffle.
+ */
+export function orderForFocus<T>(
+	series: ReadonlyArray<T>,
+	focused: string | null,
+	idOf: (item: T) => string
+): T[] {
+	if (focused === null) return [...series];
+	const rest = series.filter((item) => idOf(item) !== focused);
+	if (rest.length === series.length) return [...series]; // focus is not plotted
+	return [...rest, ...series.filter((item) => idOf(item) === focused)];
+}

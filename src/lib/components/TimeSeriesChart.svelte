@@ -6,7 +6,9 @@
 	import { line, curveMonotoneX } from 'd3-shape';
 	import type { ModelPerformance, ChartMetric, ModelSeries, ChartDataPoint } from '$lib/types.js';
 	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
-	import { focusedSeriesColor, toggleFocus } from '$lib/utils/series-focus.js';
+	import { focusedSeriesColor, orderForFocus, toggleFocus } from '$lib/utils/series-focus.js';
+	import { getDefaultFormulaForTournament } from '$lib/rankings-api.js';
+	import { TOURNAMENTS } from '$lib/utils/storage.js';
 	import {
 		SCORE_ALPHA_WEIGHT,
 		SCORE_MPC_WEIGHT,
@@ -109,7 +111,7 @@
 	const NEUTRAL_METRICS: ChartMetric[] = ['ncorr', 'nmmc', 'score'];
 	// Metrics that only apply to Signals — hidden from the generic metric-toggle
 	// row entirely unless hasNewMetrics (below) says this data is Signals.
-	const SIGNALS_ONLY_METRICS: ChartMetric[] = ['alpha', 'mpc', 'ncorr', 'nmmc', 'score'];
+	const SIGNALS_ONLY_METRICS: ChartMetric[] = ['alpha', 'mpc', 'ncorr', 'nmmc'];
 
 	// State for metric toggles - default to the Classic (60-day) pair.
 	let activeMetrics = $state<Set<ChartMetric>>(new Set(CLASSIC_METRICS));
@@ -127,10 +129,14 @@
 	let scoreMmcWeight = $state(SCORE_MPC_WEIGHT);
 
 	// Labels for whichever pair currently drives the Score metric and its
-	// weight editor — neutral's pair once that mode is selected, alpha/mpc
-	// otherwise (matching computeChartScore's own fallback).
+	// weight editor — the pair the selected mode actually scores on, so the
+	// editor never shows one pair's numbers scoring another.
 	const activeScoreLabels = $derived(
-		scoringMode === 'neutral' ? SIGNALS_METRIC_SETS.neutral : SIGNALS_METRIC_SETS.alpha_mpc
+		scoringMode === 'neutral'
+			? SIGNALS_METRIC_SETS.neutral
+			: scoringMode === 'classic'
+				? { corrLabel: metricConfig.corr60.label, mmcLabel: metricConfig.mmc60.label }
+				: SIGNALS_METRIC_SETS.alpha_mpc
 	);
 
 	// State for model visibility
@@ -163,6 +169,8 @@
 		roundNumber: number;
 		date: Date;
 		resolved: boolean;
+		/** The metric whose line the pointer is on — highlighted in the list below. */
+		hoveredMetric: ChartMetric;
 		metrics: Record<string, number | null>;
 	} | null>(null);
 
@@ -256,7 +264,7 @@
 					// both of that mode's components are absent.
 					const score = computeChartScore(
 						scoringMode,
-						{ alpha, mpc, ncorr, nmmc },
+						{ alpha, mpc, ncorr, nmmc, corr60: toNumber(round.corr60), mmc60: toNumber(round.mmc60) },
 						scoreCorrWeight,
 						scoreMmcWeight
 					);
@@ -504,11 +512,12 @@
 			mode === 'classic' ? CLASSIC_METRICS : mode === 'neutral' ? NEUTRAL_METRICS : ALPHA_MPC_METRICS
 		);
 		scoringMode = mode;
-		if (mode !== 'classic') {
-			const set = getMetricSetDefinition(mode);
-			scoreCorrWeight = set.corrWeight;
-			scoreMmcWeight = set.mmcWeight;
-		}
+		const weights =
+			mode === 'classic'
+				? getDefaultFormulaForTournament(TOURNAMENTS.CLASSIC)
+				: getMetricSetDefinition(mode);
+		scoreCorrWeight = weights.corrWeight;
+		scoreMmcWeight = weights.mmcWeight;
 	}
 
 	// Toggle metric
@@ -533,6 +542,15 @@
 	// converted here because this chart keeps its state in a Map. Fifty models is
 	// a normal selection; picking a few of them should not be fifty clicks.
 	const modelIds = $derived(chartSeries.map((s) => s.modelId));
+	// Painting order for the plot: the focused model last, so the greyed lines
+	// cannot overdraw the one being studied.
+	const seriesInDrawOrder = $derived(
+		orderForFocus(
+			chartSeriesDisplay.filter((s) => s.visible),
+			focusedModelId,
+			(s) => s.modelId
+		)
+	);
 	const shownCount = $derived(chartSeries.filter((s) => s.visible).length);
 
 	function setAllModels(visible: boolean) {
@@ -581,7 +599,12 @@
 	}
 
 	// Tooltip handlers
-	function showTooltip(event: MouseEvent, series: ExtendedModelSeries, point: ChartDataPoint) {
+	function showTooltip(
+		event: MouseEvent,
+		series: ExtendedModelSeries,
+		point: ChartDataPoint,
+		hoveredMetric: ChartMetric
+	) {
 		if (!chartContainer) return;
 		const containerRect = chartContainer.getBoundingClientRect();
 		const rawX = event.clientX - containerRect.left;
@@ -610,6 +633,9 @@
 			roundNumber: point.roundNumber,
 			date: point.date,
 			resolved: point.resolved,
+			// Which line the pointer is actually on, so the tooltip can say which of
+			// its rows the reader came for.
+			hoveredMetric,
 			metrics: Object.fromEntries(ALL_METRICS.map(m => [m, point[m]]))
 		};
 	}
@@ -933,8 +959,9 @@
 		</div>
 	{/if}
 
-	<!-- Scoring mode toggle + score weights (Signals: alpha/mpc and neutral scoring) -->
-	{#if hasNewMetrics}
+	<!-- Scoring mode toggle + score weights. Shown for every tournament: Classic
+	     scores on corr60/mmc60, Signals on alpha/mpc or the neutral pair. -->
+	{#if chartSeries.length > 0}
 		<div class="mb-4 rounded-md border-2 border-[var(--retro-primary)] p-3">
 			<div class="flex flex-wrap items-center gap-4">
 				<span class="text-sm font-medium retro-text-primary">Scoring:</span>
@@ -1073,9 +1100,18 @@
 							<div class="border-t border-gray-700 pt-1 mt-1">
 								{#each Object.entries(tooltipData.metrics) as [metric, value]}
 									{#if value !== null}
-										<div class="flex justify-between">
-											<span class="text-gray-400">{metric}:</span>
-											<span class="font-mono {value > 0 ? 'text-green-400' : value < 0 ? 'text-red-400' : 'text-white'}">{formatValue(value)}</span>
+										{@const hovered = metric === tooltipData.hoveredMetric}
+										<!-- The row for the line under the pointer is the one the reader
+										     came for; the rest are context. -->
+										<div class="flex justify-between {hovered ? 'rounded-sm bg-white/10 px-1 -mx-1' : ''}">
+											<span class="{hovered ? 'font-semibold text-white' : 'text-gray-400'}">{metric}:</span>
+											<span
+												class="font-mono {hovered ? 'font-semibold ' : ''}{value > 0
+													? 'text-green-400'
+													: value < 0
+														? 'text-red-400'
+														: 'text-white'}">{formatValue(value)}</span
+											>
 										</div>
 									{/if}
 								{/each}
@@ -1263,7 +1299,7 @@
 
 					<!-- Lines for each model and metric combination (clipped to chart area) -->
 					<g clip-path="url(#chart-clip)">
-						{#each chartSeriesDisplay.filter(s => s.visible) as series}
+						{#each seriesInDrawOrder as series}
 							{#each [...activeMetrics] as metric}
 								{@const isRightAxis = metricConfig[metric].axis === 'right'}
 								{@const yScale = isRightAxis ? yScaleRight : yScaleLeft}
@@ -1313,7 +1349,7 @@
 											: 'Focus'} {series.modelName} — round {point.roundNumber}: {metric} = {formatValue(
 											point[metric]
 										)}"
-										onmouseenter={(e) => showTooltip(e, series, point)}
+										onmouseenter={(e) => showTooltip(e, series, point, metric)}
 										onmouseleave={hideTooltip}
 										onclick={() => focusModel(series.modelId)}
 										onkeydown={(e) => {
@@ -1407,7 +1443,7 @@
 				/>
 
 				<!-- Mini chart lines for overview -->
-				{#each chartSeriesDisplay.filter(s => s.visible) as series}
+				{#each seriesInDrawOrder as series}
 					{#each [...activeMetrics].filter(m => metricConfig[m].axis === 'left') as metric}
 						{@const validData = series.data.filter(d => typeof d[metric] === 'number' && Number.isFinite(d[metric] as number))}
 						{@const brushLineGenerator = line<ChartDataPoint>()

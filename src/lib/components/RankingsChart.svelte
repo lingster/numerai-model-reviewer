@@ -17,7 +17,7 @@
 	import { passesStakedFilter, type StakedFilter } from '$lib/utils/round-staked-filter.js';
 	import { fieldScopeLabel, type FieldScope } from '$lib/utils/field-scope.js';
 	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
-	import { focusedSeriesColor, toggleFocus } from '$lib/utils/series-focus.js';
+	import { focusedSeriesColor, orderForFocus, toggleFocus } from '$lib/utils/series-focus.js';
 
 	// Props
 	let {
@@ -168,6 +168,12 @@
 	// Filter visible models
 	const visibleHistories = $derived(
 		rankingHistories.filter(h => modelVisibility[seriesKey(h)])
+	);
+	// Painting order: the focused model last, so the greyed lines cannot
+	// overdraw the one being studied. Keyed by model, so a focused model's two
+	// field-scope lines both come to the front.
+	const historiesInDrawOrder = $derived(
+		orderForFocus(visibleHistories, focusedModelId, (h) => h.modelId)
 	);
 
 	// Unique model ids in first-seen order, used to assign each MODEL (not each
@@ -746,7 +752,7 @@
 					<!-- Metric overlay lines (drawn under the rank line/points so the rank
 					     stays the focal series). Dashed = metric1 (corr), dotted = metric2. -->
 					{#if anyMetricOverlay}
-						{#each visibleHistories as history (seriesKey(history))}
+						{#each historiesInDrawOrder as history (seriesKey(history))}
 							{@const color = getModelColor(history.modelId)}
 							{@const rankings = displayedRankingsById.get(seriesKey(history)) ?? history.rankings}
 							{#if showMetric1}
@@ -781,7 +787,7 @@
 					<!-- Data lines. Solid = staked field (or single-scope mode); dashed = all
 					     models — see lineDashArray. A model's two "vs Both" lines share a
 					     colour (getModelColor keys off modelId, not the series). -->
-					{#each visibleHistories as history (seriesKey(history))}
+					{#each historiesInDrawOrder as history (seriesKey(history))}
 						{@const rankings = displayedRankingsById.get(seriesKey(history)) ?? history.rankings}
 						{@const pathData = line(rankings)}
 						{#if pathData}
