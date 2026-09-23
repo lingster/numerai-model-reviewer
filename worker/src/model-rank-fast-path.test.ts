@@ -16,7 +16,7 @@ import { selectRoundField } from './perf-queries';
 import { encodeFieldMetrics } from './round-field';
 import { fieldFromRows, upsertRoundFieldSql } from './round-field-store';
 import { refreshCoverage } from './tournament-coverage';
-import { getModelRank, type Env, type ScoreFormula } from './rankings-api';
+import { getModelRank, getTopModelsForRound, type Env, type ScoreFormula } from './rankings-api';
 
 const CLASSIC: FleetSlice = { tournament: 8, models: 120, fromRound: 1200, toRound: 1300, unstakedEvery: 10 };
 const SIGNALS: FleetSlice = { tournament: 11, models: 60, fromRound: 1250, toRound: 1300, unstakedEvery: 10 };
@@ -153,6 +153,57 @@ describe('getModelRank with stored fields', () => {
 		);
 		expect(result.rounds).toHaveLength(ROUNDS);
 		expect(cost.rowsRead).toBeGreaterThan(2 * ROUNDS + 10);
+	});
+});
+
+describe('getTopModelsForRound honours the same toggles as the chart', () => {
+	// The table and the chart sit on the same page: if the table ignores the
+	// competitor field or the metric set, it silently ranks a different
+	// population from the lines above it, under the toggle's own label.
+	it('ranks against every scorer when the all-models field is asked for', async () => {
+		const staked = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), { round: TO, tournament: CLASSIC.tournament, formula: FORMULA, limit: 0 })
+		);
+		const all = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), {
+				round: TO,
+				tournament: CLASSIC.tournament,
+				formula: FORMULA,
+				limit: 0,
+				fieldScope: 'all'
+			})
+		);
+
+		expect(all.result.length).toBeGreaterThan(staked.result.length);
+		expect(all.result.length).toBe(CLASSIC.models);
+	});
+
+	it('scores Signals on the metric set it is given', async () => {
+		const round = SIGNALS.toRound;
+		// Every model ties on alpha/mpc; the neutral pair varies per model, so only
+		// the neutral set can order them.
+		await d1.execute(
+			`UPDATE model_performances
+			    SET alpha = 0.01, mpc = 0.01, neutral_corr = (rowid % 50 + 1) * 0.001, neutral_mmc = 0
+			  WHERE tournament = ${SIGNALS.tournament} AND round_number = ${round}`
+		);
+
+		const alphaMpc = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), { round, tournament: SIGNALS.tournament, formula: FORMULA, limit: 3 })
+		);
+		const neutral = await d1.measure((db) =>
+			getTopModelsForRound(envFor(db), {
+				round,
+				tournament: SIGNALS.tournament,
+				formula: FORMULA,
+				limit: 3,
+				metricSet: 'neutral'
+			})
+		);
+
+		expect(alphaMpc.result.every((m) => m.corr === 0.01)).toBe(true);
+		expect(neutral.result[0].corr).toBeGreaterThan(0);
+		expect(neutral.result.map((m) => m.corr)).not.toEqual(alphaMpc.result.map((m) => m.corr));
 	});
 });
 

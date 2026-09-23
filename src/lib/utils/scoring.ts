@@ -5,7 +5,13 @@
  * selected via the Worker's `metricSet` query param:
  *  - alpha_mpc (today's payout pair):    0.3*alpha + 0.8*mpc
  *  - neutral   (Numerai's payout pair for Signals rounds opening on/after
- *               2026-09-25): 0.5*ncorr + 2*nmmc, clipped +/-3.5% server-side
+ *               2026-09-25): 0.5*ncorr + 2*nmmc
+ *
+ * Numerai clips the payout a score earns to +/-3.5%. That cap is deliberately
+ * NOT applied here: it is a limit on what a round pays, and applying it to the
+ * score would flatten every model past the cap into one tie, losing the order
+ * this page exists to show. Ranks use the unclipped weighted score, as they do
+ * for alpha/mpc.
  *
  * Weights AND display labels for both sets live here, once, so every view that
  * shows Signals scoring (rankings, round-summary, models, the time-series

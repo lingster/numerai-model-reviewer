@@ -189,9 +189,10 @@ async function lookupModel(
 async function fetchRoundField(
 	env: Env,
 	round: number,
-	tournament: number
+	tournament: number,
+	fieldScope: FieldScope = 'staked'
 ): Promise<RoundPerfRow[]> {
-	return selectRoundField(env.DB, round, tournament);
+	return selectRoundField(env.DB, round, tournament, fieldScope);
 }
 
 // Rounds per batched range query. Ranking needs every staked model's row for
@@ -698,10 +699,18 @@ export async function getTopModelsForRound(
 		limit: number;
 		/** Trailing round window (see getModelRank). 1 = rank on this round alone. */
 		window?: number;
+		/** Which competitors to rank: the staked field, or every model that scored. */
+		fieldScope?: FieldScope;
+		/** Which Signals metric pair to score on. */
+		metricSet?: MetricSet;
 	}
 ): Promise<TopModelEntry[]> {
 	const { round, tournament, formula, limit } = params;
 	const window = Math.max(1, Math.floor(params.window ?? 1));
+	// The table sits under the chart's toggles, so it must rank the same
+	// population on the same metrics the chart does.
+	const fieldScope = asFieldScope(params.fieldScope);
+	const metricSet = asMetricSet(params.metricSet);
 
 	const scored: Array<{
 		modelName: string;
@@ -717,11 +726,11 @@ export async function getTopModelsForRound(
 		// ranking, so the table matches the windowed chart (MMC20/CORR60).
 		const fetchStart = Math.max(1, round - (window - 1));
 		const [fields, userMap] = await Promise.all([
-			fetchRoundFields(env, fetchStart, round, tournament),
+			fetchRoundFields(env, fetchStart, round, tournament, fieldScope),
 			fetchUsernameMap(env, tournament)
 		]);
 		usernames = userMap;
-		const windowed = buildWindowedMetrics(fields, tournament, window);
+		const windowed = buildWindowedMetrics(fields, tournament, window, metricSet);
 		const field = fields.get(round) ?? [];
 		for (const row of field) {
 			const m = windowed.get(row.model_name.toLowerCase())?.get(round);
@@ -732,12 +741,12 @@ export async function getTopModelsForRound(
 		}
 	} else {
 		const [field, userMap] = await Promise.all([
-			fetchRoundField(env, round, tournament),
+			fetchRoundField(env, round, tournament, fieldScope),
 			fetchUsernameMap(env, tournament)
 		]);
 		usernames = userMap;
 		for (const row of field) {
-			const metrics = pickMetrics(row, tournament);
+			const metrics = pickMetrics(row, tournament, metricSet);
 			const score = scoreFromMetrics(metrics, formula);
 			if (score === null) continue;
 			scored.push({ modelName: row.model_name, score, corr: metrics.corr, mmc: metrics.mmc });

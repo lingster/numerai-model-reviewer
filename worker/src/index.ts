@@ -200,7 +200,17 @@ export default {
             mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
             tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
           };
-          const top = await rankings.getTopModelsForRound(env, { round, tournament, formula, limit, window });
+          const top = await rankings.getTopModelsForRound(env, {
+            round,
+            tournament,
+            formula,
+            limit,
+            window,
+            // The table sits under the chart's toggles; it ranks the same
+            // population on the same metrics (see the model-rank route).
+            fieldScope: asFieldScope(url.searchParams.get('fieldScope')),
+            metricSet: asMetricSet(url.searchParams.get('metricSet'))
+          });
           response = jsonResponse(top);
         }
       }

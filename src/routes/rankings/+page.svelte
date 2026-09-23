@@ -907,7 +907,7 @@
 			</div>
 			<p class="mt-2 text-xs retro-text-secondary">
 				{formatMetricSetFormula(metricSet)} — {metricSet === 'neutral'
-					? 'the pair Numerai pays on for Signals rounds opening on/after 2026-09-25 (clipped ±3.5%, applied server-side).'
+					? 'the pair Numerai pays on for Signals rounds opening on/after 2026-09-25. Payouts are capped at ±3.5%; ranks here use the uncapped score.'
 					: "today's payout pair."}
 			</p>
 			{#if shouldShowNeutralStartHint(metricSet, startRound)}
