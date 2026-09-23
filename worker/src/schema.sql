@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS model_performances (
   -- alpha/mpc; see ranking.ts MetricSet. Added to existing DBs by migration 0005.
   neutral_corr REAL,
   neutral_mmc REAL,
+  -- Classic's 60-day pair, what it is paid on since 28 Aug 2026 (3*CORR60 +
+  -- 15*MMC60). corr60 comes from the profile query, mmc60 from submissionScores.
+  corr60 REAL,
+  mmc60 REAL,
   stake_value REAL,
   tournament INTEGER NOT NULL DEFAULT 8,
   updated_at INTEGER NOT NULL,

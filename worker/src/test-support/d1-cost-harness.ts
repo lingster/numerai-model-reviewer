@@ -122,13 +122,16 @@ export class D1CostHarness {
 		const { tournament, models, fromRound, toRound, unstakedEvery } = slice;
 		await this.raw
 			.prepare(
+				// corr60/mmc60 mirror the 20-day pair: Classic is ranked on the 60-day
+				// one, and a fleet that has only the 20-day pair would rank as nulls.
 				`WITH RECURSIVE
 				   m(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM m WHERE i < ?1 - 1),
 				   r(n) AS (SELECT ?2 UNION ALL SELECT n + 1 FROM r WHERE n < ?3)
 				 INSERT INTO model_performances
-				   (model_name, round_number, corr, mmc, tc, alpha, mpc, stake_value, tournament, updated_at)
+				   (model_name, round_number, corr, mmc, tc, alpha, mpc, corr60, mmc60, stake_value, tournament, updated_at)
 				 SELECT 't' || CAST(?4 AS INTEGER) || '_m' || i, n,
 				        0.05 - i * 0.0001, 0.02 - i * 0.00005, NULL, NULL, NULL,
+				        0.05 - i * 0.0001, 0.02 - i * 0.00005,
 				        CASE WHEN i % ?5 = 0 THEN 0 ELSE 1.0 END, ?4, 0
 				   FROM m, r`
 			)

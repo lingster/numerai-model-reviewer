@@ -27,6 +27,7 @@ describe('leaderboard entries kept for the fleet', () => {
 	});
 });
 import {
+  extractClassicScores,
   keepsLeaderboardEntry,
   performanceCsvChunks,
   performanceCsvHeader,
@@ -189,6 +190,8 @@ describe('performance CSV cache', () => {
 		mpc: 0.04,
 		neutralCorr: 0.05,
 		neutralMmc: 0.06,
+		corr60: 0.07,
+		mmc60: 0.08,
 		stakeValue: 7
 	});
 
@@ -203,7 +206,7 @@ describe('performance CSV cache', () => {
 			'm1,1300,0.01,0.02,,0.03,0.04,7'
 		];
 		expect(parsePerformanceCsv(legacy).get('m1')).toEqual([
-			{ ...round(1300), neutralCorr: null, neutralMmc: null }
+			{ ...round(1300), neutralCorr: null, neutralMmc: null, corr60: null, mmc60: null }
 		]);
 	});
 
@@ -214,5 +217,25 @@ describe('performance CSV cache', () => {
 		const chunks = [...performanceCsvChunks(data, 1000)];
 		expect(chunks.length).toBeGreaterThan(1);
 		expect(chunks.join('').trimEnd().split('\n')).toHaveLength(2501); // header + rows
+	});
+});
+
+describe('extractClassicScores', () => {
+	it('pulls mmc60 out of a Classic round, which the profile query has no field for', () => {
+		expect(
+			extractClassicScores([
+				{ displayName: 'corr20', value: 0.01 },
+				{ displayName: 'mmc60', value: 0.004 },
+				{ displayName: 'fnc', value: 0.02 }
+			])
+		).toEqual({ mmc60: 0.004 });
+	});
+
+	it('keeps an explicit null (an unresolved round) rather than inventing a value', () => {
+		expect(extractClassicScores([{ displayName: 'mmc60', value: null }])).toEqual({ mmc60: null });
+	});
+
+	it('handles a round with no scores at all', () => {
+		expect(extractClassicScores(null)).toEqual({ mmc60: null });
 	});
 });

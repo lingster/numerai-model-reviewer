@@ -15,7 +15,17 @@ import {
 
 /** Build an own-scores row for the injection fetcher. */
 function ownRow(corr: number, mmc: number) {
-	return { model_name: 'target', corr, mmc, tc: null, alpha: null, mpc: null, stake_value: null };
+	return {
+		model_name: 'target',
+		corr,
+		mmc,
+		tc: null,
+		alpha: null,
+		mpc: null,
+		corr60: corr,
+		mmc60: mmc,
+		stake_value: null
+	};
 }
 
 describe('computeLatestResolvedRound', () => {
@@ -55,6 +65,8 @@ type Row = {
 	tc: number | null;
 	alpha: number | null;
 	mpc: number | null;
+	corr60?: number | null;
+	mmc60?: number | null;
 	stake_value: number | null;
 };
 
@@ -100,8 +112,24 @@ function mockEnv(rows: Row[]) {
 
 type Env = Parameters<typeof getModelRank>[0];
 
+/**
+ * A Classic row. Classic is ranked on its 60-day pair (what Numerai pays on
+ * since 28 Aug 2026), so a row carries the same values in both pairs unless a
+ * test is specifically about the difference.
+ */
 function row(round: number, model: string, corr: number, mmc: number): Row {
-	return { round_number: round, model_name: model, corr, mmc, tc: null, alpha: null, mpc: null, stake_value: 1 };
+	return {
+		round_number: round,
+		model_name: model,
+		corr,
+		mmc,
+		tc: null,
+		alpha: null,
+		mpc: null,
+		corr60: corr,
+		mmc60: mmc,
+		stake_value: 1
+	};
 }
 
 describe('getModelRank D1 access pattern', () => {

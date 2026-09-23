@@ -17,6 +17,7 @@ import { encodeFieldMetrics } from './round-field';
 import { fieldFromRows, upsertRoundFieldSql } from './round-field-store';
 import { refreshCoverage } from './tournament-coverage';
 import { getModelRank, getTopModelsForRound, type Env, type ScoreFormula } from './rankings-api';
+import { defaultMetricSetFor } from './ranking';
 
 const CLASSIC: FleetSlice = { tournament: 8, models: 120, fromRound: 1200, toRound: 1300, unstakedEvery: 10 };
 const SIGNALS: FleetSlice = { tournament: 11, models: 60, fromRound: 1250, toRound: 1300, unstakedEvery: 10 };
@@ -58,7 +59,16 @@ async function storeFields(slice: FleetSlice, from: number, to: number): Promise
 		await d1.measure((db) =>
 			db
 				.prepare(
-					upsertRoundFieldSql(slice.tournament, round, 'staked', 'alpha_mpc', encodeFieldMetrics(fieldFromRows(rows, slice.tournament)), 0)
+					upsertRoundFieldSql(
+						slice.tournament,
+						round,
+						'staked',
+						defaultMetricSetFor(slice.tournament),
+						encodeFieldMetrics(
+							fieldFromRows(rows, slice.tournament, defaultMetricSetFor(slice.tournament))
+						),
+						0
+					)
 				)
 				.run()
 		);
@@ -229,7 +239,7 @@ describe('models that are not part of the stored field', () => {
 		async (_env: Env, params: { modelName: string; tournament: number }) => {
 			const rows = await db
 				.prepare(
-					`SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, stake_value
+					`SELECT round_number, model_name, corr, mmc, tc, alpha, mpc, corr60, mmc60, stake_value
 					   FROM model_performances
 					  WHERE model_name = ? AND tournament = ?`
 				)
@@ -281,8 +291,10 @@ describe('models that are not part of the stored field', () => {
 							CLASSIC.tournament,
 							round,
 							scope,
-							'alpha_mpc',
-							encodeFieldMetrics(fieldFromRows(rows, CLASSIC.tournament)),
+							defaultMetricSetFor(CLASSIC.tournament),
+							encodeFieldMetrics(
+								fieldFromRows(rows, CLASSIC.tournament, defaultMetricSetFor(CLASSIC.tournament))
+							),
 							0
 						)
 					)

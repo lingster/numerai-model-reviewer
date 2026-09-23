@@ -8,7 +8,7 @@
  * must score models identically or ranks disagree between paths.
  */
 
-import { SIGNALS_TOURNAMENT } from './mappers';
+import { CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 import type { RoundPerfRow } from './perf-queries';
 
 /** Weights applied to a round's metrics to get the score models are ranked by. */
@@ -37,11 +37,32 @@ export const TRIPLE_KEYS = ['corr', 'mmc', 'tc'] as const satisfies readonly (ke
  * rounds, so either can rank any round. Meaningless for Classic and Crypto,
  * which have one pair.
  */
-export type MetricSet = 'alpha_mpc' | 'neutral';
+export type MetricSet = 'corr20_mmc' | 'corr60_mmc60' | 'alpha_mpc' | 'neutral';
 
-export const METRIC_SETS: readonly MetricSet[] = ['alpha_mpc', 'neutral'];
+export const METRIC_SETS: readonly MetricSet[] = ['corr20_mmc', 'corr60_mmc60', 'alpha_mpc', 'neutral'];
 
-/** `value` as a MetricSet, or the default — for request parameters. */
+/**
+ * The metric pairs a tournament can be ranked on.
+ *
+ * Classic moved its payout to 3*CORR60 + 15*MMC60 on 28 Aug 2026; the 20-day
+ * pair it used before stays available, because a chart of older rounds is still
+ * read in those terms. Signals has alpha/mpc and, from rounds opening
+ * 2026-09-25, the neutral pair. Crypto publishes one pair only.
+ */
+export function metricSetsFor(tournament: number): MetricSet[] {
+	if (tournament === SIGNALS_TOURNAMENT) return ['alpha_mpc', 'neutral'];
+	if (tournament === CRYPTO_TOURNAMENT) return ['corr20_mmc'];
+	return ['corr20_mmc', 'corr60_mmc60'];
+}
+
+/** What a tournament is ranked on unless asked otherwise: what Numerai pays on. */
+export function defaultMetricSetFor(tournament: number): MetricSet {
+	if (tournament === SIGNALS_TOURNAMENT) return 'alpha_mpc';
+	if (tournament === CRYPTO_TOURNAMENT) return 'corr20_mmc';
+	return 'corr60_mmc60';
+}
+
+/** `value` as a MetricSet, or the fallback — for request parameters. */
 export function asMetricSet(value: unknown, fallback: MetricSet = 'alpha_mpc'): MetricSet {
 	return METRIC_SETS.includes(value as MetricSet) ? (value as MetricSet) : fallback;
 }
@@ -60,6 +81,9 @@ export function pickMetrics(
 		return metricSet === 'neutral'
 			? { corr: row.neutral_corr ?? null, mmc: row.neutral_mmc ?? null, tc: null }
 			: { corr: row.alpha, mmc: row.mpc, tc: null };
+	}
+	if (metricSet === 'corr60_mmc60') {
+		return { corr: row.corr60 ?? null, mmc: row.mmc60 ?? null, tc: row.tc };
 	}
 	return { corr: row.corr, mmc: row.mmc, tc: row.tc };
 }

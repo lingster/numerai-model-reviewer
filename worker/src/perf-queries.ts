@@ -29,6 +29,9 @@ export interface RoundPerfRow {
 	/** Signals' neutral pair; null for Classic and Crypto, and for rows stored before migration 0005. */
 	neutral_corr?: number | null;
 	neutral_mmc?: number | null;
+	/** Classic's 60-day pair, what it is paid on since 28 Aug 2026. Null elsewhere. */
+	corr60?: number | null;
+	mmc60?: number | null;
 	stake_value: number | null;
 }
 
@@ -84,7 +87,7 @@ export const wasStaked = (row: { stake_value: number | null }, tournament: numbe
 // MetricSet). Listed here so both pairs travel together and migration 0005's
 // index still covers every column a field read needs.
 const ROUND_PERF_COLUMNS =
-	'model_name, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, stake_value';
+	'model_name, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, corr60, mmc60, stake_value';
 
 /**
  * Look up a model's id and owner, case-insensitively by name.

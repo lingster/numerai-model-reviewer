@@ -13,16 +13,12 @@ import { CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from '../../worker/src/mappers.
 import { selectRoundField } from '../../worker/src/perf-queries.js';
 import { encodeFieldMetrics, FIELD_SCOPES, type FieldScope } from '../../worker/src/round-field.js';
 import { fieldFromRows, upsertRoundFieldSql } from '../../worker/src/round-field-store.js';
-import { METRIC_SETS, type MetricSet } from '../../worker/src/ranking.js';
+import { metricSetsFor, type MetricSet } from '../../worker/src/ranking.js';
 import { computeRoundSpan } from '../../worker/src/tournament-coverage.js';
 import { bindingQuery } from '../../worker/src/d1-query.js';
 import type { SqliteD1 } from './sqlite-d1.js';
 
 const TOURNAMENTS = [8, SIGNALS_TOURNAMENT, CRYPTO_TOURNAMENT];
-
-/** The metric sets a tournament has: only Signals publishes a second pair. */
-export const metricSetsFor = (tournament: number): readonly MetricSet[] =>
-	tournament === SIGNALS_TOURNAMENT ? METRIC_SETS : ['alpha_mpc'];
 
 export interface RebuildOptions {
 	tournaments?: readonly number[];

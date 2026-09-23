@@ -28,7 +28,10 @@ import type { RoundSpan } from './tournament-coverage';
  * Every metric set's pair is listed, so a caller holding rows in another shape
  * fails to compile rather than storing a field of NaN.
  */
-export type FieldRow = Pick<RoundPerfRow, 'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc' | 'neutral_corr' | 'neutral_mmc'>;
+export type FieldRow = Pick<
+	RoundPerfRow,
+	'corr' | 'mmc' | 'tc' | 'alpha' | 'mpc' | 'neutral_corr' | 'neutral_mmc' | 'corr60' | 'mmc60'
+>;
 
 /**
  * A round's field from its rows, normalised for the tournament (Signals is

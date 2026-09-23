@@ -19,7 +19,7 @@
 import { readMaxRound } from './refresh-floor';
 import { refreshCoverage, type RoundSpan } from './tournament-coverage';
 import { encodeFieldMetrics, FIELD_SCOPES, type FieldScope } from './round-field';
-import { METRIC_SETS, type MetricSet } from './ranking';
+import { metricSetsFor, type MetricSet } from './ranking';
 import {
   fieldFromRows,
   readStoredRounds,
@@ -544,6 +544,10 @@ export type PerformanceRound = {
   // published for the same rounds. Null for Classic (8) / Crypto (12).
   neutralCorr?: number | null;
   neutralMmc?: number | null;
+  // Classic's 60-day pair: corr60 from the profile query, mmc60 from the
+  // per-model submissionScores augmentation (Numerai exposes it nowhere else).
+  corr60?: number | null;
+  mmc60?: number | null;
   // Signals "new scoring" metrics, sourced from v2RoundModelPerformances.submissionScores.
   // Null for Classic (8) / Crypto (12) rows.
   alpha: number | null;
@@ -692,11 +696,11 @@ function cacheIsValid(config: PrecomputeConfig): boolean {
 
 /** Header for performances.csv. Column names drive parsing, so adding one is safe. */
 export function performanceCsvHeader(): string {
-  return 'modelName,roundNumber,corr,mmc,tc,alpha,mpc,neutralCorr,neutralMmc,stakeValue';
+  return 'modelName,roundNumber,corr,mmc,tc,alpha,mpc,neutralCorr,neutralMmc,corr60,mmc60,stakeValue';
 }
 
 export function performanceCsvRow(modelName: string, r: PerformanceRound): string {
-  return `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.neutralCorr ?? ''},${r.neutralMmc ?? ''},${r.stakeValue ?? ''}`;
+  return `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.neutralCorr ?? ''},${r.neutralMmc ?? ''},${r.corr60 ?? ''},${r.mmc60 ?? ''},${r.stakeValue ?? ''}`;
 }
 
 /**
@@ -744,6 +748,8 @@ export function parsePerformanceCsv(lines: ReadonlyArray<string>): Map<string, P
       mpc: num(fields, at('mpc')),
       neutralCorr: num(fields, at('neutralCorr')),
       neutralMmc: num(fields, at('neutralMmc')),
+      corr60: num(fields, at('corr60')),
+      mmc60: num(fields, at('mmc60')),
       stakeValue: num(fields, at('stakeValue'))
     };
     const existing = performanceData.get(modelName);
@@ -837,7 +843,7 @@ async function fetchBatchedPerformance(
       return `m${idx}: ${profileQuery}(modelName: ${JSON.stringify(name)}) {
         id username accountName
         roundModelPerformances {
-          roundNumber corr corr20V2 corrV4 mmc mmc20d tc fncV4
+          roundNumber corr corr20V2 corr60 corrV4 mmc mmc20d tc fncV4
           selectedStakeValue roundResolved
         }
       }`;
@@ -854,6 +860,7 @@ async function fetchBatchedPerformance(
           roundNumber: number;
           corr: number | null;
           corr20V2: number | null;
+          corr60: number | null;
           corrV4: number | null;
           mmc: number | null;
           mmc20d: number | null;
@@ -901,6 +908,7 @@ async function fetchBatchedPerformance(
             tc: r.tc,
             alpha: null,
             mpc: null,
+            corr60: isSignals ? null : r.corr60,
             stakeValue: r.selectedStakeValue
           }));
 
@@ -937,19 +945,21 @@ async function fetchBatchedPerformance(
  * in place. Best-effort: a failure on one model leaves its alpha/mpc null but
  * doesn't stop the rest.
  */
-async function augmentWithAlphaMpc(
+async function augmentFromSubmissionScores(
   byModel: Map<string, { modelId: string; accountName: string; rounds: PerformanceRound[] }>,
   tournament: number,
   concurrency: number,
   lastNRounds = MAX_ROUNDS_HISTORY
 ): Promise<void> {
-  // Option C: alpha/mpc are only needed for rounds we actually (re)fetched, so
+  const isSignals = tournament === SIGNALS_TOURNAMENT;
+  const what = isSignals ? 'alpha/mpc + neutral' : 'mmc60';
+  // Option C: these are only needed for rounds we actually (re)fetched, so
   // skip models with no new rounds. With the incremental round filter upstream,
   // that's every model idle since the last run — a big cut on steady-state days.
   const active = [...byModel.entries()].filter(([, e]) => e.modelId && e.rounds.length > 0);
   const skipped = byModel.size - active.length;
   if (skipped > 0) {
-    console.log(`  Skipping ${skipped}/${byModel.size} models with no new rounds (alpha/mpc)`);
+    console.log(`  Skipping ${skipped}/${byModel.size} models with no new rounds (${what})`);
   }
   let processed = 0;
   let lastLogged = 0;
@@ -970,28 +980,32 @@ async function augmentWithAlphaMpc(
         { modelId: entry.modelId, tournament, lastNRounds }
       );
 
-      const byRound = new Map<number, SignalsScores>();
+      const byRound = new Map<number, Array<{ displayName: string; value: number | null }> | null>();
       for (const r of result.v2RoundModelPerformances ?? []) {
-        byRound.set(r.roundNumber, extractSignalsScores(r.submissionScores));
+        byRound.set(r.roundNumber, r.submissionScores);
       }
 
       for (const round of entry.rounds) {
-        const scores = byRound.get(round.roundNumber);
-        if (scores) {
-          round.alpha = scores.alpha;
-          round.mpc = scores.mpc;
-          round.neutralCorr = scores.neutralCorr;
-          round.neutralMmc = scores.neutralMmc;
+        if (!byRound.has(round.roundNumber)) continue;
+        const scores = byRound.get(round.roundNumber) ?? null;
+        if (isSignals) {
+          const signals = extractSignalsScores(scores);
+          round.alpha = signals.alpha;
+          round.mpc = signals.mpc;
+          round.neutralCorr = signals.neutralCorr;
+          round.neutralMmc = signals.neutralMmc;
+        } else {
+          round.mmc60 = extractClassicScores(scores).mmc60;
         }
       }
     } catch (e) {
-      console.error(`  Warning: alpha/mpc fetch failed for ${modelKey}:`, e instanceof Error ? e.message : e);
+      console.error(`  Warning: ${what} fetch failed for ${modelKey}:`, e instanceof Error ? e.message : e);
     }
 
     processed++;
     if (processed - lastLogged >= 50 || processed === active.length) {
       lastLogged = processed;
-      console.log(`  Augmented alpha/mpc for ${processed}/${active.length} models...`);
+      console.log(`  Augmented ${what} for ${processed}/${active.length} models...`);
     }
   });
 }
@@ -1019,6 +1033,19 @@ export function extractSignalsScores(
     else if (s.displayName === 'neutral_mmc') scores.neutralMmc = s.value;
   }
   return scores;
+}
+
+/**
+ * Classic's mmc60 from one round's submissionScores — the only place Numerai
+ * publishes it (the profile query has corr60 but no 60-day mmc).
+ */
+export function extractClassicScores(
+  submissionScores: Array<{ displayName: string; value: number | null }> | null
+): { mmc60: number | null } {
+  for (const s of submissionScores ?? []) {
+    if (s.displayName === 'mmc60') return { mmc60: s.value };
+  }
+  return { mmc60: null };
 }
 
 /**
@@ -1146,7 +1173,9 @@ function toFieldRow(round: PerformanceRound): FieldRow {
     alpha: round.alpha,
     mpc: round.mpc,
     neutral_corr: round.neutralCorr ?? null,
-    neutral_mmc: round.neutralMmc ?? null
+    neutral_mmc: round.neutralMmc ?? null,
+    corr60: round.corr60 ?? null,
+    mmc60: round.mmc60 ?? null
   };
 }
 
@@ -1173,8 +1202,9 @@ function roundsFromMemory(
  * Classic and Crypto store one field per scope.
  */
 function fieldVariants(tournament: number): Array<{ scope: FieldScope; metricSet: MetricSet }> {
-  const metricSets = tournament === SIGNALS_TOURNAMENT ? METRIC_SETS : (['alpha_mpc'] as const);
-  return FIELD_SCOPES.flatMap((scope) => metricSets.map((metricSet) => ({ scope, metricSet })));
+  return FIELD_SCOPES.flatMap((scope) =>
+    metricSetsFor(tournament).map((metricSet) => ({ scope, metricSet }))
+  );
 }
 
 /** Rounds read back from D1, for backfilling fields we did not just fetch. */
@@ -1193,7 +1223,7 @@ async function readFieldRowsFromD1(
   for (let i = 0; i < sorted.length; i += CHUNK) {
     const chunk = sorted.slice(i, i + CHUNK);
     const rows = await d1Query(
-      `SELECT round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, stake_value FROM model_performances
+      `SELECT round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, corr60, mmc60, stake_value FROM model_performances
        WHERE tournament = ${tournament} AND round_number IN (${chunk.join(', ')})`
     );
     for (const row of rows) {
@@ -1207,6 +1237,8 @@ async function readFieldRowsFromD1(
         mpc: toNumberOrNull(row.mpc),
         neutralCorr: toNumberOrNull(row.neutral_corr),
         neutralMmc: toNumberOrNull(row.neutral_mmc),
+        corr60: toNumberOrNull(row.corr60),
+        mmc60: toNumberOrNull(row.mmc60),
         stakeValue: toNumberOrNull(row.stake_value)
       };
       const list = byRound.get(roundNumber);
@@ -1408,9 +1440,11 @@ async function storePerformances(
       const mpc = round.mpc !== null ? round.mpc : 'NULL';
       const neutralCorr = round.neutralCorr ?? 'NULL';
       const neutralMmc = round.neutralMmc ?? 'NULL';
+      const corr60 = round.corr60 ?? 'NULL';
+      const mmc60 = round.mmc60 ?? 'NULL';
       const stake = round.stakeValue !== null ? round.stakeValue : 'NULL';
       buffer.push(
-        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${neutralCorr}, ${neutralMmc}, ${stake}, ${tournament}, ${now});`
+        `INSERT OR REPLACE INTO model_performances (model_name, round_number, corr, mmc, tc, alpha, mpc, neutral_corr, neutral_mmc, corr60, mmc60, stake_value, tournament, updated_at) VALUES ('${safeName}', ${round.roundNumber}, ${corr}, ${mmc}, ${tc}, ${alpha}, ${mpc}, ${neutralCorr}, ${neutralMmc}, ${corr60}, ${mmc60}, ${stake}, ${tournament}, ${now});`
       );
       if (buffer.length >= BATCH_SIZE) await flush();
     }
@@ -1633,10 +1667,14 @@ export async function runPrecompute(
     // Step 4b: For Signals, fetch alpha/mpc from submissionScores. This is a
     // per-model query so it's slow on large fleets — keep topN modest for
     // Signals runs (config.topN drives it).
-    if (config.tournament === SIGNALS_TOURNAMENT) {
-      console.log(`Step 4b: Augmenting ${fetched.size} Signals models with alpha/mpc...`);
-      await augmentWithAlphaMpc(fetched, SIGNALS_TOURNAMENT, config.concurrency, roundsToFetch);
-      console.log('  Alpha/mpc augmentation complete\n');
+    // Step 4b: the metrics only submissionScores carries — Signals' alpha/mpc
+    // and neutral pair, Classic's mmc60 (its payout half since 28 Aug 2026).
+    // One call per model, so it is the slow part of a run on a large fleet.
+    if (config.tournament !== CRYPTO_TOURNAMENT) {
+      const what = config.tournament === SIGNALS_TOURNAMENT ? 'alpha/mpc + neutral' : 'mmc60';
+      console.log(`Step 4b: Augmenting ${fetched.size} models with ${what}...`);
+      await augmentFromSubmissionScores(fetched, config.tournament, config.concurrency, roundsToFetch);
+      console.log(`  ${what} augmentation complete\n`);
     }
 
     // Step 4c: Crypto's leaderboard/perf queries expose only the model name, so

@@ -33,6 +33,7 @@ import {
 import { computeTrailingAverages } from './windowed-metrics';
 import {
 	asMetricSet,
+	defaultMetricSetFor,
 	pickMetrics,
 	rankAmong,
 	rankSortedScores,
@@ -542,7 +543,8 @@ export async function getModelRank(
 ): Promise<ModelRankResponse> {
 	const { modelName, startRound, endRound, tournament, formula, username, modelId } = params;
 	const fieldScope = asFieldScope(params.fieldScope);
-	const metricSet = asMetricSet(params.metricSet);
+	// Default per tournament: what Numerai pays that tournament on today.
+	const metricSet = asMetricSet(params.metricSet, defaultMetricSetFor(tournament));
 	const window = Math.max(1, Math.floor(params.window ?? 1));
 	const targetLower = modelName.toLowerCase();
 
@@ -710,7 +712,8 @@ export async function getTopModelsForRound(
 	// The table sits under the chart's toggles, so it must rank the same
 	// population on the same metrics the chart does.
 	const fieldScope = asFieldScope(params.fieldScope);
-	const metricSet = asMetricSet(params.metricSet);
+	// Default per tournament: what Numerai pays that tournament on today.
+	const metricSet = asMetricSet(params.metricSet, defaultMetricSetFor(tournament));
 
 	const scored: Array<{
 		modelName: string;

@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readStoredFields } from '../../worker/src/round-field-store.js';
 import { openDatabase } from './database.js';
-import { rebuildStoredFields, metricSetsFor } from './rebuild-fields.js';
+import { rebuildStoredFields } from './rebuild-fields.js';
+import { metricSetsFor } from '../../worker/src/ranking.js';
 import type { SqliteD1 } from './sqlite-d1.js';
 import { testConfig } from './test-support/server-config.js';
 
@@ -66,8 +67,8 @@ describe('rebuildStoredFields', () => {
 		expect([...fields.get(300)!.corr]).toEqual([0.02]);
 	});
 
-	it('gives tournaments without a second metric pair only alpha_mpc', () => {
-		expect(metricSetsFor(CLASSIC)).toEqual(['alpha_mpc']);
+	it('gives each tournament the metric pairs it publishes', () => {
+		expect(metricSetsFor(CLASSIC)).toEqual(['corr20_mmc', 'corr60_mmc60']);
 		expect(metricSetsFor(SIGNALS)).toEqual(['alpha_mpc', 'neutral']);
 	});
 });

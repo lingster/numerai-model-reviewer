@@ -7,7 +7,7 @@ import { Env as ApiEnv } from './api';
 import { CRYPTO_TOURNAMENT } from './mappers';
 import * as rankings from './rankings-api';
 import { asFieldScope } from './round-field';
-import { asMetricSet } from './ranking';
+import { asMetricSet, defaultMetricSetFor } from './ranking';
 import { isAllowedOrigin, handleCors } from './cors';
 
 // Environment bindings interface
@@ -253,7 +253,7 @@ export default {
               fieldScope: asFieldScope(url.searchParams.get('fieldScope')),
               // alpha_mpc (default) or neutral, for Signals: the pair Numerai
               // pays on from rounds opening 2026-09-25. Ignored elsewhere.
-              metricSet: asMetricSet(url.searchParams.get('metricSet')),
+              metricSet: asMetricSet(url.searchParams.get('metricSet'), defaultMetricSetFor(tournament)),
               // Owner/id hints let the unstaked-model fallback fetch a model's own
               // scores directly (skipping a Crypto leaderboard scan) when it's not
               // in the precomputed staked field.
