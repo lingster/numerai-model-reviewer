@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	CLASSIC_SIXTY_DAY_FORMULA,
 	SCORE_ALPHA_WEIGHT,
 	SCORE_MPC_WEIGHT,
 	SIGNALS_METRIC_SETS,
@@ -199,5 +200,13 @@ describe('resolveScoringMode', () => {
 
 	it('falls back to Classic when Signals metrics disappear', () => {
 		expect(resolveScoringMode('neutral', false)).toBe('classic');
+	});
+});
+
+describe('CLASSIC_SIXTY_DAY_FORMULA', () => {
+	it("matches Numerai's Classic payout weighting since 28 Aug 2026", () => {
+		// 3*CORR60 + 15*MMC60. Only valid against the 60-day pair — the rankings
+		// pipeline still stores 20-day corr/mmc, so it keeps its own weights.
+		expect(CLASSIC_SIXTY_DAY_FORMULA).toEqual({ corrWeight: 3, mmcWeight: 15 });
 	});
 });

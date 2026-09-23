@@ -14,6 +14,7 @@
 		SCORE_MPC_WEIGHT,
 		SIGNALS_METRIC_SETS,
 		NEUTRAL_SCORES_FROM_ROUND,
+		CLASSIC_SIXTY_DAY_FORMULA,
 		computeChartScore,
 		resolveScoringMode,
 		scoringModesFor,
@@ -536,11 +537,13 @@
 			mode === 'classic' ? CLASSIC_METRICS : mode === 'neutral' ? NEUTRAL_METRICS : ALPHA_MPC_METRICS
 		);
 		scoringMode = mode;
+		// The weighting Numerai pays on for the pair this mode scores: Classic's
+		// 3*CORR60 + 15*MMC60 where the 60-day pair exists, Crypto's otherwise.
 		const weights =
 			mode === 'classic'
-				? getDefaultFormulaForTournament(
-						hasSixtyDayMetrics ? TOURNAMENTS.CLASSIC : TOURNAMENTS.CRYPTO
-					)
+				? hasSixtyDayMetrics
+					? CLASSIC_SIXTY_DAY_FORMULA
+					: getDefaultFormulaForTournament(TOURNAMENTS.CRYPTO)
 				: getMetricSetDefinition(mode);
 		scoreCorrWeight = weights.corrWeight;
 		scoreMmcWeight = weights.mmcWeight;

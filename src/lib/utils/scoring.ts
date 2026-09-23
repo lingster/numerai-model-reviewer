@@ -77,6 +77,15 @@ export function formatMetricSetFormula(metricSet: SignalsMetricSet): string {
 }
 
 /** Default weight applied to the alpha component (the alpha_mpc metric set). */
+/**
+ * Classic's payout weighting since 28 Aug 2026: 3*CORR60 + 15*MMC60.
+ *
+ * Valid only against the 60-day pair. The rankings pipeline stores 20-day
+ * corr/mmc, so it keeps DEFAULT_SCORE_FORMULA — applying these weights there
+ * would put the 60-day formula's name on 20-day numbers.
+ */
+export const CLASSIC_SIXTY_DAY_FORMULA = { corrWeight: 3, mmcWeight: 15 } as const;
+
 export const SCORE_ALPHA_WEIGHT = SIGNALS_METRIC_SETS.alpha_mpc.corrWeight;
 
 /** Default weight applied to the MPC component (the alpha_mpc metric set). */
