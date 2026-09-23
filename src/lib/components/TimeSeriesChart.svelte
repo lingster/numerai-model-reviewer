@@ -9,14 +9,20 @@
 		SCORE_ALPHA_WEIGHT,
 		SCORE_MPC_WEIGHT,
 		SIGNALS_METRIC_SETS,
-		computeScore
+		NEUTRAL_SCORES_FROM_ROUND,
+		computeChartScore,
+		hasNoNeutralData,
+		getMetricSetDefinition,
+		type ChartScoringMode
 	} from '$lib/utils/scoring.js';
 
-	// Alpha/MPC labels for the score-formula controls below come from the shared
-	// alpha_mpc metric set (scoring.ts) so they can't drift from the rankings
-	// page's own labels for the same pair.
+	// Alpha/MPC and Neutral labels for the score-formula controls below come
+	// from the shared metric sets (scoring.ts) so they can't drift from the
+	// rankings page's own labels for the same pairs.
 	const alphaMpcCorrLabel = SIGNALS_METRIC_SETS.alpha_mpc.corrLabel;
 	const alphaMpcMmcLabel = SIGNALS_METRIC_SETS.alpha_mpc.mmcLabel;
+	const neutralCorrLabel = SIGNALS_METRIC_SETS.neutral.corrLabel;
+	const neutralMmcLabel = SIGNALS_METRIC_SETS.neutral.mmcLabel;
 
 	// Props
 	let {
@@ -75,9 +81,13 @@
 		mmc60: { label: 'MMC60', axis: 'left', color: '#ff7f00' },
 		fnc: { label: 'FNC', axis: 'left', color: '#984ea3' },
 		payout: { label: 'Payout', axis: 'right', color: '#a65628' },
-		// New Numerai scoring (Signals)
-		alpha: { label: 'Alpha', axis: 'left', color: '#00c0d0' },
-		mpc: { label: 'MPC', axis: 'left', color: '#ffb300' },
+		// New Numerai scoring (Signals): alpha/mpc (today's payout pair) and
+		// ncorr/nmmc (the neutral pair Numerai pays on from 2026-09-25). Labels
+		// come from SIGNALS_METRIC_SETS so they can't drift from scoring.ts.
+		alpha: { label: alphaMpcCorrLabel, axis: 'left', color: '#00c0d0' },
+		mpc: { label: alphaMpcMmcLabel, axis: 'left', color: '#ffb300' },
+		ncorr: { label: neutralCorrLabel, axis: 'left', color: '#c0ca33' },
+		nmmc: { label: neutralMmcLabel, axis: 'left', color: '#5c6bc0' },
 		score: { label: 'Score', axis: 'left', color: '#e91e63' }
 	};
 
@@ -91,15 +101,32 @@
 	// the 20-day to the 60-day window on 28 Aug, so Corr60/MMC60 are the default
 	// pair; the 20-day series stay available as individual toggles.
 	const CLASSIC_METRICS: ChartMetric[] = ['corr60', 'mmc60'];
-	const NEW_METRICS: ChartMetric[] = ['alpha', 'mpc', 'score'];
+	const ALPHA_MPC_METRICS: ChartMetric[] = ['alpha', 'mpc', 'score'];
+	const NEUTRAL_METRICS: ChartMetric[] = ['ncorr', 'nmmc', 'score'];
+	// Metrics that only apply to Signals — hidden from the generic metric-toggle
+	// row entirely unless hasNewMetrics (below) says this data is Signals.
+	const SIGNALS_ONLY_METRICS: ChartMetric[] = ['alpha', 'mpc', 'ncorr', 'nmmc', 'score'];
 
 	// State for metric toggles - default to the Classic (60-day) pair.
 	let activeMetrics = $state<Set<ChartMetric>>(new Set(CLASSIC_METRICS));
 
-	// Calculated score weights (default Numerai Signals: 0.3*alpha + 0.8*mpc).
+	// Which scoring mode is selected: 'classic' has no weighted score of its
+	// own, so its Score (when toggled on) and the weight editor below both fall
+	// back to the alpha_mpc pair, matching this chart's long-standing default.
+	let scoringMode = $state<ChartScoringMode>('classic');
+
+	// Calculated score weights — default to the active mode's Numerai Signals
+	// weights (0.3*alpha + 0.8*mpc, or 0.5*ncorr + 2*nmmc for neutral).
 	// Adjustable so the score can track future scoring-rule changes.
-	let scoreAlphaWeight = $state(SCORE_ALPHA_WEIGHT);
-	let scoreMpcWeight = $state(SCORE_MPC_WEIGHT);
+	let scoreCorrWeight = $state(SCORE_ALPHA_WEIGHT);
+	let scoreMmcWeight = $state(SCORE_MPC_WEIGHT);
+
+	// Labels for whichever pair currently drives the Score metric and its
+	// weight editor — neutral's pair once that mode is selected, alpha/mpc
+	// otherwise (matching computeChartScore's own fallback).
+	const activeScoreLabels = $derived(
+		scoringMode === 'neutral' ? SIGNALS_METRIC_SETS.neutral : SIGNALS_METRIC_SETS.alpha_mpc
+	);
 
 	// State for model visibility
 	let modelVisibility = $state<Map<string, boolean>>(new Map());
@@ -197,7 +224,9 @@
 							|| round.fnc !== null
 							|| round.payout !== null
 							|| round.alpha != null
-							|| round.mpc != null;
+							|| round.mpc != null
+							|| round.neutralCorr != null
+							|| round.neutralMmc != null;
 						if (!hasMetric) return false;
 					}
 
@@ -212,8 +241,16 @@
 				.map(round => {
 					const alpha = toNumber(round.alpha);
 					const mpc = toNumber(round.mpc);
-					// Weighted score; null only when both components are absent.
-					const score = computeScore(alpha, mpc, scoreAlphaWeight, scoreMpcWeight);
+					const ncorr = toNumber(round.neutralCorr);
+					const nmmc = toNumber(round.neutralMmc);
+					// Weighted score for whichever mode is selected; null only when
+					// both of that mode's components are absent.
+					const score = computeChartScore(
+						scoringMode,
+						{ alpha, mpc, ncorr, nmmc },
+						scoreCorrWeight,
+						scoreMmcWeight
+					);
 					return {
 						roundNumber: round.roundNumber,
 						date: round.roundOpenTime ? new Date(round.roundOpenTime) : new Date(),
@@ -226,6 +263,8 @@
 						payout: toNumber(round.payout),
 						alpha,
 						mpc,
+						ncorr,
+						nmmc,
 						score
 					};
 				})
@@ -282,9 +321,19 @@
 	});
 
 	// New scoring (alpha/mpc) is only present for Signals models — used to gate
-	// the Classic/New toggle and the score-weight controls.
+	// the Classic/New/Neutral toggle and the score-weight controls. Neutral
+	// scores ride along on the same gate rather than a tournament prop, so
+	// they only appear where the existing Alpha/MPC set does.
 	const hasNewMetrics = $derived(
 		allDataPoints.some(p => p.alpha !== null || p.mpc !== null)
+	);
+
+	// Empty-data honesty: only warn when Neutral is selected AND the visible
+	// range genuinely has no neutral values (rather than assuming from the
+	// round-number cutoff, which the chart's zoomed/date-filtered view may not
+	// reflect).
+	const showNeutralDataHint = $derived(
+		scoringMode === 'neutral' && hasNoNeutralData(allDataPoints)
 	);
 
 	// True when any right-axis metric is active — gates the whole right axis.
@@ -421,13 +470,22 @@
 		return regions;
 	});
 
-	// Switch the active metric set between Classic (corr60/mmc60) and New (alpha/mpc/score).
-	function setScoringMode(mode: 'classic' | 'new') {
-		activeMetrics = new Set<ChartMetric>(mode === 'classic' ? CLASSIC_METRICS : NEW_METRICS);
+	// Switch the active metric set between Classic (corr60/mmc60), New
+	// (alpha/mpc/score) and Neutral (ncorr/nmmc/score). Switching into a
+	// Signals metric set also resets the score weights to that set's defaults
+	// (mirrors getDefaultFormulaForTournament on the rankings page), so the
+	// weight editor never silently shows one pair's numbers scoring another.
+	function setScoringMode(mode: ChartScoringMode) {
+		activeMetrics = new Set<ChartMetric>(
+			mode === 'classic' ? CLASSIC_METRICS : mode === 'neutral' ? NEUTRAL_METRICS : ALPHA_MPC_METRICS
+		);
+		scoringMode = mode;
+		if (mode !== 'classic') {
+			const set = getMetricSetDefinition(mode);
+			scoreCorrWeight = set.corrWeight;
+			scoreMmcWeight = set.mmcWeight;
+		}
 	}
-
-	// True when the New (alpha/mpc/score) metric set is currently shown.
-	const newScoringActive = $derived(NEW_METRICS.some(m => activeMetrics.has(m)));
 
 	// Toggle metric
 	function toggleMetric(metric: ChartMetric) {
@@ -802,7 +860,7 @@
 		</div>
 	{/if}
 
-	<!-- Scoring mode toggle + score weights (Signals: new alpha/mpc scoring) -->
+	<!-- Scoring mode toggle + score weights (Signals: alpha/mpc and neutral scoring) -->
 	{#if hasNewMetrics}
 		<div class="mb-4 rounded-md border-2 border-[var(--retro-primary)] p-3">
 			<div class="flex flex-wrap items-center gap-4">
@@ -811,20 +869,29 @@
 					<button
 						onclick={() => setScoringMode('classic')}
 						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={!newScoringActive
+						style={scoringMode === 'classic'
 							? 'background-color: var(--retro-primary); color: white;'
 							: 'color: var(--retro-text-primary);'}
 					>
 						Classic (Corr60/MMC60)
 					</button>
 					<button
-						onclick={() => setScoringMode('new')}
+						onclick={() => setScoringMode('alpha_mpc')}
 						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={newScoringActive
+						style={scoringMode === 'alpha_mpc'
 							? 'background-color: var(--retro-primary); color: white;'
 							: 'color: var(--retro-text-primary);'}
 					>
 						New ({alphaMpcCorrLabel}/{alphaMpcMmcLabel})
+					</button>
+					<button
+						onclick={() => setScoringMode('neutral')}
+						class="px-3 py-1 text-sm font-medium transition-colors"
+						style={scoringMode === 'neutral'
+							? 'background-color: var(--retro-primary); color: white;'
+							: 'color: var(--retro-text-primary);'}
+					>
+						Neutral ({neutralCorrLabel}/{neutralMmcLabel})
 					</button>
 				</div>
 
@@ -833,21 +900,26 @@
 					<input
 						type="number"
 						step="0.1"
-						bind:value={scoreAlphaWeight}
-						aria-label="{alphaMpcCorrLabel} weight"
+						bind:value={scoreCorrWeight}
+						aria-label="{activeScoreLabels.corrLabel} weight"
 						class="retro-input w-16 rounded px-2 py-1 text-sm"
 					/>
-					<span class="text-sm retro-text-secondary">× {alphaMpcCorrLabel} +</span>
+					<span class="text-sm retro-text-secondary">× {activeScoreLabels.corrLabel} +</span>
 					<input
 						type="number"
 						step="0.1"
-						bind:value={scoreMpcWeight}
-						aria-label="{alphaMpcMmcLabel} weight"
+						bind:value={scoreMmcWeight}
+						aria-label="{activeScoreLabels.mmcLabel} weight"
 						class="retro-input w-16 rounded px-2 py-1 text-sm"
 					/>
-					<span class="text-sm retro-text-secondary">× {alphaMpcMmcLabel}</span>
+					<span class="text-sm retro-text-secondary">× {activeScoreLabels.mmcLabel}</span>
 				</div>
 			</div>
+			{#if showNeutralDataHint}
+				<p class="mt-2 text-xs retro-text-warning">
+					Neutral scores start at round {NEUTRAL_SCORES_FROM_ROUND} — none of the selected range has neutral data yet.
+				</p>
+			{/if}
 		</div>
 	{/if}
 
@@ -856,7 +928,7 @@
 		<span class="text-sm font-medium retro-text-primary mr-2">Metrics:</span>
 		<div class="inline-flex flex-wrap gap-2">
 			{#each Object.entries(metricConfig) as [metric, config]}
-				{#if hasNewMetrics || !NEW_METRICS.includes(metric as ChartMetric)}
+				{#if hasNewMetrics || !SIGNALS_ONLY_METRICS.includes(metric as ChartMetric)}
 					<button
 						onclick={() => toggleMetric(metric as ChartMetric)}
 						class="px-3 py-1 text-sm rounded-md border-2 transition-colors"

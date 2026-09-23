@@ -105,3 +105,46 @@ export function computeScore(
 	}
 	return alphaWeight * (alpha ?? 0) + mpcWeight * (mpc ?? 0);
 }
+
+/**
+ * The time-series chart's scoring mode: 'classic' has no weighted score of its
+ * own (it plots raw corr60/mmc60), so it shares the alpha_mpc pair the chart
+ * has always scored by default; the other two values pick a Signals metric set.
+ */
+export type ChartScoringMode = 'classic' | SignalsMetricSet;
+
+/**
+ * The weighted "score" the time-series chart plots for whichever scoring mode
+ * is selected — alpha/mpc for 'classic'/'alpha_mpc', ncorr/nmmc for 'neutral'.
+ * Pulled out of the component so it's covered by a plain (non-browser) vitest
+ * run: the chart itself only wires this to its weight-editor state.
+ */
+export function computeChartScore(
+	mode: ChartScoringMode,
+	values: {
+		alpha: number | null | undefined;
+		mpc: number | null | undefined;
+		ncorr: number | null | undefined;
+		nmmc: number | null | undefined;
+	},
+	corrWeight: number,
+	mmcWeight: number
+): number | null {
+	if (mode === 'neutral') {
+		return computeScore(values.ncorr, values.nmmc, corrWeight, mmcWeight);
+	}
+	return computeScore(values.alpha, values.mpc, corrWeight, mmcWeight);
+}
+
+/**
+ * True when none of the given points carry a neutral value (NCORR or NMMC).
+ * Gates the time-series chart's "neutral scores start at round N" hint: unlike
+ * shouldShowNeutralStartHint (which infers this from the range's start round),
+ * the chart already has the actual data for its visible window, so it can say
+ * plainly the window has nothing to show instead of guessing from a round
+ * number. An empty range returns false — that's the "no data at all" case,
+ * already covered by the chart's own empty-state message.
+ */
+export function hasNoNeutralData(points: Array<{ ncorr: number | null; nmmc: number | null }>): boolean {
+	return points.length > 0 && points.every(p => p.ncorr === null && p.nmmc === null);
+}

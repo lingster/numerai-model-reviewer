@@ -6,8 +6,10 @@ import {
 	DEFAULT_SIGNALS_METRIC_SET,
 	NEUTRAL_SCORES_FROM_ROUND,
 	computeScore,
+	computeChartScore,
 	formatMetricSetFormula,
 	getMetricSetDefinition,
+	hasNoNeutralData,
 	shouldShowNeutralStartHint
 } from './scoring.js';
 
@@ -95,5 +97,49 @@ describe('shouldShowNeutralStartHint', () => {
 	it('is false for neutral once the range starts after round 912', () => {
 		expect(shouldShowNeutralStartHint('neutral', 913)).toBe(false);
 		expect(shouldShowNeutralStartHint('neutral', 1200)).toBe(false);
+	});
+});
+
+describe('hasNoNeutralData', () => {
+	it('is false for an empty range (the "no data at all" fallback handles that case)', () => {
+		expect(hasNoNeutralData([])).toBe(false);
+	});
+
+	it('is true when every point has null ncorr and nmmc', () => {
+		expect(hasNoNeutralData([
+			{ ncorr: null, nmmc: null },
+			{ ncorr: null, nmmc: null }
+		])).toBe(true);
+	});
+
+	it('is false when at least one point has a neutral value', () => {
+		expect(hasNoNeutralData([
+			{ ncorr: null, nmmc: null },
+			{ ncorr: 0.02, nmmc: null }
+		])).toBe(false);
+		expect(hasNoNeutralData([
+			{ ncorr: null, nmmc: 0.01 }
+		])).toBe(false);
+	});
+});
+
+describe('computeChartScore', () => {
+	const values = { alpha: 0.02, mpc: 0.03, ncorr: 0.05, nmmc: 0.01 };
+
+	it("scores alpha/mpc for 'classic' (the chart's long-standing default score)", () => {
+		expect(computeChartScore('classic', values, 0.3, 0.8)).toBeCloseTo(0.3 * 0.02 + 0.8 * 0.03, 12);
+	});
+
+	it("scores alpha/mpc for 'alpha_mpc'", () => {
+		expect(computeChartScore('alpha_mpc', values, 0.3, 0.8)).toBeCloseTo(0.3 * 0.02 + 0.8 * 0.03, 12);
+	});
+
+	it("scores ncorr/nmmc for 'neutral'", () => {
+		expect(computeChartScore('neutral', values, 0.5, 2)).toBeCloseTo(0.5 * 0.05 + 2 * 0.01, 12);
+	});
+
+	it('returns null when both relevant components are absent', () => {
+		expect(computeChartScore('neutral', { alpha: 1, mpc: 1, ncorr: null, nmmc: null }, 0.5, 2)).toBeNull();
+		expect(computeChartScore('alpha_mpc', { alpha: null, mpc: null, ncorr: 1, nmmc: 1 }, 0.3, 0.8)).toBeNull();
 	});
 });

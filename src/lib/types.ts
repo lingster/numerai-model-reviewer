@@ -57,6 +57,14 @@ export interface RoundPerformance {
 	// New Numerai scoring (Signals): alpha + mpc
 	alpha?: number | null;
 	mpc?: number | null;
+	/**
+	 * Neutral correlation / neutral MMC — the pair Numerai pays Signals on for
+	 * rounds opening on/after 2026-09-25 (see SIGNALS_METRIC_SETS.neutral in
+	 * scoring.ts). Null for Classic/Crypto, and for Signals rounds before ~912
+	 * or not yet scored.
+	 */
+	neutralCorr?: number | null;
+	neutralMmc?: number | null;
 	corrMultiplier: number | null;
 	mmcMultiplier?: number | null;
 	selectedStakeValue: number | null;
@@ -79,7 +87,12 @@ export interface ChartDataPoint {
 	// New Numerai scoring (Signals)
 	alpha: number | null;
 	mpc: number | null;
-	// Calculated weighted score: alphaWeight*alpha + mpcWeight*mpc
+	// Neutral pair (Signals): neutral correlation + neutral MMC. See
+	// RoundPerformance.neutralCorr/neutralMmc for availability caveats.
+	ncorr: number | null;
+	nmmc: number | null;
+	// Calculated weighted score for whichever Signals metric set is active
+	// (alpha/mpc or ncorr/nmmc) — see computeChartScore in utils/scoring.ts.
 	score: number | null;
 }
 
@@ -98,7 +111,18 @@ export interface ModelSeries {
 /**
  * Available metrics for the time series chart
  */
-export type ChartMetric = 'corr20' | 'corr60' | 'mmc' | 'mmc60' | 'fnc' | 'payout' | 'alpha' | 'mpc' | 'score';
+export type ChartMetric =
+	| 'corr20'
+	| 'corr60'
+	| 'mmc'
+	| 'mmc60'
+	| 'fnc'
+	| 'payout'
+	| 'alpha'
+	| 'mpc'
+	| 'ncorr'
+	| 'nmmc'
+	| 'score';
 
 /**
  * Stake information for a model
