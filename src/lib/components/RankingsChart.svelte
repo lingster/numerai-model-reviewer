@@ -17,6 +17,7 @@
 	import { passesStakedFilter, type StakedFilter } from '$lib/utils/round-staked-filter.js';
 	import { fieldScopeLabel, type FieldScope } from '$lib/utils/field-scope.js';
 	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
+	import { focusedSeriesColor, toggleFocus } from '$lib/utils/series-focus.js';
 
 	// Props
 	let {
@@ -141,6 +142,10 @@
 	// Model visibility state, keyed by seriesKey (not modelId) so the two lines
 	// a "vs Both" model produces can be toggled independently.
 	let modelVisibility = $state<Record<string, boolean>>({});
+	// The model singled out by clicking one of its points, and what was visible
+	// before that — see focusModel.
+	let focusedModelId = $state<string | null>(null);
+	let visibilityBeforeFocus: Record<string, boolean> | null = null;
 
 	// Initialize visibility when histories change.
 	// Depend ONLY on rankingHistories: the read+write of modelVisibility is
@@ -319,9 +324,27 @@
 	});
 
 	// Colour by MODEL (not series), so a model's staked/all-field lines match.
+	// Under a focus, every other model is greyed — see focusModel.
 	function getModelColor(modelId: string): string {
 		const index = uniqueModelIds.indexOf(modelId);
-		return colors[(index < 0 ? 0 : index) % colors.length];
+		const color = colors[(index < 0 ? 0 : index) % colors.length];
+		return focusedSeriesColor(color, modelId, focusedModelId);
+	}
+
+	/**
+	 * Clicking a point singles that model out and clicking it again puts the
+	 * chart back, remembering what was visible on the way in. Same behaviour as
+	 * the performance chart, so the two read the same way.
+	 */
+	function focusModel(modelId: string) {
+		const next = toggleFocus(focusedModelId, modelId);
+		if (next === null) {
+			if (visibilityBeforeFocus) modelVisibility = { ...visibilityBeforeFocus };
+			visibilityBeforeFocus = null;
+		} else if (focusedModelId === null) {
+			visibilityBeforeFocus = { ...modelVisibility };
+		}
+		focusedModelId = next;
 	}
 
 	// Dash pattern by field scope: solid for the staked field (or single-scope
@@ -794,10 +817,14 @@
 								onmouseleave={hideTooltip}
 								onfocus={(e) => setTooltipFromCircle(e.currentTarget, history, dataPoint)}
 								onblur={hideTooltip}
-								onclick={() => onPointSelect?.(dataPoint.roundNumber, history.modelName)}
+								onclick={() => {
+									focusModel(history.modelId);
+									onPointSelect?.(dataPoint.roundNumber, history.modelName);
+								}}
 								onkeydown={(e) => {
 									if (e.key === 'Enter' || e.key === ' ') {
 										e.preventDefault();
+										focusModel(history.modelId);
 										onPointSelect?.(dataPoint.roundNumber, history.modelName);
 									}
 								}}

@@ -1183,7 +1183,10 @@
 	{#if rankingHistories.length > 0}
 		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Ranking History</h2>
-			<p class="mb-2 text-xs retro-text-secondary">Click a point to jump the table below to that round and model.</p>
+			<p class="mb-2 text-xs retro-text-secondary">
+				Click a point to focus that model (the rest grey out) and jump the table below to that
+				round; click it again to restore the other lines.
+			</p>
 			<RankingsChart
 				{rankingHistories}
 				{startRound}
