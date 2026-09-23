@@ -134,5 +134,9 @@ CREATE TABLE IF NOT EXISTS model_score_coverage (
   covered_from_round INTEGER NOT NULL,
   covered_to_round INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  -- Which score columns the cached rows were written with. Coverage recorded
+  -- under a different set is ignored, so rows written before a metric existed
+  -- are refetched rather than served without it (see round-scores-cache.ts).
+  score_fields TEXT,
   PRIMARY KEY (model_id, tournament)
 );

@@ -28,6 +28,11 @@ describe('leaderboard entries kept for the fleet', () => {
 });
 import {
   keepsLeaderboardEntry,
+  performanceCsvChunks,
+  performanceCsvHeader,
+  performanceCsvRow,
+  parsePerformanceCsv,
+  type PerformanceRound,
   extractCryptoMetrics,
   computeMinRound,
   computeRoundsToFetch,
@@ -172,4 +177,42 @@ describe('computeBackoffMs (exponential from 30s, respects Retry-After)', () => 
   it('caps an oversized Retry-After', () => {
     expect(computeBackoffMs(0, 999_999_999)).toBe(RETRY_CAP_MS);
   });
+});
+
+describe('performance CSV cache', () => {
+	const round = (n: number): PerformanceRound => ({
+		roundNumber: n,
+		corr: 0.01,
+		mmc: 0.02,
+		tc: null,
+		alpha: 0.03,
+		mpc: 0.04,
+		neutralCorr: 0.05,
+		neutralMmc: 0.06,
+		stakeValue: 7
+	});
+
+	it('round-trips every metric, including the neutral pair', () => {
+		const lines = [performanceCsvHeader(), performanceCsvRow('m1', round(1300))];
+		expect(parsePerformanceCsv(lines).get('m1')).toEqual([round(1300)]);
+	});
+
+	it('still reads a cache written before the neutral pair existed', () => {
+		const legacy = [
+			'modelName,roundNumber,corr,mmc,tc,alpha,mpc,stakeValue',
+			'm1,1300,0.01,0.02,,0.03,0.04,7'
+		];
+		expect(parsePerformanceCsv(legacy).get('m1')).toEqual([
+			{ ...round(1300), neutralCorr: null, neutralMmc: null }
+		]);
+	});
+
+	it('emits the rows in chunks, so a big run never builds one oversized string', () => {
+		// 20.2M records overflowed V8's maximum string length and killed a run
+		// after 16 minutes of fetching.
+		const data = new Map([['m1', Array.from({ length: 2500 }, (_, i) => round(1000 + i))]]);
+		const chunks = [...performanceCsvChunks(data, 1000)];
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.join('').trimEnd().split('\n')).toHaveLength(2501); // header + rows
+	});
 });

@@ -60,6 +60,9 @@ export interface FleetSlice {
 	unstakedEvery: number;
 }
 
+/** Where a metered statement keeps the real one it wraps. */
+const REAL_STATEMENT = Symbol('real-statement');
+
 interface ResultWithMeta {
 	meta?: { rows_read?: number; rows_written?: number };
 }
@@ -182,8 +185,14 @@ export class D1CostHarness {
 
 	/** A D1Database whose statements add their billed rows to `cost`. */
 	private metered(): D1Database {
+		// The proxy carries the statement it wraps: batch() has to hand D1 the real
+		// ones, which cannot be reconstructed from the proxy's methods.
+		const unwrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+			(statement as { [REAL_STATEMENT]?: D1PreparedStatement })[REAL_STATEMENT] ?? statement;
+
 		const meter = (statement: D1PreparedStatement): D1PreparedStatement =>
 			({
+				[REAL_STATEMENT]: statement,
 				bind: (...values: unknown[]) => meter(statement.bind(...values)),
 				all: async () => {
 					const result = await statement.all();
@@ -207,7 +216,7 @@ export class D1CostHarness {
 		return {
 			prepare: (sql: string) => meter(this.raw.prepare(sql)),
 			batch: async (statements: D1PreparedStatement[]) => {
-				const results = await this.raw.batch(statements);
+				const results = await this.raw.batch(statements.map(unwrap));
 				results.forEach((result) => this.record(result));
 				return results;
 			}

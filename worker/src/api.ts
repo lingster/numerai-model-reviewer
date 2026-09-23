@@ -24,6 +24,7 @@ import {
 import { ModelPerformance, NumeraiModel, NumeraiUser, RoundPerformance } from './types';
 import { d1Retry } from './d1-retry';
 import {
+  emptyRoundScores,
   readCachedRoundScores,
   writeRoundScores,
   computeFetchWindow,
@@ -452,11 +453,6 @@ const SCORED_FIELDS_BY_TOURNAMENT: Record<number, readonly (keyof RoundScores)[]
   [CRYPTO_TOURNAMENT]: ['corr', 'mmc']
 };
 
-/** An all-null RoundScores, to be filled with just the tournament's own fields. */
-function emptyScores(): RoundScores {
-  return { corr: null, mmc: null, mmc60: null, alpha: null, mpc: null, neutral_corr: null, neutral_mmc: null };
-}
-
 /**
  * The submission-sourced metrics for every round of a model, served from D1 and
  * topped up from the API.
@@ -499,7 +495,7 @@ async function getAugmentationScores(
   const wanted = SCORED_FIELDS_BY_TOURNAMENT[tournament] ?? SCORE_FIELDS;
   const fresh = new Map<number, RoundScores>();
   for (const [round, scores] of fetched) {
-    const next = emptyScores();
+    const next = emptyRoundScores();
     for (const field of wanted) {
       next[field] = scores.get(field) ?? null;
     }

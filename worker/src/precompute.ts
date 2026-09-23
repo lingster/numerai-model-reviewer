@@ -31,7 +31,7 @@ import type { D1Query } from './d1-query';
 import type { PrecomputeTarget, SqlWriter } from './precompute-target';
 import { createWranglerQuery, execErrorDetail, type CommandRunner } from './wrangler-d1';
 import { execFileSync, execSync } from 'child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
@@ -690,6 +690,69 @@ function cacheIsValid(config: PrecomputeConfig): boolean {
   }
 }
 
+/** Header for performances.csv. Column names drive parsing, so adding one is safe. */
+export function performanceCsvHeader(): string {
+  return 'modelName,roundNumber,corr,mmc,tc,alpha,mpc,neutralCorr,neutralMmc,stakeValue';
+}
+
+export function performanceCsvRow(modelName: string, r: PerformanceRound): string {
+  return `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.neutralCorr ?? ''},${r.neutralMmc ?? ''},${r.stakeValue ?? ''}`;
+}
+
+/**
+ * performances.csv in pieces of `linesPerChunk` rows.
+ *
+ * One string for the whole file overflowed V8's maximum string length on a
+ * 20.2M-record Classic run — after sixteen minutes of fetching — so the file is
+ * written a chunk at a time and never held whole in memory.
+ */
+export function* performanceCsvChunks(
+  performanceData: ReadonlyMap<string, PerformanceRound[]>,
+  linesPerChunk = 50_000
+): Generator<string> {
+  let lines: string[] = [performanceCsvHeader()];
+  for (const [modelName, rounds] of performanceData) {
+    for (const r of rounds) {
+      lines.push(performanceCsvRow(modelName, r));
+      if (lines.length >= linesPerChunk) {
+        yield lines.join('\n') + '\n';
+        lines = [];
+      }
+    }
+  }
+  if (lines.length > 0) yield lines.join('\n') + '\n';
+}
+
+/** Parse performances.csv rows, tolerating caches written with fewer columns. */
+export function parsePerformanceCsv(lines: ReadonlyArray<string>): Map<string, PerformanceRound[]> {
+  const header = csvParseLine(lines[0] ?? '');
+  const at = (name: string): number => header.indexOf(name);
+  const num = (fields: string[], index: number): number | null =>
+    index >= 0 && fields[index] !== undefined && fields[index] !== '' ? parseFloat(fields[index]) : null;
+
+  const performanceData = new Map<string, PerformanceRound[]>();
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].length === 0) continue;
+    const fields = csvParseLine(lines[i]);
+    const modelName = fields[at('modelName')];
+    const round: PerformanceRound = {
+      roundNumber: parseInt(fields[at('roundNumber')], 10),
+      corr: num(fields, at('corr')),
+      mmc: num(fields, at('mmc')),
+      tc: num(fields, at('tc')),
+      alpha: num(fields, at('alpha')),
+      mpc: num(fields, at('mpc')),
+      neutralCorr: num(fields, at('neutralCorr')),
+      neutralMmc: num(fields, at('neutralMmc')),
+      stakeValue: num(fields, at('stakeValue'))
+    };
+    const existing = performanceData.get(modelName);
+    if (existing) existing.push(round);
+    else performanceData.set(modelName, [round]);
+  }
+  return performanceData;
+}
+
 function saveCache(
   allModels: TopModel[],
   performanceData: Map<string, PerformanceRound[]>,
@@ -706,16 +769,11 @@ function saveCache(
   }
   writeFileSync(CACHE_TOP_MODELS, modelLines.join('\n'), 'utf-8');
 
-  // Write performances.csv (with alpha/mpc for Signals)
-  const perfLines = ['modelName,roundNumber,corr,mmc,tc,alpha,mpc,stakeValue'];
-  for (const [modelName, rounds] of performanceData) {
-    for (const r of rounds) {
-      perfLines.push(
-        `${csvEscape(modelName)},${r.roundNumber},${r.corr ?? ''},${r.mmc ?? ''},${r.tc ?? ''},${r.alpha ?? ''},${r.mpc ?? ''},${r.stakeValue ?? ''}`
-      );
-    }
+  // performances.csv a chunk at a time — see performanceCsvChunks.
+  writeFileSync(CACHE_PERFORMANCES, '', 'utf-8');
+  for (const chunk of performanceCsvChunks(performanceData)) {
+    appendFileSync(CACHE_PERFORMANCES, chunk, 'utf-8');
   }
-  writeFileSync(CACHE_PERFORMANCES, perfLines.join('\n'), 'utf-8');
 
   // Write meta.json
   writeFileSync(CACHE_META, JSON.stringify(cacheConfigFingerprint(config), null, 2), 'utf-8');
@@ -736,40 +794,9 @@ function loadCache(): { allModels: TopModel[]; performanceData: Map<string, Perf
     });
   }
 
-  // Parse performances.csv. Tolerate the legacy 6-column format
-  // (no alpha/mpc) for caches written before this change.
-  const perfContent = readFileSync(CACHE_PERFORMANCES, 'utf-8');
-  const perfLines = perfContent.split('\n').filter(l => l.length > 0);
-  const headerCols = csvParseLine(perfLines[0] ?? '');
-  const hasAlphaMpc = headerCols.includes('alpha') && headerCols.includes('mpc');
-  const performanceData = new Map<string, PerformanceRound[]>();
-  for (let i = 1; i < perfLines.length; i++) {
-    const fields = csvParseLine(perfLines[i]);
-    const modelName = fields[0];
-    const round: PerformanceRound = hasAlphaMpc
-      ? {
-          roundNumber: parseInt(fields[1], 10),
-          corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
-          mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
-          tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
-          alpha: fields[5] !== '' ? parseFloat(fields[5]) : null,
-          mpc: fields[6] !== '' ? parseFloat(fields[6]) : null,
-          stakeValue: fields[7] !== '' ? parseFloat(fields[7]) : null
-        }
-      : {
-          roundNumber: parseInt(fields[1], 10),
-          corr: fields[2] !== '' ? parseFloat(fields[2]) : null,
-          mmc: fields[3] !== '' ? parseFloat(fields[3]) : null,
-          tc: fields[4] !== '' ? parseFloat(fields[4]) : null,
-          alpha: null,
-          mpc: null,
-          stakeValue: fields[5] !== '' ? parseFloat(fields[5]) : null
-        };
-    if (!performanceData.has(modelName)) {
-      performanceData.set(modelName, []);
-    }
-    performanceData.get(modelName)!.push(round);
-  }
+  // performances.csv, parsed by column name so an older cache still loads.
+  const perfLines = readFileSync(CACHE_PERFORMANCES, 'utf-8').split('\n');
+  const performanceData = parsePerformanceCsv(perfLines);
 
   return { allModels, performanceData };
 }
@@ -1649,10 +1676,16 @@ export async function runPrecompute(
     }
     console.log(`  Fetched ${totalRounds} total round records\n`);
 
-    // Save to CSV cache
-    console.log('Saving data to cache...');
-    saveCache(allModels, performanceData, config);
-    console.log(`  Cache written to ${CACHE_DIR}\n`);
+    // Save to CSV cache. --no-cache means this run neither reads nor writes one:
+    // the nightly scheduler passes it, and a full Classic fleet is millions of
+    // rows nobody will reuse.
+    if (noCache) {
+      console.log('Cache disabled (--no-cache); not writing one\n');
+    } else {
+      console.log('Saving data to cache...');
+      saveCache(allModels, performanceData, config);
+      console.log(`  Cache written to ${CACHE_DIR}\n`);
+    }
   }
 
   let totalRounds = 0;
