@@ -62,6 +62,27 @@ export function defaultMetricSetFor(tournament: number): MetricSet {
 	return 'corr60_mmc60';
 }
 
+/**
+ * The weighting Numerai pays a tournament's pair on, used when a request sends
+ * no weights of its own.
+ *
+ *   Classic  3*CORR60 + 15*MMC60 (since 28 Aug 2026), or 0.75/2.25 on the
+ *            20-day pair it was scored on before that
+ *   Signals  0.3*alpha + 0.8*mpc, or 0.5*ncorr + 2*nmmc from rounds opening
+ *            2026-09-25
+ *   Crypto   0.1*corr + 1*mmc
+ */
+export function defaultFormulaFor(tournament: number, metricSet: MetricSet): ScoreFormula {
+	if (tournament === CRYPTO_TOURNAMENT) return { corrWeight: 0.1, mmcWeight: 1, tcWeight: 0 };
+	const weights: Record<MetricSet, { corrWeight: number; mmcWeight: number }> = {
+		corr20_mmc: { corrWeight: 0.75, mmcWeight: 2.25 },
+		corr60_mmc60: { corrWeight: 3, mmcWeight: 15 },
+		alpha_mpc: { corrWeight: 0.3, mmcWeight: 0.8 },
+		neutral: { corrWeight: 0.5, mmcWeight: 2 }
+	};
+	return { ...weights[metricSet], tcWeight: 0 };
+}
+
 /** `value` as a MetricSet, or the fallback — for request parameters. */
 export function asMetricSet(value: unknown, fallback: MetricSet = 'alpha_mpc'): MetricSet {
 	return METRIC_SETS.includes(value as MetricSet) ? (value as MetricSet) : fallback;

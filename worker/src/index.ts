@@ -7,7 +7,7 @@ import { Env as ApiEnv } from './api';
 import { CRYPTO_TOURNAMENT } from './mappers';
 import * as rankings from './rankings-api';
 import { asFieldScope } from './round-field';
-import { asMetricSet, defaultMetricSetFor } from './ranking';
+import { asMetricSet, defaultFormulaFor, defaultMetricSetFor } from './ranking';
 import { isAllowedOrigin, handleCors } from './cors';
 
 // Environment bindings interface
@@ -195,9 +195,13 @@ export default {
           const tournament = parseInt(url.searchParams.get('tournament') || '8');
           const limit = parseInt(url.searchParams.get('limit') || '10');
           const window = parseInt(url.searchParams.get('window') || '1');
+          const metricSet = asMetricSet(url.searchParams.get('metricSet'), defaultMetricSetFor(tournament));
+          // Unweighted requests get what Numerai pays that tournament's pair on, not
+          // Classic's numbers applied to every tournament.
+          const paid = defaultFormulaFor(tournament, metricSet);
           const formula: rankings.ScoreFormula = {
-            corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
-            mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
+            corrWeight: parseFloat(url.searchParams.get('corrWeight') || String(paid.corrWeight)),
+            mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || String(paid.mmcWeight)),
             tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
           };
           const top = await rankings.getTopModelsForRound(env, {
@@ -235,9 +239,13 @@ export default {
           } else {
             const tournament = parseInt(url.searchParams.get('tournament') || '8');
             const window = parseInt(url.searchParams.get('window') || '1');
+            const metricSet = asMetricSet(url.searchParams.get('metricSet'), defaultMetricSetFor(tournament));
+            // Unweighted requests get what Numerai pays that tournament's pair on, not
+            // Classic's numbers applied to every tournament.
+            const paid = defaultFormulaFor(tournament, metricSet);
             const formula: rankings.ScoreFormula = {
-              corrWeight: parseFloat(url.searchParams.get('corrWeight') || '0.75'),
-              mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || '2.25'),
+              corrWeight: parseFloat(url.searchParams.get('corrWeight') || String(paid.corrWeight)),
+              mmcWeight: parseFloat(url.searchParams.get('mmcWeight') || String(paid.mmcWeight)),
               tcWeight: parseFloat(url.searchParams.get('tcWeight') || '0')
             };
             const result = await rankings.getModelRank(env, {
@@ -251,9 +259,7 @@ export default {
               // all ranks against every model that scored. Anything else falls
               // back to staked rather than failing the request.
               fieldScope: asFieldScope(url.searchParams.get('fieldScope')),
-              // alpha_mpc (default) or neutral, for Signals: the pair Numerai
-              // pays on from rounds opening 2026-09-25. Ignored elsewhere.
-              metricSet: asMetricSet(url.searchParams.get('metricSet'), defaultMetricSetFor(tournament)),
+              metricSet,
               // Owner/id hints let the unstaked-model fallback fetch a model's own
               // scores directly (skipping a Crypto leaderboard scan) when it's not
               // in the precomputed staked field.
