@@ -40,6 +40,7 @@
 		resolvePrimaryFieldScope,
 		type FieldScopeSelection
 	} from '$lib/utils/field-scope.js';
+	import { metricCoverageNotice } from '$lib/utils/metric-coverage.js';
 	import {
 		METRIC_SETS,
 		NEUTRAL_SCORES_FROM_ROUND,
@@ -235,6 +236,12 @@
 
 	// Rankings data
 	let rankingHistories = $state<ModelRankingHistory[]>([]);
+	// Where this metric pair's data begins inside the loaded range, if the range
+	// reaches past it — Classic's 60-day pair goes back only as far as precompute
+	// has fetched, and Numerai publishes it for a subset of rounds.
+	const coverageNotice = $derived(
+		rankingHistories.length > 0 ? metricCoverageNotice(metricSet, rankingHistories[0].rankings) : null
+	);
 	let topModels = $state<RoundModelScore[]>([]);
 	let loadingRankings = $state(false);
 	let rankingsError = $state<string | null>(null);
@@ -919,6 +926,10 @@
 				<p class="mt-2 text-xs retro-text-warning">
 					Neutral scores start at round {NEUTRAL_SCORES_FROM_ROUND} — earlier rounds have no neutral rank.
 				</p>
+			{:else if coverageNotice}
+				<!-- Read off the ranks that came back, so widening the backfill moves
+				     this on its own rather than leaving a stale round number here. -->
+				<p class="mt-2 text-xs retro-text-warning">{coverageNotice}</p>
 			{/if}
 		</div>
 	{/if}
