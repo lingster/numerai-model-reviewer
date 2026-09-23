@@ -119,7 +119,11 @@ export async function searchUsers(
   searchTerm: string,
   env: Env,
   limit: number = 20,
-  maxSearch: number = 5000,
+  // Pages of the account leaderboard to scan as a last resort. Kept small: the
+  // table above already holds every account with a model on any leaderboard, so
+  // this only finds accounts that have none — and scanning 5,000 for a term
+  // nobody matches cost ~1.6s.
+  maxSearch: number = 1000,
   batchSize: number = 500
 ): Promise<NumeraiUser[]> {
   const users: NumeraiUser[] = [];
@@ -138,30 +142,32 @@ export async function searchUsers(
     console.error('Error in D1 user search:', e);
   }
 
-  if (users.length >= limit) return users.slice(0, limit);
+  // Everything on a leaderboard — staked or not, across all three tournaments —
+  // is in the table above, so a match there is the answer. Asking Numerai as
+  // well cost a live round-trip on every keystroke (~200ms against ~3ms) to
+  // confirm a name the database had already found.
+  if (users.length > 0) return users.slice(0, limit);
 
-  // 1. Direct lookup (single exact-match query — catches unstaked accounts the
-  // D1 index doesn't have).
+  // 1. Direct lookup: an account the table does not have (no models on any
+  // leaderboard). Exact match only, so it answers in one query.
   try {
     const accountResult = await query<{
       accountProfile: { id: string; username: string } | null;
     }>(env, QUERY_SEARCH_USER_BY_ACCOUNT, { username: searchTerm });
 
     if (accountResult.accountProfile) {
-      if (!users.find((u) => u.username.toLowerCase() === accountResult.accountProfile!.username.toLowerCase())) {
-        users.push({
-          id: accountResult.accountProfile.id,
-          username: accountResult.accountProfile.username
-        });
-      }
+      users.push({
+        id: accountResult.accountProfile.id,
+        username: accountResult.accountProfile.username
+      });
     }
   } catch (e) {
     console.error('Error in direct lookup:', e);
   }
 
-  // The cheap paths (D1 + exact lookup) resolve the overwhelming majority of
-  // searches. Only fall through to the slow multi-page leaderboard scan when
-  // they turned up nothing — that's the case that was making search feel slow.
+  // The cheap paths (the table + exact lookup) resolve the overwhelming
+  // majority of searches. Only fall through to the slow multi-page leaderboard
+  // scan when they turned up nothing.
   if (users.length > 0) return users.slice(0, limit);
 
   // 2. Leaderboard Search

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { effectiveModels, isUsingAllUserModels } from '$lib/utils/model-selection.js';
 	import { onMount, tick } from 'svelte';
 	import Autocomplete from '$lib/components/Autocomplete.svelte';
 	import RankingsChart from '$lib/components/RankingsChart.svelte';
@@ -71,10 +72,10 @@
 	// or — when none are picked — every model of the selected user. Lets a user
 	// chart a whole account in one click without selecting each model.
 	const modelsToRank = $derived(
-		selectedModels.length > 0 ? selectedModels : selectedUser ? availableModels : []
+		effectiveModels(selectedModels, availableModels, selectedUser !== null)
 	);
 	// True when the fallback (all of the user's models) is in effect.
-	const usingAllUserModels = $derived(selectedModels.length === 0 && modelsToRank.length > 0);
+	const usingAllUserModels = $derived(isUsingAllUserModels(selectedModels, modelsToRank));
 
 	// Tournament selection (Classic and Crypto only)
 	let selectedTournament = $state<TournamentId>(TOURNAMENTS.CLASSIC);

@@ -7,7 +7,7 @@
  * (MAX_ROUNDS_HISTORY) rather than a short window that truncates older rounds.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModelPerformance, findCryptoModelByName, clearUserModelsCache, type Env } from './api';
+import { getModelPerformance, findCryptoModelByName, searchUsers, clearUserModelsCache, type Env } from './api';
 import { MAX_ROUNDS_HISTORY, CRYPTO_TOURNAMENT, SIGNALS_TOURNAMENT } from './mappers';
 
 const env = {
@@ -345,5 +345,41 @@ describe('Signals neutral scores on the model performance endpoint', () => {
 		expect(round?.mpc).toBe(0.02);
 		expect(round?.neutralCorr).toBe(0.03);
 		expect(round?.neutralMmc).toBe(0.04);
+	});
+});
+
+describe('searchUsers cost', () => {
+	/** An env whose D1 returns `usernames` for the staked-model search. */
+	function envWithMatches(usernames: string[]) {
+		return {
+			...env,
+			DB: {
+				prepare: () => ({
+					bind: () => ({
+						all: async () => ({ results: usernames.map((username) => ({ username })) })
+					})
+				})
+			}
+		} as unknown as Env;
+	}
+
+	it('answers from the database alone when it has matches', async () => {
+		// Every keystroke used to cost a live Numerai round-trip for an exact
+		// username match, even when the database had already matched the term.
+		const calls = mockFetch([{}]);
+
+		const users = await searchUsers('fis', envWithMatches(['fish_n_chips', 'fisher']), 20);
+
+		expect(users.map((u) => u.username)).toEqual(['fish_n_chips', 'fisher']);
+		expect(calls).toHaveLength(0);
+	});
+
+	it('still asks Numerai when the database has nothing', async () => {
+		const calls = mockFetch([{ accountProfile: { id: 'id-1', username: 'newcomer' } }]);
+
+		const users = await searchUsers('newcomer', envWithMatches([]), 20);
+
+		expect(users.map((u) => u.username)).toEqual(['newcomer']);
+		expect(calls.length).toBeGreaterThan(0);
 	});
 });
