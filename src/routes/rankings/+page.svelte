@@ -1059,44 +1059,6 @@
 		</p>
 	</div>
 
-	<!-- Round Filter (toggle A): which rounds the chart plots, by the per-round
-	     staked flag. Disabled for Crypto, whose stored "staked" is the model's
-	     CURRENT stake rather than a per-round fact — the Worker always returns
-	     null there, so there's nothing to filter on. -->
-	<div
-		class="mb-6 rounded-lg retro-card p-3 sm:p-6"
-		class:opacity-50={isCrypto}
-		title={isCrypto
-			? "Crypto's staked flag reflects the model's current stake, not a per-round fact, so this filter has nothing to act on."
-			: undefined}
-	>
-		<div class="flex flex-wrap items-center gap-4">
-			<span class="text-sm font-medium retro-text-primary uppercase">Rounds:</span>
-			<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
-				{#each [{ v: 'staked', label: 'Staked' }, { v: 'unstaked', label: 'Unstaked' }, { v: 'both', label: 'Both' }] as opt}
-					<button
-						onclick={() => setStakedFilter(opt.v as StakedFilter)}
-						disabled={isCrypto}
-						class="px-3 py-1 text-sm font-medium transition-colors disabled:cursor-not-allowed"
-						style={stakedFilter === opt.v
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						{opt.label}
-					</button>
-				{/each}
-			</div>
-		</div>
-		<p class="mt-2 text-xs retro-text-secondary">
-			{#if isCrypto}
-				Not available for Crypto — see the tooltip above.
-			{:else}
-				Filters the chart to rounds where the model was (or wasn't) staked. Rounds with no staked
-				data are never shown under Staked or Unstaked, only under Both.
-			{/if}
-		</p>
-	</div>
-
 	<!-- Round Range Configuration -->
 	<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 		<h2 class="mb-4 text-lg font-medium retro-text-primary uppercase">Round Range</h2>
@@ -1231,6 +1193,8 @@
 				rollingWindow={rollingWindow}
 				{latestResolvedRound}
 				{stakedFilter}
+				stakedFilterEnabled={!isCrypto}
+				onStakedFilterChange={setStakedFilter}
 				onPointSelect={handleChartPointSelect}
 			/>
 		</div>

@@ -16,6 +16,7 @@
 	} from '$lib/utils/round-resolution.js';
 	import { passesStakedFilter, type StakedFilter } from '$lib/utils/round-staked-filter.js';
 	import { fieldScopeLabel, type FieldScope } from '$lib/utils/field-scope.js';
+	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
 
 	// Props
 	let {
@@ -28,6 +29,8 @@
 		rollingWindow = 1,
 		latestResolvedRound = null,
 		stakedFilter = 'both',
+		stakedFilterEnabled = true,
+		onStakedFilterChange,
 		onPointSelect
 	}: {
 		rankingHistories: ModelRankingHistory[];
@@ -45,9 +48,14 @@
 		/** Latest fully-resolved round; rounds after it are "resolving" (scored but
 		 *  not final) and get shaded. null = boundary unknown, treat all as resolved. */
 		latestResolvedRound?: number | null;
-		/** Page-level Staked/Unstaked/Both round filter (toggle lives on the page so
-		 *  it can be part of the shareable URL state). 'both' = unfiltered. */
+		/** Staked/Unstaked/Both round filter. The control sits in this panel, beside
+		 *  the data it filters, but the value stays with the page so it can be part
+		 *  of the shareable URL state. 'both' = unfiltered. */
 		stakedFilter?: StakedFilter;
+		/** False for Crypto, whose per-round staked flag is unknown: the control is
+		 *  shown disabled rather than hidden, so it does not move about per tournament. */
+		stakedFilterEnabled?: boolean;
+		onStakedFilterChange?: (filter: StakedFilter) => void;
 		/** Fired when a data point is clicked, with its round and model name. */
 		onPointSelect?: (round: number, modelName: string) => void;
 	} = $props();
@@ -323,6 +331,14 @@
 		return (h.fieldScope ?? 'staked') === 'all' ? '7,4' : 'none';
 	}
 
+	/** Every plotted series, in legend order — what the bulk controls act on. */
+	const seriesKeys = $derived(rankingHistories.map(seriesKey));
+
+	const showAll = () => (modelVisibility = setAllVisible(seriesKeys, true));
+	const hideAll = () => (modelVisibility = setAllVisible(seriesKeys, false));
+	const invertAll = () => (modelVisibility = invertVisibility(seriesKeys, modelVisibility));
+	const shownCount = $derived(seriesKeys.filter((key) => modelVisibility[key] ?? true).length);
+
 	// Toggle one series' visibility (keyed by seriesKey, not modelId — see above).
 	function toggleModelVisibility(key: string) {
 		modelVisibility = {
@@ -436,6 +452,52 @@
 			<p class="retro-text-secondary">Select models and load rankings to display the chart</p>
 		</div>
 	{:else}
+		<!-- Chart controls: what the chart plots (round filter) and which of its
+		     series are visible. Both sit here, beside the chart they act on, rather
+		     than with the query controls that decide what is fetched. -->
+		<div class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+			<div
+				class="flex items-center gap-2"
+				class:opacity-50={!stakedFilterEnabled}
+				title={stakedFilterEnabled
+					? undefined
+					: "Crypto's staked flag reflects the model's current stake, not a per-round fact, so this filter has nothing to act on."}
+			>
+				<span class="text-xs font-medium retro-text-secondary uppercase">Rounds</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					{#each [{ v: 'staked', label: 'Staked' }, { v: 'unstaked', label: 'Unstaked' }, { v: 'both', label: 'Both' }] as opt}
+						<button
+							onclick={() => onStakedFilterChange?.(opt.v as StakedFilter)}
+							disabled={!stakedFilterEnabled}
+							class="px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed"
+							style={stakedFilter === opt.v
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{opt.label}
+						</button>
+					{/each}
+				</div>
+			</div>
+
+			<div class="flex items-center gap-2">
+				<span class="text-xs font-medium retro-text-secondary uppercase">
+					Models ({shownCount}/{seriesKeys.length})
+				</span>
+				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
+					{#each [{ label: 'All', run: showAll }, { label: 'None', run: hideAll }, { label: 'Invert', run: invertAll }] as action}
+						<button
+							onclick={action.run}
+							class="px-2.5 py-1 text-xs font-medium transition-colors"
+							style="color: var(--retro-text-primary);"
+						>
+							{action.label}
+						</button>
+					{/each}
+				</div>
+			</div>
+		</div>
+
 		<!-- Model Legend/Toggles. Each history is its own toggle — when the "vs Both"
 		     competitor toggle is active a model has two (staked + all), shown here
 		     as separate chips sharing a colour but naming their field. -->
