@@ -20,8 +20,14 @@
 
 export type SignalsMetricSet = 'alpha_mpc' | 'neutral';
 
+/**
+ * Every metric pair a tournament can be scored on — the Worker's `metricSet`
+ * query values (worker/src/ranking.ts keeps the same names).
+ */
+export type MetricSet = 'corr20_mmc' | 'corr60_mmc60' | SignalsMetricSet;
+
 export interface MetricSetDefinition {
-	key: SignalsMetricSet;
+	key: MetricSet;
 	/** Weight applied to the first (corr-like) component. */
 	corrWeight: number;
 	/** Weight applied to the second (mmc-like) component. */
@@ -32,12 +38,41 @@ export interface MetricSetDefinition {
 	mmcLabel: string;
 }
 
-/** The two Signals metric sets Numerai has paid on, keyed by the Worker's
- *  `metricSet` query value. Single source of truth for their weights + labels. */
-export const SIGNALS_METRIC_SETS: Record<SignalsMetricSet, MetricSetDefinition> = {
+/**
+ * Every metric set's weights and labels, keyed by the Worker's `metricSet`
+ * value. Single source of truth: weights here are what Numerai pays on for that
+ * pair, and every view reads its names from here rather than restating them.
+ */
+export const METRIC_SETS: Record<MetricSet, MetricSetDefinition> = {
+	corr20_mmc: { key: 'corr20_mmc', corrWeight: 0.75, mmcWeight: 2.25, corrLabel: 'Corr', mmcLabel: 'MMC' },
+	// Classic's payout weighting since 28 Aug 2026.
+	corr60_mmc60: { key: 'corr60_mmc60', corrWeight: 3, mmcWeight: 15, corrLabel: 'CORR60', mmcLabel: 'MMC60' },
 	alpha_mpc: { key: 'alpha_mpc', corrWeight: 0.3, mmcWeight: 0.8, corrLabel: 'Alpha', mmcLabel: 'MPC' },
 	neutral: { key: 'neutral', corrWeight: 0.5, mmcWeight: 2, corrLabel: 'NCORR', mmcLabel: 'NMMC' }
 };
+
+/** The Signals pairs, for the views that only offer those. */
+export const SIGNALS_METRIC_SETS: Record<SignalsMetricSet, MetricSetDefinition> = {
+	alpha_mpc: METRIC_SETS.alpha_mpc,
+	neutral: METRIC_SETS.neutral
+};
+
+const SIGNALS_TOURNAMENT = 11;
+const CRYPTO_TOURNAMENT = 12;
+
+/** The pairs a tournament publishes — mirrors worker/src/ranking.ts metricSetsFor. */
+export function metricSetsForTournament(tournament: number): MetricSet[] {
+	if (tournament === SIGNALS_TOURNAMENT) return ['alpha_mpc', 'neutral'];
+	if (tournament === CRYPTO_TOURNAMENT) return ['corr20_mmc'];
+	return ['corr20_mmc', 'corr60_mmc60'];
+}
+
+/** What a tournament is scored on unless asked otherwise: what Numerai pays on. */
+export function defaultMetricSetForTournament(tournament: number): MetricSet {
+	if (tournament === SIGNALS_TOURNAMENT) return 'alpha_mpc';
+	if (tournament === CRYPTO_TOURNAMENT) return 'corr20_mmc';
+	return 'corr60_mmc60';
+}
 
 /** Default metric set: today's alpha+mpc payout pair. */
 export const DEFAULT_SIGNALS_METRIC_SET: SignalsMetricSet = 'alpha_mpc';
@@ -57,13 +92,13 @@ export const NEUTRAL_SCORES_FROM_ROUND = 912;
  * that predate neutral scoring, so the hint appears exactly when it explains
  * something the user would otherwise see as unexplained empty ranks.
  */
-export function shouldShowNeutralStartHint(metricSet: SignalsMetricSet, startRound: number): boolean {
+export function shouldShowNeutralStartHint(metricSet: MetricSet, startRound: number): boolean {
 	return metricSet === 'neutral' && startRound <= NEUTRAL_SCORES_FROM_ROUND;
 }
 
 /** Look up a metric set's weights + labels by key. */
-export function getMetricSetDefinition(metricSet: SignalsMetricSet): MetricSetDefinition {
-	return SIGNALS_METRIC_SETS[metricSet];
+export function getMetricSetDefinition(metricSet: MetricSet): MetricSetDefinition {
+	return METRIC_SETS[metricSet];
 }
 
 /**
@@ -71,7 +106,7 @@ export function getMetricSetDefinition(metricSet: SignalsMetricSet): MetricSetDe
  * "0.3·Alpha + 0.8·MPC" — the single source for that text so score-formula
  * descriptions across the UI can't drift from the actual weights.
  */
-export function formatMetricSetFormula(metricSet: SignalsMetricSet): string {
+export function formatMetricSetFormula(metricSet: MetricSet): string {
 	const set = getMetricSetDefinition(metricSet);
 	return `${set.corrWeight}·${set.corrLabel} + ${set.mmcWeight}·${set.mmcLabel}`;
 }

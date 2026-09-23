@@ -41,12 +41,13 @@
 		type FieldScopeSelection
 	} from '$lib/utils/field-scope.js';
 	import {
-		DEFAULT_SIGNALS_METRIC_SET,
-		SIGNALS_METRIC_SETS,
+		METRIC_SETS,
 		NEUTRAL_SCORES_FROM_ROUND,
+		defaultMetricSetForTournament,
 		formatMetricSetFormula,
+		metricSetsForTournament,
 		shouldShowNeutralStartHint,
-		type SignalsMetricSet
+		type MetricSet
 	} from '$lib/utils/scoring.js';
 	import { replaceState } from '$app/navigation';
 	import { browser } from '$app/environment';
@@ -90,14 +91,17 @@
 	// Signals metric pair (toggle C): which score/rank the Worker computes for
 	// Signals, via metricSet. Meaningless for Classic/Crypto, which have no
 	// metric-set concept. Persisted in the URL so a shared link keeps its choice.
-	let metricSet = $state<SignalsMetricSet>(DEFAULT_SIGNALS_METRIC_SET);
+	let metricSet = $state<MetricSet>(defaultMetricSetForTournament(TOURNAMENTS.CLASSIC));
+	// The pairs this tournament publishes; the toggle shows only when there is a
+	// choice (Crypto has one pair).
+	const metricSetChoices = $derived(metricSetsForTournament(selectedTournament));
 
 	// Metric labels are tournament-specific. Classic/Crypto score on corr+mmc;
 	// Signals scores on the active metric set's pair (alpha_mpc: Alpha/MPC,
 	// neutral: NCORR/NMMC — the worker returns them in the corr/mmc fields for
 	// tournament 11). The corrWeight/mmcWeight inputs drive both.
-	const metric1Label = $derived(isSignals ? SIGNALS_METRIC_SETS[metricSet].corrLabel : 'Corr');
-	const metric2Label = $derived(isSignals ? SIGNALS_METRIC_SETS[metricSet].mmcLabel : 'MMC');
+	const metric1Label = $derived(METRIC_SETS[metricSet].corrLabel);
+	const metric2Label = $derived(METRIC_SETS[metricSet].mmcLabel);
 	const scoreFormulaDefault = $derived(getDefaultFormulaForTournament(selectedTournament, metricSet));
 
 	// Competitor field toggle (toggle B): rank against the staked field, every
@@ -217,7 +221,7 @@
 	// Signals metric-set toggle (C): changes what the Worker scores/ranks on, so
 	// reset the formula to that set's defaults and re-rank, same as switching
 	// tournaments.
-	async function setMetricSet(value: SignalsMetricSet) {
+	async function setMetricSet(value: MetricSet) {
 		if (value === metricSet) return;
 		metricSet = value;
 		scoreFormula = getDefaultFormulaForTournament(selectedTournament, metricSet);
@@ -489,7 +493,7 @@
 
 		// The metric-set toggle only applies to Signals; reset it on every switch
 		// so leaving Signals doesn't leave a stale 'neutral' selection behind.
-		metricSet = DEFAULT_SIGNALS_METRIC_SET;
+		metricSet = defaultMetricSetForTournament(tournament);
 		// Crypto has no per-round staked flag to filter on; reset so switching
 		// away and back doesn't leave a filter that silently hides everything.
 		if (tournament === TOURNAMENTS.CRYPTO) stakedFilter = DEFAULT_STAKED_FILTER;
@@ -648,7 +652,7 @@
 			url.searchParams.delete('fieldScope');
 		}
 
-		if (metricSet !== DEFAULT_SIGNALS_METRIC_SET) {
+		if (metricSet !== defaultMetricSetForTournament(selectedTournament)) {
 			url.searchParams.set('metricSet', metricSet);
 		} else {
 			url.searchParams.delete('metricSet');
@@ -881,35 +885,35 @@
 
 	<!-- Signals Metric Set (toggle C): which metric pair Signals scores/ranks on.
 	     Meaningless for Classic/Crypto, so hidden there entirely. -->
-	{#if isSignals}
+	{#if metricSetChoices.length > 1}
 		<div class="mb-6 rounded-lg retro-card p-3 sm:p-6">
 			<div class="flex flex-wrap items-center gap-4">
-				<span class="text-sm font-medium retro-text-primary uppercase">Signals Metric:</span>
+				<span class="text-sm font-medium retro-text-primary uppercase">Scored on:</span>
 				<div class="inline-flex overflow-hidden rounded-md border-2 border-[var(--retro-primary)]">
-					<button
-						onclick={() => setMetricSet('alpha_mpc')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={metricSet === 'alpha_mpc'
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						Alpha/MPC (current)
-					</button>
-					<button
-						onclick={() => setMetricSet('neutral')}
-						class="px-3 py-1 text-sm font-medium transition-colors"
-						style={metricSet === 'neutral'
-							? 'background-color: var(--retro-primary); color: white;'
-							: 'color: var(--retro-text-primary);'}
-					>
-						Neutral (NCORR/NMMC)
-					</button>
+					{#each metricSetChoices as choice}
+						<button
+							onclick={() => setMetricSet(choice)}
+							class="px-3 py-1 text-sm font-medium transition-colors"
+							style={metricSet === choice
+								? 'background-color: var(--retro-primary); color: white;'
+								: 'color: var(--retro-text-primary);'}
+						>
+							{METRIC_SETS[choice].corrLabel}/{METRIC_SETS[choice].mmcLabel}{choice ===
+							defaultMetricSetForTournament(selectedTournament)
+								? ' (paid)'
+								: ''}
+						</button>
+					{/each}
 				</div>
 			</div>
 			<p class="mt-2 text-xs retro-text-secondary">
 				{formatMetricSetFormula(metricSet)} — {metricSet === 'neutral'
-					? 'the pair Numerai pays on for Signals rounds opening on/after 2026-09-25. Payouts are capped at ±3.5%; ranks here use the uncapped score.'
-					: "today's payout pair."}
+					? 'the pair Numerai pays Signals on for rounds opening on/after 2026-09-25. Payouts are capped at ±3.5%; ranks here use the uncapped score.'
+					: metricSet === 'corr60_mmc60'
+						? "Classic's payout pair since 28 Aug 2026."
+						: metricSet === 'corr20_mmc'
+							? 'the 20-day pair Classic was scored on before 28 Aug 2026.'
+							: "Signals' payout pair up to 25 Sep 2026."}
 			</p>
 			{#if shouldShowNeutralStartHint(metricSet, startRound)}
 				<p class="mt-2 text-xs retro-text-warning">

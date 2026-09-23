@@ -19,8 +19,11 @@ import {
 	SCORE_ALPHA_WEIGHT,
 	SCORE_MPC_WEIGHT,
 	DEFAULT_SIGNALS_METRIC_SET,
+	METRIC_SETS,
+	defaultMetricSetForTournament,
 	getMetricSetDefinition,
-	type SignalsMetricSet
+	metricSetsForTournament,
+	type MetricSet,
 } from '$lib/utils/scoring.js';
 import {
 	DEFAULT_FIELD_SCOPE,
@@ -83,14 +86,15 @@ export const DEFAULT_SIGNALS_SCORE_FORMULA: ScoreFormula = {
  */
 export function getDefaultFormulaForTournament(
 	tournament: number,
-	metricSet: SignalsMetricSet = DEFAULT_SIGNALS_METRIC_SET
+	metricSet: MetricSet = DEFAULT_SIGNALS_METRIC_SET
 ): ScoreFormula {
-	if (tournament === SIGNALS_TOURNAMENT) {
-		const set = getMetricSetDefinition(metricSet);
-		return { corrWeight: set.corrWeight, mmcWeight: set.mmcWeight, tcWeight: 0 };
-	}
 	if (tournament === CRYPTO_TOURNAMENT) return { ...DEFAULT_CRYPTO_SCORE_FORMULA };
-	return { ...DEFAULT_SCORE_FORMULA };
+	// The weighting Numerai pays on for the pair being scored. Classic's 60-day
+	// pair is 3*CORR60 + 15*MMC60; its 20-day pair keeps the older weighting.
+	const set = METRIC_SETS[metricSetsForTournament(tournament).includes(metricSet)
+		? metricSet
+		: defaultMetricSetForTournament(tournament)];
+	return { corrWeight: set.corrWeight, mmcWeight: set.mmcWeight, tcWeight: 0 };
 }
 
 export interface ModelRef {
@@ -302,7 +306,7 @@ export function buildModelRankCacheKey(
 	tournament: number,
 	window: number,
 	fieldScope: FieldScope,
-	metricSet: SignalsMetricSet
+	metricSet: MetricSet
 ): string {
 	return `model-rank:${modelName.toLowerCase()}:t${tournament}:${startRound}-${endRound}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}:fs${fieldScope}:ms${metricSet}`;
 }
@@ -315,7 +319,7 @@ export function buildTopModelsCacheKey(
 	limit: number,
 	window: number,
 	fieldScope: FieldScope,
-	metricSet: SignalsMetricSet
+	metricSet: MetricSet
 ): string {
 	return `top-models:r${roundNumber}:t${tournament}:l${limit}:w${window}:c${formula.corrWeight}:m${formula.mmcWeight}:tc${formula.tcWeight}:fs${fieldScope}:ms${metricSet}`;
 }
@@ -374,7 +378,7 @@ export async function calculateModelRankings(
 	fieldScope: FieldScopeSelection = DEFAULT_FIELD_SCOPE,
 	/** Signals-only metric pair (alpha_mpc vs neutral); ignored by the Worker
 	 *  for Classic/Crypto. */
-	metricSet: SignalsMetricSet = DEFAULT_SIGNALS_METRIC_SET
+	metricSet: MetricSet = DEFAULT_SIGNALS_METRIC_SET
 ): Promise<ModelRankingsResult> {
 	if (selectedModels.length === 0) return { histories: [], unranked: [] };
 
@@ -479,7 +483,7 @@ export async function getTopModelsForRound(
 	fieldScope: FieldScope = 'staked',
 	/** Signals-only metric pair (alpha_mpc vs neutral); ignored by the Worker
 	 *  for Classic/Crypto. */
-	metricSet: SignalsMetricSet = DEFAULT_SIGNALS_METRIC_SET
+	metricSet: MetricSet = DEFAULT_SIGNALS_METRIC_SET
 ): Promise<RoundModelScore[]> {
 	const cacheKey = buildTopModelsCacheKey(roundNumber, formula, tournament, limit, window, fieldScope, metricSet);
 	const cached = swrCache.get<RoundModelScore[]>(cacheKey);

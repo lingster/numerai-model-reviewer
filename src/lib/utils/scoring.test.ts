@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
 	CLASSIC_SIXTY_DAY_FORMULA,
+	METRIC_SETS,
+	defaultMetricSetForTournament,
+	metricSetsForTournament,
 	SCORE_ALPHA_WEIGHT,
 	SCORE_MPC_WEIGHT,
 	SIGNALS_METRIC_SETS,
@@ -208,5 +211,31 @@ describe('CLASSIC_SIXTY_DAY_FORMULA', () => {
 		// 3*CORR60 + 15*MMC60. Only valid against the 60-day pair — the rankings
 		// pipeline still stores 20-day corr/mmc, so it keeps its own weights.
 		expect(CLASSIC_SIXTY_DAY_FORMULA).toEqual({ corrWeight: 3, mmcWeight: 15 });
+	});
+});
+
+describe('metric sets per tournament', () => {
+	const CLASSIC = 8;
+	const SIGNALS = 11;
+	const CRYPTO = 12;
+
+	it('offers Classic its 20-day and 60-day pairs, defaulting to what it is paid on', () => {
+		expect(metricSetsForTournament(CLASSIC)).toEqual(['corr20_mmc', 'corr60_mmc60']);
+		expect(defaultMetricSetForTournament(CLASSIC)).toBe('corr60_mmc60');
+	});
+
+	it('weights and labels Classic 60-day as 3xCORR60 + 15xMMC60', () => {
+		expect(METRIC_SETS.corr60_mmc60).toMatchObject({
+			corrWeight: 3,
+			mmcWeight: 15,
+			corrLabel: 'CORR60',
+			mmcLabel: 'MMC60'
+		});
+	});
+
+	it('leaves Signals and Crypto as they were', () => {
+		expect(metricSetsForTournament(SIGNALS)).toEqual(['alpha_mpc', 'neutral']);
+		expect(defaultMetricSetForTournament(SIGNALS)).toBe('alpha_mpc');
+		expect(metricSetsForTournament(CRYPTO)).toEqual(['corr20_mmc']);
 	});
 });

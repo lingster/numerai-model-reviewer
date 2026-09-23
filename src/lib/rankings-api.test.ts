@@ -148,8 +148,14 @@ describe('calculateCustomScore - unit tests', () => {
 });
 
 describe('getDefaultFormulaForTournament - unit tests', () => {
-	it('should return Classic default (0.75*corr + 2.25*mmc) for tournament 8', () => {
-		expect(getDefaultFormulaForTournament(8)).toEqual(DEFAULT_SCORE_FORMULA);
+	it('returns Classic\'s payout weighting (3*CORR60 + 15*MMC60) for tournament 8', () => {
+		// Classic moved to the 60-day pair on 28 Aug 2026 and the pipeline now
+		// stores and ranks on it, so the default weights are that pair's.
+		expect(getDefaultFormulaForTournament(8)).toEqual({ corrWeight: 3, mmcWeight: 15, tcWeight: 0 });
+	});
+
+	it("returns Classic's older 20-day weighting when that pair is asked for", () => {
+		expect(getDefaultFormulaForTournament(8, 'corr20_mmc')).toEqual(DEFAULT_SCORE_FORMULA);
 	});
 
 	it('should return Signals default (0.3*alpha + 0.8*mpc) for tournament 11', () => {
@@ -175,8 +181,9 @@ describe('getDefaultFormulaForTournament - unit tests', () => {
 		});
 	});
 
-	it("ignores metricSet for non-Signals tournaments", () => {
-		expect(getDefaultFormulaForTournament(8, 'neutral')).toEqual(DEFAULT_SCORE_FORMULA);
+	it("falls back to a tournament's own default when asked for a pair it lacks", () => {
+		// 'neutral' is a Signals pair; Classic answers with its own payout weighting.
+		expect(getDefaultFormulaForTournament(8, 'neutral')).toEqual({ corrWeight: 3, mmcWeight: 15, tcWeight: 0 });
 		expect(getDefaultFormulaForTournament(12, 'neutral')).toEqual(DEFAULT_CRYPTO_SCORE_FORMULA);
 	});
 });
