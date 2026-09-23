@@ -6,6 +6,7 @@
 	import { line, curveMonotoneX } from 'd3-shape';
 	import type { ModelPerformance, ChartMetric, ModelSeries, ChartDataPoint } from '$lib/types.js';
 	import { invertVisibility, setAllVisible } from '$lib/utils/series-visibility.js';
+	import { focusedSeriesColor, toggleFocus } from '$lib/utils/series-focus.js';
 	import {
 		SCORE_ALPHA_WEIGHT,
 		SCORE_MPC_WEIGHT,
@@ -134,6 +135,10 @@
 
 	// State for model visibility
 	let modelVisibility = $state<Map<string, boolean>>(new Map());
+	// The model singled out by clicking one of its points, and what was visible
+	// before that — see focusModel.
+	let focusedModelId = $state<string | null>(null);
+	let visibilityBeforeFocus: Map<string, boolean> | null = null;
 
 	// Toggle unresolved rounds
 	let showUnresolved = $state(false);
@@ -552,7 +557,27 @@
 	}
 
 	function getLineColor(series: ExtendedModelSeries, metric: ChartMetric): string {
-		return useMetricColors ? metricConfig[metric].color : series.color;
+		const base = useMetricColors ? metricConfig[metric].color : series.color;
+		// One place decides colour, so focusing greys the lines and their points
+		// together without either forgetting.
+		return focusedSeriesColor(base, series.modelId, focusedModelId);
+	}
+
+	/**
+	 * Clicking a point singles that model out; clicking it again puts the chart
+	 * back as it was. The visible set is remembered on the way in, so legend
+	 * changes made while focused do not survive the trip back — what returns is
+	 * what the person was looking at before.
+	 */
+	function focusModel(modelId: string) {
+		const next = toggleFocus(focusedModelId, modelId);
+		if (next === null) {
+			if (visibilityBeforeFocus) modelVisibility = new Map(visibilityBeforeFocus);
+			visibilityBeforeFocus = null;
+		} else if (focusedModelId === null) {
+			visibilityBeforeFocus = new Map(modelVisibility);
+		}
+		focusedModelId = next;
 	}
 
 	// Tooltip handlers
@@ -1271,7 +1296,8 @@
 
 								<!-- Data points with hover -->
 								{#each validData as point}
-									<!-- svelte-ignore a11y_no_static_element_interactions -->
+									<!-- A point is a control now: clicking (or Enter/Space on it) focuses
+									     its model, so it carries the button role and keyboard handling. -->
 									<circle
 										cx={xScale(point.date)}
 										cy={yScale(point[metric] ?? 0)}
@@ -1280,10 +1306,22 @@
 										stroke={getLineColor(series, metric)}
 										stroke-width={point.resolved ? 1 : 2}
 										class="cursor-pointer transition-all hover:r-6"
-										role="img"
-										aria-label="{series.modelName} Round {point.roundNumber}: {metric} = {formatValue(point[metric])}"
+										role="button"
+										tabindex="0"
+										aria-label="{focusedModelId === series.modelId
+											? 'Stop focusing'
+											: 'Focus'} {series.modelName} — round {point.roundNumber}: {metric} = {formatValue(
+											point[metric]
+										)}"
 										onmouseenter={(e) => showTooltip(e, series, point)}
 										onmouseleave={hideTooltip}
+										onclick={() => focusModel(series.modelId)}
+										onkeydown={(e) => {
+											if (e.key === 'Enter' || e.key === ' ') {
+												e.preventDefault();
+												focusModel(series.modelId);
+											}
+										}}
 									/>
 								{/each}
 							{/each}
