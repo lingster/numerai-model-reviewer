@@ -10,7 +10,7 @@
 # lockdown and data directory, so the API and its jobs cannot drift apart.
 x-database-service: &database-service
   image: numerai-api:latest
-  restart: unless-stopped
+  restart: always
   # Run as a dedicated host user that owns only DATA_DIR, so an escape from
   # the container lands on a UID with nothing else on the host. Defaults to
   # the image's own unprivileged user.
